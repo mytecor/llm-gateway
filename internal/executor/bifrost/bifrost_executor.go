@@ -188,6 +188,16 @@ func slicesSort(values []string) {
 	}
 }
 
+func (e *BifrostExecutor) handleBifrostResult(ctx context.Context, target model.Target, kind model.RequestKind, started time.Time, bfErr *schemas.BifrostError) *model.CallError {
+	if bfErr != nil {
+		callErr := classifyBifrostError(ctx, bfErr)
+		e.logUpstreamFailure(ctx, target, kind, started, bfErr, callErr)
+		return callErr
+	}
+	e.logUpstreamSuccess(ctx, target, kind, started)
+	return nil
+}
+
 func (e *BifrostExecutor) Do(ctx context.Context, target model.Target, request model.ExecuteRequest) ([]byte, *model.CallError) {
 	started := time.Now()
 	bfContext := schemas.NewBifrostContext(ctx, schemas.NoDeadline)
@@ -199,12 +209,9 @@ func (e *BifrostExecutor) Do(ctx context.Context, target model.Target, request m
 			return nil, callErr
 		}
 		response, bfErr := e.client.ChatCompletionRequest(bfContext, chatRequest)
-		if bfErr != nil {
-			callErr := classifyBifrostError(ctx, bfErr)
-			e.logUpstreamFailure(ctx, target, request.Kind, started, bfErr, callErr)
+		if callErr := e.handleBifrostResult(ctx, target, request.Kind, started, bfErr); callErr != nil {
 			return nil, callErr
 		}
-		e.logUpstreamSuccess(ctx, target, request.Kind, started)
 		response.Model = target.Model
 		populateChatResponseReasoning(response)
 		return marshalSanitized(response, "")
@@ -215,12 +222,9 @@ func (e *BifrostExecutor) Do(ctx context.Context, target model.Target, request m
 			return nil, callErr
 		}
 		response, bfErr := e.client.ResponsesRequest(bfContext, responsesRequest)
-		if bfErr != nil {
-			callErr := classifyBifrostError(ctx, bfErr)
-			e.logUpstreamFailure(ctx, target, request.Kind, started, bfErr, callErr)
+		if callErr := e.handleBifrostResult(ctx, target, request.Kind, started, bfErr); callErr != nil {
 			return nil, callErr
 		}
-		e.logUpstreamSuccess(ctx, target, request.Kind, started)
 		response.Model = target.Model
 		return marshalSanitized(response, "")
 	default:
@@ -243,9 +247,7 @@ func (e *BifrostExecutor) Stream(ctx context.Context, target model.Target, reque
 			return nil, callErr
 		}
 		stream, bfErr := e.client.ChatCompletionStreamRequest(bfContext, chatRequest)
-		if bfErr != nil {
-			callErr := classifyBifrostError(ctx, bfErr)
-			e.logUpstreamFailure(ctx, target, request.Kind, started, bfErr, callErr)
+		if callErr := e.handleBifrostResult(ctx, target, request.Kind, started, bfErr); callErr != nil {
 			return nil, callErr
 		}
 		source = stream
@@ -256,16 +258,13 @@ func (e *BifrostExecutor) Stream(ctx context.Context, target model.Target, reque
 			return nil, callErr
 		}
 		stream, bfErr := e.client.ResponsesStreamRequest(bfContext, responsesRequest)
-		if bfErr != nil {
-			callErr := classifyBifrostError(ctx, bfErr)
-			e.logUpstreamFailure(ctx, target, request.Kind, started, bfErr, callErr)
+		if callErr := e.handleBifrostResult(ctx, target, request.Kind, started, bfErr); callErr != nil {
 			return nil, callErr
 		}
 		source = stream
 	default:
 		return nil, &model.CallError{Class: model.ErrorInvalid, Status: 400}
 	}
-	e.logUpstreamSuccess(ctx, target, request.Kind, started)
 
 	output := make(chan model.StreamEvent, 8)
 	go func() {
@@ -354,11 +353,22 @@ func (e *BifrostExecutor) logUpstreamSuccess(ctx context.Context, target model.T
 	)
 }
 
-func (e *BifrostExecutor) chatRequest(ctx *schemas.BifrostContext, target model.Target, body []byte) (*schemas.BifrostChatRequest, *model.CallError) {
+func (e *BifrostExecutor) prepareRequestBody(ctx *schemas.BifrostContext, target model.Target, body []byte) ([]byte, *model.CallError) {
 	provider := e.providers[target.Provider]
 	rewritten, err := rewriteRequestBody(body, target, provider.StripParams, provider.SetParams)
 	if err != nil {
 		return nil, &model.CallError{Class: model.ErrorInvalid, Status: 400, Cause: err}
+	}
+	if provider.BaseProvider == string(schemas.OpenAI) {
+		ctx.SetValue(schemas.BifrostContextKeyUseRawRequestBody, true)
+	}
+	return rewritten, nil
+}
+
+func (e *BifrostExecutor) chatRequest(ctx *schemas.BifrostContext, target model.Target, body []byte) (*schemas.BifrostChatRequest, *model.CallError) {
+	rewritten, callErr := e.prepareRequestBody(ctx, target, body)
+	if callErr != nil {
+		return nil, callErr
 	}
 	var wire struct {
 		Messages  []schemas.ChatMessage `json:"messages"`
@@ -382,16 +392,14 @@ func (e *BifrostExecutor) chatRequest(ctx *schemas.BifrostContext, target model.
 	}
 	if e.providers[target.Provider].BaseProvider == string(schemas.OpenAI) {
 		request.RawRequestBody = rewritten
-		ctx.SetValue(schemas.BifrostContextKeyUseRawRequestBody, true)
 	}
 	return request, nil
 }
 
 func (e *BifrostExecutor) responsesRequest(ctx *schemas.BifrostContext, target model.Target, body []byte) (*schemas.BifrostResponsesRequest, *model.CallError) {
-	provider := e.providers[target.Provider]
-	rewritten, err := rewriteRequestBody(body, target, provider.StripParams, provider.SetParams)
-	if err != nil {
-		return nil, &model.CallError{Class: model.ErrorInvalid, Status: 400, Cause: err}
+	rewritten, callErr := e.prepareRequestBody(ctx, target, body)
+	if callErr != nil {
+		return nil, callErr
 	}
 	var wire struct {
 		Input json.RawMessage `json:"input"`
@@ -415,7 +423,6 @@ func (e *BifrostExecutor) responsesRequest(ctx *schemas.BifrostContext, target m
 	}
 	if e.providers[target.Provider].BaseProvider == string(schemas.OpenAI) {
 		request.RawRequestBody = rewritten
-		ctx.SetValue(schemas.BifrostContextKeyUseRawRequestBody, true)
 	}
 	return request, nil
 }
@@ -523,7 +530,7 @@ func marshalSanitized(value any, logicalModel string) ([]byte, *model.CallError)
 	if err != nil {
 		return nil, &model.CallError{Class: model.ErrorInvalid, Status: 502, Cause: err, Scope: model.FailureScopeProvider}
 	}
-	data, err = sanitizeJSON(data, logicalModel)
+	data, err = model.SanitizeJSON(data, logicalModel)
 	if err != nil {
 		return nil, &model.CallError{Class: model.ErrorInvalid, Status: 502, Cause: err, Scope: model.FailureScopeProvider}
 	}
@@ -540,7 +547,7 @@ func sanitizeStreamChunk(chunk *schemas.BifrostStreamChunk, nativeModel string) 
 	if err != nil {
 		return nil, "", false, err
 	}
-	data, err = sanitizeJSON(data, nativeModel)
+	data, err = model.SanitizeJSON(data, nativeModel)
 	if err != nil {
 		return nil, "", false, err
 	}
@@ -588,25 +595,6 @@ func reasoningTextFromDetails(details []schemas.ChatReasoningDetails) string {
 	return builder.String()
 }
 
-func sanitizeJSON(data []byte, model string) ([]byte, error) {
-	var object map[string]any
-	if err := json.Unmarshal(data, &object); err != nil {
-		return nil, err
-	}
-	delete(object, "extra_fields")
-	delete(object, "provider_extra_fields")
-	if model != "" {
-		if _, exists := object["model"]; exists {
-			object["model"] = model
-		}
-		if response, ok := object["response"].(map[string]any); ok {
-			response["model"] = model
-			delete(response, "extra_fields")
-			delete(response, "provider_extra_fields")
-		}
-	}
-	return json.Marshal(object)
-}
 
 // MeaningfulPayload reports whether an SSE data payload carries substantive model output.
 func MeaningfulPayload(data []byte, event string) bool {

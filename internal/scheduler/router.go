@@ -225,21 +225,11 @@ func (r *Runner) admit(ctx context.Context, logical string, runtime *routeRuntim
 // Run executes the bounded non-streaming route graph and returns the winner
 // body.
 func (r *Runner) Run(ctx context.Context, logical string, request model.ExecuteRequest) ([]byte, *model.CallError) {
-	entry, ok := r.config.Models[logical]
-	if !ok {
-		return nil, &model.CallError{Class: model.ErrorInvalid, Status: 404, Scope: model.FailureScopeRequest}
+	outcome, err := r.RunWithResult(ctx, logical, request)
+	if err != nil {
+		return nil, err
 	}
-	runtime := newRouteRuntime(entry)
-	release, admitErr := r.admit(ctx, logical, runtime)
-	if admitErr != nil {
-		return nil, admitErr
-	}
-	defer release()
-	outcome := r.executeRoute(ctx, logical, entry, request, false, runtime)
-	if outcome.err != nil {
-		return nil, outcome.err
-	}
-	return outcome.body, nil
+	return outcome.Body, nil
 }
 
 // RunWithResult executes the non-streaming route graph and also reports the

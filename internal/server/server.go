@@ -304,33 +304,26 @@ func (s *Server) stream(writer http.ResponseWriter, request *http.Request, logic
 			if chunkID == "" {
 				chunkID = "chatcmpl-" + requestID
 			}
+			var delta map[string]any
 			if partial.GotToolCalls && len(partial.ToolCalls) > 0 {
 				idx := partial.ToolCalls[len(partial.ToolCalls)-1].Index
-				keepAliveChunk, _ := json.Marshal(map[string]any{
-					"id":     chunkID,
-					"object": "chat.completion.chunk",
-					"model":  logical,
-					"choices": []map[string]any{{
-						"index": 0,
-						"delta": map[string]any{
-							"tool_calls": []map[string]any{{
-								"index":    idx,
-								"function": map[string]any{"arguments": ""},
-							}},
-						},
+				delta = map[string]any{
+					"tool_calls": []map[string]any{{
+						"index":    idx,
+						"function": map[string]any{"arguments": ""},
 					}},
-				})
-				if _, err := fmt.Fprintf(writer, "data: %s\n\n", keepAliveChunk); err != nil {
-					return false
 				}
 			} else if !partial.GotText {
+				delta = map[string]any{"reasoning_content": " "}
+			}
+			if delta != nil {
 				keepAliveChunk, _ := json.Marshal(map[string]any{
 					"id":     chunkID,
 					"object": "chat.completion.chunk",
 					"model":  logical,
 					"choices": []map[string]any{{
 						"index": 0,
-						"delta": map[string]any{"reasoning_content": " "},
+						"delta": delta,
 					}},
 				})
 				if _, err := fmt.Fprintf(writer, "data: %s\n\n", keepAliveChunk); err != nil {
@@ -870,15 +863,13 @@ selectWait:
 				// the close is a takeover trigger; without it, surface the same
 				// structured retryable error as a mid-stream break so the
 				// provider enters cooldown and a retry-capable client retries.
-				if executeRequest.Kind == model.RequestChat && !sawFinishReason {
-					broken := &model.CallError{Class: model.ErrorUpstream, Status: http.StatusBadGateway,
-						Cause: errors.New("winner stream ended without finish_reason")}
+				handleStreamAbruptEnd := func(broken *model.CallError, reason string) bool {
 					telemetry.LogEvent(request.Context(), s.logger, slog.LevelWarn, "request_failed",
 						"kind", executeRequest.Kind, "logical_model", logical, "stream", true,
 						"provider", cur.Provider,
 						"native_model", cur.Model,
 						"status_code", model.CallErrorStatus(broken), "error_type", string(broken.Class),
-						"reason", "missing_finish_reason",
+						"reason", reason,
 						"attempts", cur.Attempts,
 						"duration_ms", time.Since(started).Milliseconds(),
 						"input_tokens", inTokens,
@@ -887,10 +878,17 @@ selectWait:
 						"has_usage", hasUsage,
 					)
 					s.runner.RecordStreamFailure(request.Context(), logical, cur.Provider, cur.Model, broken)
+					return takeover(broken) || holdForRecovery(broken)
+				}
+
+				if executeRequest.Kind == model.RequestChat && !sawFinishReason {
+					broken := &model.CallError{Class: model.ErrorUpstream, Status: http.StatusBadGateway,
+						Cause: errors.New("winner stream ended without finish_reason")}
+					recovered := handleStreamAbruptEnd(broken, "missing_finish_reason")
 					if finalizeCompletedStream() {
 						return
 					}
-					if takeover(broken) || holdForRecovery(broken) {
+					if recovered {
 						continue
 					}
 					s.observeRequest(request, logical, cur.Provider, cur.Model, "failed", time.Since(started))
@@ -912,21 +910,7 @@ selectWait:
 				if executeRequest.Kind == model.RequestChat && sawFinishReason && !partial.GotText && !partial.GotToolCalls {
 					broken := &model.CallError{Class: model.ErrorUpstream, Status: http.StatusBadGateway,
 						Cause: errors.New("winner stream ended with empty completion (no content, no tool calls)")}
-					telemetry.LogEvent(request.Context(), s.logger, slog.LevelWarn, "request_failed",
-						"kind", executeRequest.Kind, "logical_model", logical, "stream", true,
-						"provider", cur.Provider,
-						"native_model", cur.Model,
-						"status_code", model.CallErrorStatus(broken), "error_type", string(broken.Class),
-						"reason", "empty_completion",
-						"attempts", cur.Attempts,
-						"duration_ms", time.Since(started).Milliseconds(),
-						"input_tokens", inTokens,
-						"output_tokens", outTokens,
-						"cached_tokens", cachedTokens,
-						"has_usage", hasUsage,
-					)
-					s.runner.RecordStreamFailure(request.Context(), logical, cur.Provider, cur.Model, broken)
-					if takeover(broken) || holdForRecovery(broken) {
+					if handleStreamAbruptEnd(broken, "empty_completion") {
 						continue
 					}
 					s.observeRequest(request, logical, cur.Provider, cur.Model, "failed", time.Since(started))

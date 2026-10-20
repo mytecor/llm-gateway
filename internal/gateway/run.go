@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -42,7 +41,7 @@ func Run(arguments []string) error {
 			return err
 		}
 		if *requireEnvSecrets {
-			if err := policy.ValidateEnvSecretReferences(cfg, parseAllowedEnv(*allowedEnv)); err != nil {
+			if err := policy.ValidateEnvSecretReferences(cfg, policy.ParseAllowedEnv(*allowedEnv)); err != nil {
 				return fmt.Errorf("validate config: %w", err)
 			}
 		}
@@ -116,17 +115,6 @@ func Run(arguments []string) error {
 		}
 		return err
 	}
-}
-
-func parseAllowedEnv(value string) map[string]bool {
-	allowed := make(map[string]bool)
-	if value == "" {
-		return allowed
-	}
-	for _, name := range strings.Split(value, ",") {
-		allowed[name] = true
-	}
-	return allowed
 }
 
 func reportCatalogErrors(logger *slog.Logger, errorsByProvider map[string]error) {

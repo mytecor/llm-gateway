@@ -144,20 +144,24 @@ func (ac *AdmissionController) removeWaiter(q *admissionQueue, route string, tar
 	// If a slot was sent to target right before cancel/timeout, pass it along
 	select {
 	case <-target:
-		if len(q.waiters) > 0 {
-			next := q.waiters[0]
-			q.waiters = q.waiters[1:]
-			if ac.metrics != nil {
-				ac.metrics.ObserveRoutePending(route, len(q.waiters))
-			}
-			next <- struct{}{}
-		} else {
-			q.inFlight--
-			if ac.metrics != nil {
-				ac.metrics.ObserveRouteInFlight(route, q.inFlight)
-			}
-		}
+		ac.releaseSlotLocked(q, route)
 	default:
+	}
+}
+
+func (ac *AdmissionController) releaseSlotLocked(q *admissionQueue, route string) {
+	if len(q.waiters) > 0 {
+		next := q.waiters[0]
+		q.waiters = q.waiters[1:]
+		if ac.metrics != nil {
+			ac.metrics.ObserveRoutePending(route, len(q.waiters))
+		}
+		next <- struct{}{}
+	} else {
+		q.inFlight--
+		if ac.metrics != nil {
+			ac.metrics.ObserveRouteInFlight(route, q.inFlight)
+		}
 	}
 }
 
@@ -171,19 +175,7 @@ func (ac *AdmissionController) makeReleaser(route string) func() {
 			if !ok {
 				return
 			}
-			if len(q.waiters) > 0 {
-				next := q.waiters[0]
-				q.waiters = q.waiters[1:]
-				if ac.metrics != nil {
-					ac.metrics.ObserveRoutePending(route, len(q.waiters))
-				}
-				next <- struct{}{}
-			} else {
-				q.inFlight--
-				if ac.metrics != nil {
-					ac.metrics.ObserveRouteInFlight(route, q.inFlight)
-				}
-			}
+			ac.releaseSlotLocked(q, route)
 		})
 	}
 }

@@ -10,27 +10,8 @@ import (
 )
 
 func testConfig() Config {
-	var cfg Config
-	cfg.Host = "127.0.0.1"
-	cfg.Port = 9208
-	cfg.Providers = []Provider{
-		{ID: "a", BaseProvider: "openai", InferenceURL: "https://a.invalid", Priority: 20},
-		{ID: "b", BaseProvider: "openai", InferenceURL: "https://b.invalid", Priority: 10},
-		{ID: "c", BaseProvider: "openai", InferenceURL: "https://c.invalid", Priority: 5},
-	}
-	cfg.RoutingRules = RoutingRules{
-		filterModel("standard", "standard"),
-		filterProvider("standard", "a", "b"),
-		mapRule("standard", "native-model"),
-		rankRule("standard"),
-		raceRule("standard", 2),
-		retryRule("standard", "standard.retry", 1),
-		filterError("standard.retry", "429", "5xx", "timeout", "connection_error"),
-		filterProviderUnused("standard.retry", "a", "b", "c"),
-		mapRule("standard.retry", "native-model"),
-		rankRule("standard.retry"),
-		raceRule("standard.retry", 1),
-	}
+	cfg := TestConfig()
+	cfg.LogLevel = ""
 	return cfg
 }
 
