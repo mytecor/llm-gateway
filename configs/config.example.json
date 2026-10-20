@@ -1,0 +1,114 @@
+{
+  "host": "127.0.0.1",
+  "port": 9208,
+  "metrics_host": "127.0.0.1",
+  "metrics_port": 9209,
+  "log_level": "info",
+  "catalog_refresh_interval": "10m",
+  "client_api_keys": [
+    {
+      "id": "client-app",
+      "key": "env.LLM_GATEWAY_CLIENT_KEY"
+    }
+  ],
+  "providers": [
+    {
+      "id": "upstream-primary",
+      "base_provider": "openai",
+      "inference_url": "https://api.openai.com/v1",
+      "api_key": "env.OPENAI_API_KEY",
+      "priority": 10,
+      "cooldown": "15s",
+      "request_timeout": "60s"
+    },
+    {
+      "id": "upstream-backup",
+      "base_provider": "openai",
+      "inference_url": "https://api.openai.com/v1",
+      "api_key": "env.BACKUP_API_KEY",
+      "priority": 5,
+      "cooldown": "15s",
+      "request_timeout": "60s"
+    }
+  ],
+  "routing_rules": [
+    {
+      "route": "standard",
+      "action": "filter",
+      "where": {
+        "model": {
+          "eq": "standard"
+        }
+      }
+    },
+    {
+      "route": "standard",
+      "action": "filter",
+      "where": {
+        "provider": {
+          "in": ["upstream-primary", "upstream-backup"]
+        }
+      }
+    },
+    {
+      "route": "standard",
+      "action": "map",
+      "native": "gpt-4o"
+    },
+    {
+      "route": "standard",
+      "action": "rank",
+      "strategy": "priority"
+    },
+    {
+      "route": "standard",
+      "action": "race",
+      "count": 1
+    },
+    {
+      "route": "standard",
+      "action": "retry",
+      "target": "standard.retry",
+      "attempts": 2,
+      "backoff": {
+        "type": "exponential",
+        "initial": "200ms",
+        "max": "1s"
+      }
+    },
+    {
+      "route": "standard.retry",
+      "action": "filter",
+      "where": {
+        "error": {
+          "in": ["429", "5xx", "timeout", "connection_error", "invalid_response"]
+        }
+      }
+    },
+    {
+      "route": "standard.retry",
+      "action": "filter",
+      "where": {
+        "provider": {
+          "in": ["upstream-primary", "upstream-backup"],
+          "unused": true
+        }
+      }
+    },
+    {
+      "route": "standard.retry",
+      "action": "map",
+      "native": "gpt-4o"
+    },
+    {
+      "route": "standard.retry",
+      "action": "rank",
+      "strategy": "priority"
+    },
+    {
+      "route": "standard.retry",
+      "action": "race",
+      "count": 1
+    }
+  ]
+}

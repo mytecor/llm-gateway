@@ -1,0 +1,653 @@
+package gateway
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	bifrost "github.com/maximhq/bifrost/core"
+	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/tidwall/sjson"
+)
+
+type bifrostAccount struct {
+	providers []schemas.ModelProvider
+	configs   map[schemas.ModelProvider]*schemas.ProviderConfig
+	keys      map[schemas.ModelProvider][]schemas.Key
+}
+
+func (a *bifrostAccount) GetConfiguredProviders() ([]schemas.ModelProvider, error) {
+	return append([]schemas.ModelProvider(nil), a.providers...), nil
+}
+
+func (a *bifrostAccount) GetConfigForProvider(provider schemas.ModelProvider) (*schemas.ProviderConfig, error) {
+	config, ok := a.configs[provider]
+	if !ok {
+		return nil, fmt.Errorf("provider is not configured")
+	}
+	copy := *config
+	return &copy, nil
+}
+
+func (a *bifrostAccount) GetKeysForProvider(_ context.Context, provider schemas.ModelProvider) ([]schemas.Key, error) {
+	keys, ok := a.keys[provider]
+	if !ok {
+		return nil, fmt.Errorf("provider has no key configuration")
+	}
+	return append([]schemas.Key(nil), keys...), nil
+}
+
+type silentLogger struct{}
+
+func (silentLogger) Debug(string, ...any)                   {}
+func (silentLogger) Info(string, ...any)                    {}
+func (silentLogger) Warn(string, ...any)                    {}
+func (silentLogger) Error(string, ...any)                   {}
+func (silentLogger) Fatal(string, ...any)                   { panic("bifrost fatal error") }
+func (silentLogger) SetLevel(schemas.LogLevel)              {}
+func (silentLogger) SetOutputType(schemas.LoggerOutputType) {}
+func (silentLogger) LogHTTPRequest(schemas.LogLevel, string) schemas.LogEventBuilder {
+	return schemas.NoopLogEvent
+}
+
+type BifrostExecutor struct {
+	client           *bifrost.Bifrost
+	providers        map[string]Provider
+	bifrostProviders map[string]schemas.ModelProvider
+	logger           *slog.Logger
+}
+
+func newBifrostExecutor(ctx context.Context, config *compiledConfig) (*BifrostExecutor, error) {
+	account := &bifrostAccount{
+		configs: make(map[schemas.ModelProvider]*schemas.ProviderConfig, len(config.providers)),
+		keys:    make(map[schemas.ModelProvider][]schemas.Key, len(config.providers)),
+	}
+	bifrostProviders := make(map[string]schemas.ModelProvider, len(config.providers))
+	for _, id := range sortedProviderIDs(config.providers) {
+		provider := config.providers[id]
+		baseProvider := schemas.ModelProvider(provider.BaseProvider)
+		providerKey, custom, err := bifrostProviderKey(provider)
+		if err != nil {
+			return nil, err
+		}
+		bifrostProviders[provider.ID] = providerKey
+		account.providers = append(account.providers, providerKey)
+		var customConfig *schemas.CustomProviderConfig
+		if custom {
+			customConfig = &schemas.CustomProviderConfig{
+				BaseProviderType: baseProvider,
+				IsKeyLess:        provider.APIKey == "" && provider.VertexAuthCredentials == "",
+			}
+		}
+		// The OpenAI-compatible adapter pads a hard-coded "/v1" onto the base URL
+		// unless a path override is supplied. We pin the request paths to their
+		// "/v1"-free form so provider.InferenceURL fully decides the version
+		// prefix: a provider may serve its OpenAI API under "/v1" or under an
+		// arbitrary routed path (e.g. "/functions/v1/gonka"). The override is
+		// scoped to the OpenAI adapter so other base providers keep their native
+		// paths (e.g. Anthropic's "/v1/messages").
+		if custom && baseProvider == schemas.OpenAI {
+			customConfig.RequestPathOverrides = map[schemas.RequestType]string{
+				schemas.ChatCompletionRequest:       "/chat/completions",
+				schemas.ChatCompletionStreamRequest: "/chat/completions",
+				schemas.ResponsesRequest:            "/responses",
+				schemas.ResponsesStreamRequest:      "/responses",
+			}
+		}
+		account.configs[providerKey] = &schemas.ProviderConfig{
+			NetworkConfig: schemas.NetworkConfig{
+				BaseURL:                        provider.InferenceURL,
+				ExtraHeaders:                   provider.Headers,
+				DefaultRequestTimeoutInSeconds: max(1, int(provider.RequestTimeout.Duration/time.Second)),
+				MaxRetries:                     provider.BifrostMaxRetries,
+				AllowPrivateNetwork:            provider.AllowPrivateNetwork,
+			},
+			CustomProviderConfig:    customConfig,
+			SendBackRawRequest:      false,
+			SendBackRawResponse:     false,
+			StoreRawRequestResponse: false,
+		}
+		key := bifrostKeyForProvider(provider, baseProvider)
+		account.keys[providerKey] = []schemas.Key{key}
+	}
+	client, err := bifrost.Init(ctx, schemas.BifrostConfig{
+		Account:         account,
+		Logger:          silentLogger{},
+		InitialPoolSize: 64,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("initialize Bifrost: %w", err)
+	}
+	for providerID, providerKey := range bifrostProviders {
+		if client.GetProviderByKey(providerKey) == nil {
+			client.Shutdown()
+			return nil, fmt.Errorf("initialize Bifrost provider %q as %q: provider was not prepared", providerID, providerKey)
+		}
+	}
+	return &BifrostExecutor{
+		client:           client,
+		providers:        config.providers,
+		bifrostProviders: bifrostProviders,
+		logger:           config.logger,
+	}, nil
+}
+
+// bifrostProviderKey translates the stable Lattice provider ID into the key
+// Bifrost expects. Most configured instances are custom providers and retain
+// their Lattice ID. Vertex is different: Bifrost implements it only as the
+// built-in `vertex` provider, so requests use that key while routing, metrics
+// and cooldown state continue to use the external `google-vertex` ID.
+func bifrostProviderKey(provider Provider) (schemas.ModelProvider, bool, error) {
+	baseProvider := schemas.ModelProvider(provider.BaseProvider)
+	if bifrost.IsSupportedBaseProvider(baseProvider) {
+		return schemas.ModelProvider(provider.ID), true, nil
+	}
+	if baseProvider == schemas.Vertex {
+		return schemas.Vertex, false, nil
+	}
+	return "", false, fmt.Errorf("provider %q has unsupported Bifrost base_provider %q", provider.ID, provider.BaseProvider)
+}
+
+func bifrostKeyForProvider(provider Provider, baseProvider schemas.ModelProvider) schemas.Key {
+	key := schemas.Key{
+		ID:      "key-" + provider.ID,
+		Name:    "key-" + provider.ID,
+		Models:  schemas.WhiteList{"*"},
+		Weight:  1,
+		Enabled: schemas.Ptr(true),
+	}
+	if provider.APIKey != "" {
+		key.Value = *schemas.NewSecretVar(provider.APIKey)
+	}
+	if baseProvider == schemas.Vertex {
+		key.VertexKeyConfig = &schemas.VertexKeyConfig{
+			ProjectID:       *schemas.NewSecretVar(provider.VertexProjectID),
+			ProjectNumber:   *schemas.NewSecretVar(provider.VertexProjectNumber),
+			Region:          *schemas.NewSecretVar(provider.VertexRegion),
+			AuthCredentials: *schemas.NewSecretVar(provider.VertexAuthCredentials),
+		}
+	}
+	return key
+}
+
+func sortedProviderIDs(providers map[string]Provider) []string {
+	ids := make([]string, 0, len(providers))
+	for id := range providers {
+		ids = append(ids, id)
+	}
+	slicesSort(ids)
+	return ids
+}
+
+func slicesSort(values []string) {
+	for i := 1; i < len(values); i++ {
+		for j := i; j > 0 && values[j] < values[j-1]; j-- {
+			values[j], values[j-1] = values[j-1], values[j]
+		}
+	}
+}
+
+func (e *BifrostExecutor) Do(ctx context.Context, target Target, request ExecuteRequest) ([]byte, *CallError) {
+	started := time.Now()
+	bfContext := schemas.NewBifrostContext(ctx, schemas.NoDeadline)
+	switch request.Kind {
+	case RequestChat:
+		chatRequest, callErr := e.chatRequest(bfContext, target, request.Body)
+		if callErr != nil {
+			e.logRequestBuildError(ctx, target, request.Kind, callErr)
+			return nil, callErr
+		}
+		response, bfErr := e.client.ChatCompletionRequest(bfContext, chatRequest)
+		if bfErr != nil {
+			callErr := classifyBifrostError(ctx, bfErr)
+			e.logUpstreamFailure(ctx, target, request.Kind, started, bfErr, callErr)
+			return nil, callErr
+		}
+		e.logUpstreamSuccess(ctx, target, request.Kind, started)
+		response.Model = target.Model
+		populateChatResponseReasoning(response)
+		return marshalSanitized(response, "")
+	case RequestResponses:
+		responsesRequest, callErr := e.responsesRequest(bfContext, target, request.Body)
+		if callErr != nil {
+			e.logRequestBuildError(ctx, target, request.Kind, callErr)
+			return nil, callErr
+		}
+		response, bfErr := e.client.ResponsesRequest(bfContext, responsesRequest)
+		if bfErr != nil {
+			callErr := classifyBifrostError(ctx, bfErr)
+			e.logUpstreamFailure(ctx, target, request.Kind, started, bfErr, callErr)
+			return nil, callErr
+		}
+		e.logUpstreamSuccess(ctx, target, request.Kind, started)
+		response.Model = target.Model
+		return marshalSanitized(response, "")
+	default:
+		return nil, &CallError{Class: ErrorInvalid, Status: 400}
+	}
+}
+
+func (e *BifrostExecutor) Stream(ctx context.Context, target Target, request ExecuteRequest) (<-chan StreamEvent, *CallError) {
+	started := time.Now()
+	bfContext := schemas.NewBifrostContext(ctx, schemas.NoDeadline)
+	if request.StreamIdleTimeout > 0 {
+		bfContext.SetValue(schemas.BifrostContextKeyStreamIdleTimeout, request.StreamIdleTimeout)
+	}
+	var source <-chan *schemas.BifrostStreamChunk
+	switch request.Kind {
+	case RequestChat:
+		chatRequest, callErr := e.chatRequest(bfContext, target, request.Body)
+		if callErr != nil {
+			e.logRequestBuildError(ctx, target, request.Kind, callErr)
+			return nil, callErr
+		}
+		stream, bfErr := e.client.ChatCompletionStreamRequest(bfContext, chatRequest)
+		if bfErr != nil {
+			callErr := classifyBifrostError(ctx, bfErr)
+			e.logUpstreamFailure(ctx, target, request.Kind, started, bfErr, callErr)
+			return nil, callErr
+		}
+		source = stream
+	case RequestResponses:
+		responsesRequest, callErr := e.responsesRequest(bfContext, target, request.Body)
+		if callErr != nil {
+			e.logRequestBuildError(ctx, target, request.Kind, callErr)
+			return nil, callErr
+		}
+		stream, bfErr := e.client.ResponsesStreamRequest(bfContext, responsesRequest)
+		if bfErr != nil {
+			callErr := classifyBifrostError(ctx, bfErr)
+			e.logUpstreamFailure(ctx, target, request.Kind, started, bfErr, callErr)
+			return nil, callErr
+		}
+		source = stream
+	default:
+		return nil, &CallError{Class: ErrorInvalid, Status: 400}
+	}
+	e.logUpstreamSuccess(ctx, target, request.Kind, started)
+
+	output := make(chan StreamEvent, 8)
+	go func() {
+		defer close(output)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case chunk, ok := <-source:
+				if !ok {
+					return
+				}
+				if chunk == nil {
+					continue
+				}
+				if chunk.BifrostError != nil {
+					callErr := classifyBifrostError(ctx, chunk.BifrostError)
+					e.logUpstreamFailure(ctx, target, request.Kind, started, chunk.BifrostError, callErr)
+					select {
+					case output <- StreamEvent{Err: callErr}:
+					case <-ctx.Done():
+					}
+					return
+				}
+				data, event, meaningful, err := sanitizeStreamChunk(chunk, target.Model)
+				if err != nil {
+					select {
+					case output <- StreamEvent{Err: &CallError{Class: ErrorInvalid, Status: 502, Cause: err, Scope: FailureScopeProvider}}:
+					case <-ctx.Done():
+					}
+					return
+				}
+				select {
+				case output <- StreamEvent{Data: data, Event: event, Meaningful: meaningful}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return output, nil
+}
+
+func (e *BifrostExecutor) logRequestBuildError(ctx context.Context, target Target, kind RequestKind, callErr *CallError) {
+	attrs := []any{
+		"provider", target.Provider,
+		"native_model", target.Model,
+		"kind", kind,
+		"status_code", callErr.Status,
+		"error_type", string(callErr.Class),
+	}
+	if callErr.Cause != nil {
+		attrs = append(attrs, "detail", safeLogDetail(callErr.Cause.Error()))
+	}
+	logEvent(ctx, e.logger, slog.LevelWarn, "provider_request_rejected", attrs...)
+}
+
+func (e *BifrostExecutor) logUpstreamFailure(ctx context.Context, target Target, kind RequestKind, started time.Time, bfErr *schemas.BifrostError, callErr *CallError) {
+	attrs := []any{
+		"provider", target.Provider,
+		"native_model", target.Model,
+		"kind", kind,
+		"status_code", callErr.Status,
+		"error_type", string(callErr.Class),
+		"duration_ms", time.Since(started).Milliseconds(),
+	}
+	if bfErr != nil {
+		if detail := safeLogDetail(bfErr.GetErrorString()); detail != "" {
+			attrs = append(attrs, "detail", detail)
+		}
+	}
+	if callErr.Class == ErrorCancelled {
+		logEvent(ctx, e.logger, slog.LevelDebug, "upstream_request_cancelled", attrs...)
+		return
+	}
+	logEvent(ctx, e.logger, slog.LevelWarn, "upstream_request_failed", attrs...)
+}
+
+func (e *BifrostExecutor) logUpstreamSuccess(ctx context.Context, target Target, kind RequestKind, started time.Time) {
+	logEvent(ctx, e.logger, slog.LevelDebug, "upstream_request_accepted",
+		"provider", target.Provider,
+		"native_model", target.Model,
+		"kind", kind,
+		"status_code", 200,
+		"duration_ms", time.Since(started).Milliseconds(),
+	)
+}
+
+func (e *BifrostExecutor) chatRequest(ctx *schemas.BifrostContext, target Target, body []byte) (*schemas.BifrostChatRequest, *CallError) {
+	provider := e.providers[target.Provider]
+	rewritten, err := rewriteRequestBody(body, target, provider.StripParams, provider.SetParams)
+	if err != nil {
+		return nil, &CallError{Class: ErrorInvalid, Status: 400, Cause: err}
+	}
+	var wire struct {
+		Messages  []schemas.ChatMessage `json:"messages"`
+		MaxTokens *int                  `json:"max_tokens"`
+	}
+	if err := json.Unmarshal(rewritten, &wire); err != nil || len(wire.Messages) == 0 {
+		return nil, &CallError{Class: ErrorInvalid, Status: 400, Cause: err}
+	}
+	params := &schemas.ChatParameters{}
+	if err := json.Unmarshal(rewritten, params); err != nil {
+		return nil, &CallError{Class: ErrorInvalid, Status: 400, Cause: err}
+	}
+	if params.MaxCompletionTokens == nil && wire.MaxTokens != nil {
+		params.MaxCompletionTokens = wire.MaxTokens
+	}
+	request := &schemas.BifrostChatRequest{
+		Provider: e.bifrostProviders[target.Provider],
+		Model:    target.Model,
+		Input:    wire.Messages,
+		Params:   params,
+	}
+	if e.providers[target.Provider].BaseProvider == string(schemas.OpenAI) {
+		request.RawRequestBody = rewritten
+		ctx.SetValue(schemas.BifrostContextKeyUseRawRequestBody, true)
+	}
+	return request, nil
+}
+
+func (e *BifrostExecutor) responsesRequest(ctx *schemas.BifrostContext, target Target, body []byte) (*schemas.BifrostResponsesRequest, *CallError) {
+	provider := e.providers[target.Provider]
+	rewritten, err := rewriteRequestBody(body, target, provider.StripParams, provider.SetParams)
+	if err != nil {
+		return nil, &CallError{Class: ErrorInvalid, Status: 400, Cause: err}
+	}
+	var wire struct {
+		Input json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(rewritten, &wire); err != nil {
+		return nil, &CallError{Class: ErrorInvalid, Status: 400, Cause: err}
+	}
+	input, err := parseResponsesInput(wire.Input)
+	if err != nil {
+		return nil, &CallError{Class: ErrorInvalid, Status: 400, Cause: err}
+	}
+	params := &schemas.ResponsesParameters{}
+	if err := json.Unmarshal(rewritten, params); err != nil {
+		return nil, &CallError{Class: ErrorInvalid, Status: 400, Cause: err}
+	}
+	request := &schemas.BifrostResponsesRequest{
+		Provider: e.bifrostProviders[target.Provider],
+		Model:    target.Model,
+		Input:    input,
+		Params:   params,
+	}
+	if e.providers[target.Provider].BaseProvider == string(schemas.OpenAI) {
+		request.RawRequestBody = rewritten
+		ctx.SetValue(schemas.BifrostContextKeyUseRawRequestBody, true)
+	}
+	return request, nil
+}
+
+// rewriteRequestBody sets the routed native model and, per the target
+// provider's strip_params, removes top-level reasoning-control keys the
+// upstream does not support, then applies set_params, which force the listed
+// top-level keys to fixed JSON values (used to hard-disable reasoning upstream,
+// e.g. thinking:{"type":"disabled"}). The gateway serves clients that encode a
+// provider-specific reasoning control (zai's `thinking`) which generic
+// OpenAI-compatible upstreams (hyperfusion/litellm) reject with 400; stripping
+// it lets such a provider carry the same logical model with that control
+// removed, while other providers keep their native control. Keys are removed
+// top-level only: nested fields (e.g. a per-message reasoning block) are
+// preserved. Stripping runs before setting, so a key present in both ends up as
+// its forced value.
+func rewriteRequestBody(body []byte, target Target, strip []string, set map[string]json.RawMessage) ([]byte, error) {
+	rewritten, err := sjson.SetBytes(body, "model", target.Model)
+	if err != nil {
+		return nil, err
+	}
+	for _, key := range strip {
+		rewritten, err = sjson.DeleteBytes(rewritten, key)
+		if err != nil {
+			return nil, err
+		}
+	}
+	for key, value := range set {
+		rewritten, err = sjson.SetRawBytes(rewritten, key, value)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return rewritten, nil
+}
+
+func parseResponsesInput(raw json.RawMessage) ([]schemas.ResponsesMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, errors.New("input is required")
+	}
+	if trimmed[0] == '"' {
+		var text string
+		if err := json.Unmarshal(trimmed, &text); err != nil {
+			return nil, err
+		}
+		messageType := schemas.ResponsesMessageTypeMessage
+		role := schemas.ResponsesInputMessageRoleUser
+		return []schemas.ResponsesMessage{{
+			Type:    &messageType,
+			Role:    &role,
+			Content: &schemas.ResponsesMessageContent{ContentStr: &text},
+		}}, nil
+	}
+	var messages []schemas.ResponsesMessage
+	if err := json.Unmarshal(trimmed, &messages); err != nil {
+		return nil, fmt.Errorf("input must be a string or array: %w", err)
+	}
+	if len(messages) == 0 {
+		return nil, errors.New("input must not be empty")
+	}
+	return messages, nil
+}
+
+func classifyBifrostError(ctx context.Context, err *schemas.BifrostError) *CallError {
+	if ctx.Err() != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return &CallError{Class: ErrorTimeout, Status: 504, Cause: ctx.Err()}
+		}
+		return &CallError{Class: ErrorCancelled, Status: 499, Cause: ctx.Err()}
+	}
+	status := 502
+	if err != nil && err.StatusCode != nil {
+		status = *err.StatusCode
+	}
+	switch {
+	case status == 429:
+		return &CallError{Class: ErrorRateLimit, Status: status, Scope: FailureScopeProvider}
+	case status == 401 || status == 402 || status == 403:
+		return &CallError{Class: ErrorUpstream, Status: status, Scope: FailureScopeProvider}
+	case status == 404 || status == 410:
+		return &CallError{Class: ErrorNotFound, Status: status, Scope: FailureScopeTarget}
+	case status == 408 || status == 504:
+		return &CallError{Class: ErrorTimeout, Status: status, Scope: FailureScopeProvider}
+	case status >= 500:
+		return &CallError{Class: ErrorUpstream, Status: status, Scope: FailureScopeProvider}
+	}
+	message := ""
+	if err != nil && err.Error != nil {
+		message = strings.ToLower(err.Error.Message)
+	}
+	if strings.Contains(message, "timeout") || strings.Contains(message, "deadline") {
+		return &CallError{Class: ErrorTimeout, Status: 504, Scope: FailureScopeProvider}
+	}
+	if strings.Contains(message, "connection") || strings.Contains(message, "network") || strings.Contains(message, "dns") {
+		return &CallError{Class: ErrorConnection, Status: 502, Scope: FailureScopeProvider}
+	}
+	// The rejection came from one concrete upstream target. Another eligible
+	// target may support the parameters or context size, so retry may reschedule.
+	return &CallError{Class: ErrorInvalid, Status: status, Scope: FailureScopeTarget}
+}
+
+func marshalSanitized(value any, logicalModel string) ([]byte, *CallError) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, &CallError{Class: ErrorInvalid, Status: 502, Cause: err, Scope: FailureScopeProvider}
+	}
+	data, err = sanitizeJSON(data, logicalModel)
+	if err != nil {
+		return nil, &CallError{Class: ErrorInvalid, Status: 502, Cause: err, Scope: FailureScopeProvider}
+	}
+	return data, nil
+}
+
+func sanitizeStreamChunk(chunk *schemas.BifrostStreamChunk, nativeModel string) ([]byte, string, bool, error) {
+	event := ""
+	if chunk.BifrostResponsesStreamResponse != nil {
+		event = string(chunk.BifrostResponsesStreamResponse.Type)
+	}
+	populateChatResponseReasoning(chunk.BifrostChatResponse)
+	data, err := json.Marshal(chunk)
+	if err != nil {
+		return nil, "", false, err
+	}
+	data, err = sanitizeJSON(data, nativeModel)
+	if err != nil {
+		return nil, "", false, err
+	}
+	return data, event, meaningfulPayload(data, event), nil
+}
+
+// populateChatResponseReasoning backfills Reasoning (and therefore
+// reasoning_content on marshal) from ReasoningDetails entries of type
+// "reasoning.text" when a provider adapter (such as Bifrost's Gemini/Vertex
+// converter) populates only ReasoningDetails.
+func populateChatResponseReasoning(response *schemas.BifrostChatResponse) {
+	if response == nil {
+		return
+	}
+	for i := range response.Choices {
+		choice := &response.Choices[i]
+		if choice.ChatNonStreamResponseChoice != nil &&
+			choice.ChatNonStreamResponseChoice.Message != nil &&
+			choice.ChatNonStreamResponseChoice.Message.ChatAssistantMessage != nil {
+			msg := choice.ChatNonStreamResponseChoice.Message.ChatAssistantMessage
+			if msg.Reasoning == nil || *msg.Reasoning == "" {
+				if text := reasoningTextFromDetails(msg.ReasoningDetails); text != "" {
+					msg.Reasoning = &text
+				}
+			}
+		}
+		if choice.ChatStreamResponseChoice != nil && choice.ChatStreamResponseChoice.Delta != nil {
+			delta := choice.ChatStreamResponseChoice.Delta
+			if delta.Reasoning == nil || *delta.Reasoning == "" {
+				if text := reasoningTextFromDetails(delta.ReasoningDetails); text != "" {
+					delta.Reasoning = &text
+				}
+			}
+		}
+	}
+}
+
+func reasoningTextFromDetails(details []schemas.ChatReasoningDetails) string {
+	var builder strings.Builder
+	for _, detail := range details {
+		if detail.Type == schemas.BifrostReasoningDetailsTypeText && detail.Text != nil {
+			builder.WriteString(*detail.Text)
+		}
+	}
+	return builder.String()
+}
+
+func sanitizeJSON(data []byte, model string) ([]byte, error) {
+	var object map[string]any
+	if err := json.Unmarshal(data, &object); err != nil {
+		return nil, err
+	}
+	delete(object, "extra_fields")
+	delete(object, "provider_extra_fields")
+	if model != "" {
+		if _, exists := object["model"]; exists {
+			object["model"] = model
+		}
+		if response, ok := object["response"].(map[string]any); ok {
+			response["model"] = model
+			delete(response, "extra_fields")
+			delete(response, "provider_extra_fields")
+		}
+	}
+	return json.Marshal(object)
+}
+
+func meaningfulPayload(data []byte, event string) bool {
+	if event != "" {
+		switch event {
+		case "response.output_text.delta", "response.reasoning_summary_text.delta",
+			"response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
+			var object map[string]any
+			if json.Unmarshal(data, &object) == nil {
+				if delta, ok := object["delta"].(string); ok {
+					return delta != ""
+				}
+			}
+		}
+		return false
+	}
+	var object struct {
+		Choices []struct {
+			Delta map[string]json.RawMessage `json:"delta"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(data, &object) != nil {
+		return false
+	}
+	for _, choice := range object.Choices {
+		for _, key := range []string{"content", "reasoning", "reasoning_content", "tool_calls"} {
+			raw := bytes.TrimSpace(choice.Delta[key])
+			if len(raw) > 0 && !bytes.Equal(raw, []byte("null")) && !bytes.Equal(raw, []byte(`""`)) && !bytes.Equal(raw, []byte("[]")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (e *BifrostExecutor) Close() error {
+	if e.client != nil {
+		e.client.Shutdown()
+	}
+	return nil
+}

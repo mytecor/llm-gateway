@@ -452,10 +452,22 @@ providers и сохраняют свой deployment ID. Vertex является 
     {"route": "standard.fallback", "action": "race", "count": 1}
   ]
 
-## Запуск
+## Сборка и запуск
+
+Сборка бинарника:
 
 ```sh
-go run . --config /path/to/config.json serve
+go build -o bin/llm-gateway ./cmd/llm-gateway
+# или
+make build
+```
+
+Запуск:
+
+```sh
+go run ./cmd/llm-gateway --config /path/to/config.json serve
+# или
+./bin/llm-gateway --config /path/to/config.json serve
 ```
 
 или через Nix package:
@@ -468,14 +480,22 @@ nix build .#packages.x86_64-linux.llm-gateway
 [`modules/llm-gateway`](https://github.com/mytecor/lattice/tree/main/modules/llm-gateway). Homelab mapping находится в
 [`nodes/mytecor-homelab/config.nix`](https://github.com/mytecor/lattice/blob/main/nodes/mytecor-homelab/config.nix).
 
-## Проверка
+## Проверка и тесты
 
 ```sh
 go test ./...
 go test -race ./...
-go run . --require-env-secrets --allowed-env CLIENT_KEY,PROVIDER_KEY \
+go run ./cmd/llm-gateway --require-env-secrets --allowed-env CLIENT_KEY,PROVIDER_KEY \
   --config /path/to/config.json check
 nix flake check --no-build
+```
+
+Через `make`:
+
+```sh
+make test       # запуск юнит-тестов
+make test-race  # тесты с race detector
+make lint       # линтер (golangci-lint / go vet)
 ```
 
 `check` выполняет strict decode и компиляцию route graph, но не резолвит

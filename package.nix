@@ -7,6 +7,9 @@ buildGo127Module {
   src = ./.;
   vendorHash = "sha256-B/415ItBAOXkwiVUxDzFXqkx2BAoF2Ygz84/0uTui9o=";
 
+  subPackages = [ "cmd/llm-gateway" ];
+  checkFlags = [ "./..." ];
+
   doCheck = true;
 
   meta = {
