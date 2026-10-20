@@ -1,4 +1,4 @@
-module github.com/mytecor/lattice/llm-gateway
+module github.com/mytecor/llm-gateway
 
 go 1.27.0
 

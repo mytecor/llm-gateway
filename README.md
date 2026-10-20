@@ -1,8 +1,8 @@
-# Lattice LLM Gateway
+# LLM Gateway
 
 Небольшой OpenAI-compatible HTTP proxy на Go. Он использует
 [Bifrost Core](https://github.com/maximhq/bifrost) через Go API как provider execution layer, но
-сам владеет клиентским API, logical models, model discovery и routing policy Lattice.
+сам владеет клиентским API, logical models, model discovery и routing policy.
 
 Пакет не содержит встроенных provider names, logical model IDs или mappings. Они полностью
 задаются конфигурацией конкретного deployment. Клиенты видят только объявленные logical models и
@@ -105,7 +105,7 @@ curl -s localhost:9209/metrics
 
 По `request_id` в журнале и в Prometheus-графе можно восстановить путь запроса: какие
 `request_completed`/`llm_retry`/`llm_fallback`-строки принадлежат одному запросу и где
-произошёл переход в retry/fallback/race (см. [f12-02](../../roadmap/f12-observability/f12-02-gateway-structured-events.md)).
+произошёл переход в retry/fallback/race (см. [f12-02](https://github.com/mytecor/lattice/blob/main/roadmap/f12-observability/f12-02-gateway-structured-events.md)).
 
 ## Обрывы winner-стрима
 
@@ -465,8 +465,8 @@ nix build .#packages.x86_64-linux.llm-gateway
 ```
 
 На NixOS runtime настраивается через
-[`modules/llm-gateway`](../../modules/llm-gateway/README.md). Homelab mapping находится в
-[`nodes/mytecor-homelab/config.nix`](../../nodes/mytecor-homelab/config.nix).
+[`modules/llm-gateway`](https://github.com/mytecor/lattice/tree/main/modules/llm-gateway). Homelab mapping находится в
+[`nodes/mytecor-homelab/config.nix`](https://github.com/mytecor/lattice/blob/main/nodes/mytecor-homelab/config.nix).
 
 ## Проверка
 
@@ -545,11 +545,11 @@ runtime credentials. `--require-env-secrets` запрещает literal credenti
   (`metrics_host:metrics_port`); он намеренно не публичен и не раскрывает provider credentials.
 
 Полный план и незавершённые шаги cutover находятся в
-[`f7-07-bifrost-go-proxy.md`](../../roadmap/f7-llm-gateway/f7-07-bifrost-go-proxy.md).
+[`f7-07-bifrost-go-proxy.md`](https://github.com/mytecor/lattice/blob/main/roadmap/f7-llm-gateway/f7-07-bifrost-go-proxy.md).
 
 ## План: context transformation
 
 Встроенный pre-routing pipeline `tool-output-compress` → `history-compact` → `context-select`
-описан в [F16: design и задачи f16-01..f16-09](./../../roadmap/f16-context-transformation/README.md).
+описан в [F16: design и задачи f16-01..f16-09](https://github.com/mytecor/lattice/tree/main/roadmap/f16-context-transformation).
 Это план, текущий runtime историю не сжимает. MVP ограничен полной `messages[]` в Chat
 Completions; Responses/affinity сохраняют текущий контракт.

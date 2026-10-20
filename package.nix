@@ -1,7 +1,7 @@
 { lib, buildGo127Module }:
 
 buildGo127Module {
-  pname = "lattice-llm-gateway";
+  pname = "llm-gateway";
   version = "0.1.0";
 
   src = ./.;
@@ -10,8 +10,8 @@ buildGo127Module {
   doCheck = true;
 
   meta = {
-    description = "Lattice OpenAI-compatible routing proxy built on the Bifrost Go API";
-    homepage = "https://github.com/mytecor/lattice";
+    description = "OpenAI-compatible routing proxy built on the Bifrost Go API";
+    homepage = "https://github.com/mytecor/llm-gateway";
     license = lib.licenses.mit;
     mainProgram = "llm-gateway";
     platforms = lib.platforms.unix;
