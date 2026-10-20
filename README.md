@@ -1,51 +1,47 @@
 # LLM Gateway
 
-OpenAI-совместимый шлюз на Go с нативными ACP/web executors и API-провайдерами на базе [Bifrost Core](https://github.com/maximhq/bifrost).
+An OpenAI-compatible gateway in Go featuring native ACP/web executors and API providers powered by [Bifrost Core](https://github.com/maximhq/bifrost).
 
-Шлюз инкапсулирует работу с upstream-провайдерами: клиенты обращаются к виртуальным логическим моделям (например, `standard`, `fast`), не зная реальных идентификаторов моделей, провайдеров, внутренних URL и API-ключей.
+The gateway encapsulates upstream LLM providers: clients interact with virtual logical models (e.g., `standard`, `fast`) without needing to know physical model identifiers, provider endpoints, internal URLs, or API keys.
 
-## Возможности
+## Features
 
-- **OpenAI-совместимость:** поддержка `/v1/chat/completions` и `/v1/responses` в обычном и streaming (SSE) режимах.
-- **Логические модели:** сокрытие топологии и учетных данных провайдеров от клиентов.
-- **Декларативный роутинг:** цепочки правил (`filter`, `map`, `admission`, `balance`, `affinity`, `race`, `retry`, `hedge`, `timeout`).
-- **Балансировка и отказоустойчивость:** балансировка по ожидаемому TTFT (EWMA), автоматический cooldown при сбоях (429, 5xx), многоуровневый fallback (tiers) и hedging запросов.
-- **Управление стримами:** детекция обрывов (mid-stream breaks), защита от зацикливания ответов (loop guard) и idle-таймауты.
-- **Наблюдаемость:** Prometheus-метрики на отдельном loopback-порту и структурированные JSON-события (`log/slog`) с трассировкой по `request_id`.
-- **Безопасность:** авторизация клиентов по Bearer-токенам, безопасная передача секретов через переменные окружения (`env.VARIABLE_NAME`).
+- **OpenAI Compatibility:** Full support for `/v1/chat/completions` and `/v1/responses` in both standard and streaming (SSE) modes.
+- **Logical Models:** Decouples client requests from physical provider models, endpoints, and credentials.
+- **Declarative Routing:** Composable pipeline stages (`filter`, `map`, `admission`, `balance`, `affinity`, `race`, `retry`, `hedge`, `timeout`).
+- **Load Balancing & Resilience:** Dynamic balancing via expected TTFT (EWMA), automatic cooldown on upstream failures (429, 5xx), multi-tier fallbacks, and request hedging.
+- **Stream Lifecycle Management:** Mid-stream break detection and continuation, loop guard (repetition detection), and chunk idle timeouts.
+- **Observability:** Prometheus metrics served on a dedicated loopback listener and structured JSON logging (`log/slog`) with end-to-end `request_id` tracing.
+- **Security:** Client authorization via Bearer tokens and safe secret ingestion using environment variables (`env.VARIABLE_NAME`).
 
 ---
 
-## Нативные ACP и web executors
+## Native ACP and Web Executors
 
-Помимо обычных API-провайдеров, gateway запускает ACP-агентов непосредственно
-через agentrun и подключает browser drivers без промежуточного HTTP-сервиса.
-Общий runtime управляет сессиями, историей, resume и ожидающими tool calls.
-Инструменты из OpenAI `tools` исполняет клиент (например, pi); gateway возвращает
-`tool_calls` и передаёт полученные tool results ожидающему движку. Для ACP это
-работает через session-scoped MCP bridge.
+In addition to standard API providers, the gateway executes ACP agents directly via `agentrun` and connects to browser drivers without an intermediate HTTP service. A unified runtime manages conversations, history checkpoints, session resume, and pending tool calls. Tools provided in OpenAI `tools` are executed by the client (e.g., Pi); the gateway returns `tool_calls` and forwards the received tool results to the waiting engine. For ACP, this operates through a session-scoped MCP bridge.
 
-Существующие провайдеры используют `executor: "bifrost"` по умолчанию. Нативные
-исполнители выбираются через `executor: "acp"` или `"web"` с `command` и `session`.
-Для них поддержан текстовый Chat Completions API; stateful-маршруты требуют одного
-таргета, `race count: 1` и отключённых retry/fallback/hedge/continue/repetition.
+Existing providers use `executor: "bifrost"` by default. Native executors are selected via `executor: "acp"` or `"web"` with `command` and `session`. They support the text Chat Completions API; stateful routes require a single target, `race count: 1`, and disabled retry/fallback/hedge/continue/repetition.
 
-[Пример конфигурации](configs/config.sessions.example.json) ·
-[Сессии, инструменты и протокол browser driver](docs/session-executors.md).
-Драйвер конкретного веб-сайта реализуется отдельно; Muse-драйвер не включён.
+- [Session Configuration Example](configs/config.sessions.example.json)
+- [Sessions, Tools, and Browser Driver Protocol Documentation](docs/session-executors.md)
+- [Architecture Deep-Dive](ARCHITECTURE.md)
+
+*Note: Drivers for specific websites must be implemented separately; a Muse driver is not included.*
+
+---
 
 ## API Endpoints
 
-| Метод | Путь | Назначение | Авторизация |
+| Method | Path | Description | Authorization |
 | --- | --- | --- | --- |
-| `POST` | `/v1/chat/completions` | OpenAI Chat Completions (streaming / non-streaming) | Bearer токен |
-| `POST` | `/v1/responses` | OpenAI Responses API (streaming / non-streaming) | Bearer токен |
-| `GET` | `/v1/models` | Список доступных логических моделей | Bearer токен |
-| `GET` | `/healthz` | Health check (`{"status":"ok"}`) | Без авторизации |
-| `POST` | `/admin/models/refresh` | Принудительное обновление каталогов моделей | Bearer токен |
-| `GET` | `/metrics` | Prometheus-метрики (по умолчанию `127.0.0.1:9209`) | Loopback, без токена |
+| `POST` | `/v1/chat/completions` | OpenAI Chat Completions (streaming / non-streaming) | Bearer Token |
+| `POST` | `/v1/responses` | OpenAI Responses API (streaming / non-streaming) | Bearer Token |
+| `GET` | `/v1/models` | List available logical models | Bearer Token |
+| `GET` | `/healthz` | Health check (`{"status":"ok"}`) | None |
+| `POST` | `/admin/models/refresh` | Force refresh model catalogs | Bearer Token |
+| `GET` | `/metrics` | Prometheus metrics (default `127.0.0.1:9209`) | Loopback, None |
 
-Если в конфигурации задан список `client_api_keys`, эндпоинты `/v1/*` и `/admin/*` требуют заголовок:
+When `client_api_keys` are configured, `/v1/*` and `/admin/*` endpoints require the header:
 
 ```text
 Authorization: Bearer <client_api_key>
@@ -53,27 +49,27 @@ Authorization: Bearer <client_api_key>
 
 ---
 
-## Быстрый старт
+## Quick Start
 
-### Сборка
+### Building
 
 ```sh
-# Сборка бинарного файла в bin/llm-gateway
+# Build binary to bin/llm-gateway
 make build
 
-# Или напрямую через Go:
+# Or directly with Go:
 go build -o bin/llm-gateway ./cmd/llm-gateway
 ```
 
-### Проверка конфигурации
+### Validating Configuration
 
 ```sh
 ./bin/llm-gateway --config configs/config.example.json check
-# или через make:
+# or using make:
 make check-config
 ```
 
-### Запуск сервиса
+### Running the Gateway
 
 ```sh
 ./bin/llm-gateway --config configs/config.example.json serve
@@ -81,11 +77,11 @@ make check-config
 
 ---
 
-## Конфигурация
+## Configuration
 
-Конфигурация задается в формате JSON (полный пример см. в [configs/config.example.json](configs/config.example.json)). Значения секретов поддерживают загрузку из переменных окружения с префиксом `env.` (например, `"api_key": "env.OPENAI_API_KEY"`).
+Configuration is specified in JSON format (see [configs/config.example.json](configs/config.example.json) for a comprehensive example). Secret values support loading from environment variables using the `env.` prefix (e.g., `"api_key": "env.OPENAI_API_KEY"`).
 
-### Пример конфигурации
+### Example Configuration
 
 ```json
 {
@@ -147,57 +143,57 @@ make check-config
 
 ---
 
-## Маршрутизация (Routing Rules)
+## Routing Rules
 
-Маршрутизация задается плоским списком правил (`routing_rules`). Каждое правило относится к определенному маршруту (`route`) и выполняет конкретное действие (`action`):
+Routing is configured as a flat list of rules (`routing_rules`). Each rule targets a specific route (`route`) and executes a concrete action (`action`):
 
 ```text
 filter → map → admission → balance → affinity → race → retry → hedge → timeout
 ```
 
-- **`filter`**: фильтрация запросов по имени модели (`where.model.eq`), списку провайдеров (`where.provider.in`), классу ошибки (`where.error.in`) или статусу использования (`unused: true`).
-- **`map`**: сопоставление виртуальной модели с реальной моделью провайдера (`native`), с опциональной привязкой к уровню (`tier`).
-- **`admission`**: контроль очередей и конкурентности (`maxInFlight`, `maxPending`, `waitTimeout`).
-- **`balance`**: динамический выбор таргета (например, по ожидаемой задержке первого токена: `expected-ttft` с поддержкой $\epsilon$-greedy exploration).
-- **`affinity`**: привязка цепочек Responses API к выигравшему провайдеру по сессионному идентификатору.
-- **`race`**: количество параллельных запросов (`count`) к лучшим провайдерам (первый успешный ответ выигрывает).
-- **`retry`**: маршрутизация при ошибках (429, 5xx, таймауты) на резервные провайдеры с настройкой экспоненциального бэкоффа.
-- **`hedge`**: запуск параллельного резервного запроса, если основной не ответил за указанное время (`after`).
-- **`timeout`**: ограничение общего времени запроса (`duration`) и допустимой паузы между чанками стрима (`idle`).
+- **`filter`**: Filters requests by logical model name (`where.model.eq`), provider list (`where.provider.in`), error class (`where.error.in`), or usage status (`unused: true`).
+- **`map`**: Maps a virtual model to a provider's native model name (`native`), with optional tier assignment (`tier`).
+- **`admission`**: Enforces concurrency and queue bounds (`maxInFlight`, `maxPending`, `waitTimeout`).
+- **`balance`**: Selects targets dynamically (e.g., predicted Time to First Token: `expected-ttft` with $\epsilon$-greedy exploration).
+- **`affinity`**: Binds Responses API sequences to the winning provider using a session identifier.
+- **`race`**: Executes parallel requests (`count`) across top-ranked providers (first successful response wins).
+- **`retry`**: Reroutes on errors (429, 5xx, timeouts) to fallback routes with configurable exponential backoff.
+- **`hedge`**: Dispatches a parallel backup request if the primary target has not returned a response within the specified threshold (`after`).
+- **`timeout`**: Enforces request-wide deadlines (`duration`) and chunk idle timeouts (`idle`).
 
 ---
 
-## Наблюдаемость
+## Observability
 
-### Метрики Prometheus
+### Prometheus Metrics
 
-Метрики отдаются в формате Prometheus на выделенном loopback-адресе (`127.0.0.1:9209/metrics`).
+Metrics are exposed in Prometheus format on a dedicated loopback listener (`127.0.0.1:9209/metrics`).
 
-Проверка сбора метрик:
+Verify metrics collection:
 
 ```sh
 curl -s localhost:9209/metrics
 ```
 
-Ключевые метрики:
-- `llm_requests_total` — счетчик завершенных запросов по статусам, маршрутам и провайдерам.
-- `llm_request_duration_seconds` — гистограмма полного времени выполнения запросов.
-- `llm_ttft_seconds` — время до получения первого токена (Time to First Token).
-- `llm_input_tokens_total` / `llm_output_tokens_total` — учет использованных токенов.
-- `llm_attempts_total` / `llm_stream_breaks_total` — upstream-попытки и обрывы стримов.
-- `llm_requests_in_flight` — текущее количество активных запросов по провайдерам.
-- `llm_cooldown_until_seconds` — время окончания кулдауна провайдера/модели при сбоях.
+Key metrics include:
+- `llm_requests_total` — Counter of completed requests partitioned by status, route, and provider.
+- `llm_request_duration_seconds` — Histogram of end-to-end request latency.
+- `llm_ttft_seconds` — Histogram of Time to First Token (TTFT).
+- `llm_input_tokens_total` / `llm_output_tokens_total` — Accurate token accounting.
+- `llm_attempts_total` / `llm_stream_breaks_total` — Upstream attempts and mid-stream disconnections.
+- `llm_requests_in_flight` — Active concurrent requests per provider.
+- `llm_cooldown_until_seconds` — Timestamp indicating provider cooldown expiration on failure.
 
-### Структурированные логи
+### Structured Logging
 
-Логирование осуществляется через стандартный Go-пакет `log/slog` в формате JSON (в `stdout`). Каждый запрос маркируется уникальным `request_id`, связывающим события попыток (`request_received`, `llm_attempt`, `llm_retry`, `request_completed`, `request_failed`). Тела запросов, промпты и ключи авторизации не логируются.
+Logging uses the standard Go `log/slog` package formatted as JSON to `stdout`. Every request is annotated with a unique `request_id` linking operational events (`request_received`, `llm_attempt`, `llm_retry`, `request_completed`, `request_failed`). Request bodies, prompts, and authorization tokens are strictly never logged.
 
 ---
 
-## Тестирование и линтинг
+## Testing & Linting
 
 ```sh
-make test       # запуск модульных тестов
-make test-race  # запуск тестов с проверкой гонок (race detector)
-make lint       # линтинг (golangci-lint или go vet)
+make test       # Run unit and integration tests
+make test-race  # Run tests with the Go race detector enabled
+make lint       # Run linter (golangci-lint or go vet)
 ```

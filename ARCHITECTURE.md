@@ -1,0 +1,271 @@
+# LLM Gateway Architecture
+
+This document describes the architectural design, internal components, routing pipeline, and resilience mechanisms of **LLM Gateway**.
+
+---
+
+## 1. Architectural Overview & Design Goals
+
+LLM Gateway is a high-performance, OpenAI-compatible proxy and orchestration runtime written in Go. It mediates between client applications (OpenAI SDKs, cURL, agentic CLI harnesses like Pi) and heterogeneous AI backends (commercial HTTP APIs, native ACP agent processes, and browser automation drivers).
+
+```mermaid
+flowchart TD
+    Client["Client Applications<br/>(OpenAI SDK, Pi, cURL)"]
+    
+    subgraph Gateway["LLM Gateway Runtime"]
+        Server["HTTP Server & Transport<br/>/v1/chat/completions, /v1/responses, /v1/models"]
+        Auth["Auth & Context<br/>Bearer Tokens, Request ID, Client Key"]
+        
+        Scheduler["Scheduler & Pipeline Router<br/>(Dynamic Graph, DAG Validation)"]
+        
+        subgraph Subsystems["Stateful Core Subsystems"]
+            Catalog["Catalog Discovery"]
+            ScoreStore["Score Store<br/>(EWMA TTFT / ε-Greedy)"]
+            Admission["Admission & Queuing"]
+            Lease["Lease & Capacity Store"]
+            Affinity["Session Affinity"]
+            Continue["Stream Continuation"]
+            Repetition["Repetition / Loop Guard"]
+        end
+
+        subgraph Executors["Execution Layer (Registry)"]
+            BifrostExec["Bifrost HTTP Executor<br/>(OpenAI, Anthropic, Vertex, etc.)"]
+            SessionExec["Session Runtime Adapter<br/>(History, Turn Lifecycle, Checkpoints)"]
+            
+            subgraph NativeEngines["Native Subprocess Engines"]
+                ACPEngine["ACP Engine (agentrun)<br/>+ Stdio MCP Bridge"]
+                WebEngine["Web Engine<br/>(Browser Driver Protocol)"]
+            end
+        end
+        
+        Telemetry["Telemetry & Observability<br/>(Prometheus on Loopback :9209, slog JSON)"]
+    end
+
+    UpstreamHTTP["Upstream Cloud APIs<br/>(OpenAI, Anthropic, Bedrock, etc.)"]
+    SubprocessAgents["Local Agent Processes<br/>(agentrun, ACP runners)"]
+    HeadlessBrowsers["Browser Drivers<br/>(Headless Chrome, Web Automation)"]
+
+    Client --> Server
+    Server --> Auth
+    Auth --> Scheduler
+    Scheduler <--> Subsystems
+    Scheduler --> Executors
+    
+    BifrostExec --> UpstreamHTTP
+    SessionExec --> ACPEngine
+    SessionExec --> WebEngine
+    ACPEngine --> SubprocessAgents
+    WebEngine --> HeadlessBrowsers
+    
+    Server -.-> Telemetry
+    Scheduler -.-> Telemetry
+```
+
+### Core Design Tenets
+
+1. **Virtual Logical Models**: Clients interact with abstract models (`standard`, `fast`, `reasoning`). Internal model IDs, upstream endpoints, credentials, and topology are completely hidden.
+2. **Unified Execution Runtime**: Standard REST APIs, native subprocess ACP agents, and headless browser drivers share the same OpenAI Chat Completions interface and tool-calling semantics.
+3. **Declarative Composable Pipeline**: Routing is defined via structured stages (`filter`, `map`, `rank`, `admission`, `balance`, `affinity`, `race`, `retry`, `hedge`, `timeout`, `fallback`, `continue`, `repetition`).
+4. **Resilience by Default**: First-class support for parallel racing, hedging, automatic health cooldowns (circuit breakers), mid-stream break recovery, and degenerative loop guards.
+5. **Zero-Trust Security & Operational Isolation**: Bearer tokens verified via constant-time comparisons, secrets sourced exclusively from environment variables, and telemetry exposed on an isolated loopback port.
+
+---
+
+## 2. Codebase Organization
+
+The codebase follows standard Go project conventions:
+
+```text
+llm-gateway/
+├── cmd/
+│   └── llm-gateway/            # Application entrypoint (CLI bootstrap & mcp-bridge dispatch)
+├── configs/                    # Example JSON deployment and session configurations
+├── docs/                       # Subsystem-specific deep-dives (e.g. session-executors.md)
+├── internal/
+│   ├── executor/               # Executor registry, interfaces, and backend drivers
+│   │   ├── bifrost/            # Bifrost Core HTTP upstream adapter
+│   │   ├── session/            # Stateful session adaptation to OpenAI protocol
+│   │   ├── acp/                # Agent Communication Protocol engine (agentrun + MCP)
+│   │   └── web/                # Native browser driver adapter
+│   ├── gateway/                # Daemon lifecycle, CLI commands (check, serve), signals
+│   ├── mcpbridge/              # Private stdio Model Context Protocol (MCP) bridge
+│   ├── model/                  # Domain types, capabilities, error taxonomy, token usage
+│   ├── policy/                 # Config schema, parser, DSL rules, compilation & graph validation
+│   ├── scheduler/              # Execution engine, branch orchestration, streaming state machine
+│   ├── server/                 # HTTP mux, authentication, SSE serialization, route handlers
+│   ├── session/                # Conversation state manager, history hashing, tool turns
+│   ├── subsystem/              # Independent stateful subsystems (Catalog, Admission, Scores, etc.)
+│   └── telemetry/              # Zero-allocation Prometheus metrics and structured slog
+```
+
+---
+
+## 3. Core Subsystems
+
+The gateway delegates stateful operations to independent, thread-safe subsystems:
+
+| Subsystem | Package | Responsibility |
+| --- | --- | --- |
+| **Catalog** | `internal/subsystem/catalog.go` | Discovers upstream models via periodic background polls. Caches capabilities and handles graceful degradations when upstreams fail. |
+| **Score Store** | `internal/subsystem/score_store.go` | Tracks provider performance using Exponential Weighted Moving Average (EWMA) for Time To First Token (TTFT). Implements $\epsilon$-greedy exploration across candidate providers. |
+| **Admission** | `internal/subsystem/admission.go` | Enforces concurrency controls per route/target (`maxInFlight`, `maxPending`, `waitTimeout`) to prevent upstream starvation and bufferbloat. |
+| **Lease Store** | `internal/subsystem/lease.go` | Manages target capacity leases with slow-start recovery to smoothly ramp up traffic after cold starts or outages. |
+| **Affinity Store** | `internal/subsystem/affinity.go` | Pins multi-turn client sessions or OpenAI Responses API chains to the winning upstream provider. |
+| **Continue** | `internal/subsystem/continue.go` | Coordinates mid-stream break continuation, patching already-streamed token deltas onto prompt history for seamless failover. |
+| **Repetition** | `internal/subsystem/repetition.go` | Analyzes generation chunks through a sliding n-gram window to detect runaway loops (e.g. infinite repetitive tool calls or text loops). |
+
+---
+
+## 4. Declarative Routing Pipeline
+
+Routing is modeled as a linear pipeline executed by the scheduler for each incoming request:
+
+```mermaid
+flowchart LR
+    In([Request]) --> Filter["1. Filter<br/>(model/provider/error)"]
+    Filter --> Map["2. Map<br/>(logical -> native)"]
+    Map --> Rank["3. Rank<br/>(priority/weight)"]
+    Rank --> Admission["4. Admission<br/>(concurrency bounds)"]
+    Admission --> Lease["5. Lease<br/>(dynamic capacity)"]
+    Lease --> Balance["6. Balance<br/>(expected-ttft / p2c)"]
+    Balance --> Affinity["7. Affinity<br/>(session stickiness)"]
+    Affinity --> Race["8. Race / Hedge<br/>(parallel dispatch)"]
+    Race --> Upstream[(Upstream Call)]
+    
+    Upstream -- Error --> Retry["9. Retry / Fallback<br/>(subroute transition)"]
+    Upstream -- Stream Break --> Continue["10. Continue<br/>(mid-stream resume)"]
+    Upstream -- Token Loop --> Repetition["11. Repetition<br/>(loop breaker)"]
+    Upstream -- Success --> Out([Client Response])
+    
+    Retry --> Filter
+    Continue --> Filter
+```
+
+### Pipeline Stages
+
+1. **Selection & Filtering (`filter`, `map`)**:
+   - Matches the requested logical model (`where.model.eq`).
+   - Filters candidate providers (`where.provider.in`), excluding cooling or already-exhausted providers (`unused: true`).
+   - Maps the logical model name to the native provider model (e.g., `standard` $\to$ `gpt-4o` on OpenAI, `claude-3-5-sonnet` on Anthropic).
+2. **Prioritization & Load Balancing (`rank`, `balance`, `affinity`)**:
+   - **`rank`**: Statically orders candidate targets by assigned priority or configured weight.
+   - **`balance`**: Selects targets using real-time EWMA TTFT predictions (`expected-ttft`) with $\epsilon$-greedy exploration, or power-of-two-choices (`p2c`).
+   - **`affinity`**: Enforces provider stickiness based on session IDs or Responses API context.
+3. **Execution & Concurrency (`admission`, `lease`, `race`, `hedge`, `timeout`)**:
+   - **`admission` & `lease`**: Guards upstream providers against saturation via queuing and bounded in-flight requests.
+   - **`race`**: Dispatches $N$ parallel requests to the top-ranked providers; the first meaningful byte or completion wins, while losing branches are immediately cancelled.
+   - **`hedge`**: Spawns an auxiliary backup request if the primary branch has not returned a first token within the configured duration.
+   - **`timeout`**: Enforces total request duration and idle timeouts between stream chunks.
+4. **Error Recovery & Flow Control (`retry`, `fallback`, `continue`, `repetition`)**:
+   - **`retry` & `fallback`**: On error (429, 5xx, network timeout), transitions execution to dedicated subroutes with exponential backoff.
+   - **`continue`**: Recovers from mid-stream connection drops by feeding already delivered text back into a fallback target.
+   - **`repetition`**: Detects degenerate repetitive output patterns and safely trips the circuit breaker before tokens and budget are wasted.
+
+---
+
+## 5. Stateful Session Executors & Agent Tool Turns
+
+Beyond standard stateless HTTP inference, LLM Gateway incorporates a session runtime that executes agentic workflows natively.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Client / Pi Harness
+    participant GW as LLM Gateway (Session Runtime)
+    participant Bridge as Stdio MCP Bridge
+    participant Agent as ACP Agent / Browser Driver
+
+    Client->>GW: POST /v1/chat/completions (messages, tools, Session-ID)
+    GW->>GW: Hash history prefix & resolve native session
+    GW->>Agent: Launch or Resume Session
+    GW->>Bridge: Register client tools into session-scoped MCP
+    Agent->>Bridge: Call Tool (MCP call)
+    Bridge->>GW: Pending Tool Call Event
+    GW-->>Client: SSE: tool_calls (finish_reason: "tool_calls", [DONE])
+    Note over GW,Agent: Request detaches; Turn stays pending in memory
+    
+    Client->>Client: Execute tool locally
+    Client->>GW: POST /v1/chat/completions (history + role: "tool" results)
+    GW->>GW: Match pending turn & validate tool results
+    GW->>Agent: Forward tool results to waiting turn
+    Agent-->>GW: Final generated text response
+    GW-->>Client: SSE: Assistant text (finish_reason: "stop")
+```
+
+### Key Components
+
+- **`internal/session/runtime.go`**:
+  - Maintains conversation threads identified by `X-Session-Affinity` or `session_id`.
+  - Computes canonical history hashes to compute deltas: only new messages are delivered to existing native sessions.
+  - Manages turn lifecycle, idle eviction (`session.ttl`), and turn timeouts (`session.turn_timeout`).
+  - Implements atomic checkpointing (`session.store_path`) to persist resume IDs and session metadata across restarts.
+- **`internal/executor/acp`**:
+  - Spawns and manages ACP agents directly via `agentrun`.
+  - Bridges client-defined OpenAI `tools` to the agent using a private, session-scoped stdio MCP server (`internal/mcpbridge`).
+- **`internal/executor/web`**:
+  - Connects directly to browser automation drivers without an intermediary HTTP service.
+  - Implements bidirectional text-based tool calling protocols.
+
+---
+
+## 6. Resilience & Stream Management
+
+### Mid-Stream Break Continuation
+
+When an upstream provider drops a connection mid-stream:
+1. The gateway's stream reader detects the unexpected EOF or network error.
+2. The tokens already flushed to the client are retained in memory.
+3. If a `continue` rule is active, the scheduler activates the fallback route.
+4. The delivered partial output is appended as an assistant prefix in the continuation prompt.
+5. The fallback provider seamlessly completes the generation from where the broken stream terminated.
+
+### Repetition / Loop Guard
+
+Degenerate models or recursive tool-call traps can trigger infinite output loops:
+- The `repetition` subsystem tracks sliding token and n-gram windows.
+- When an identical sequence repeats past the configured threshold, the stream is aborted.
+- This prevents infinite token billing and client hang-ups.
+
+### Circuit Breaking & Automatic Cooldown
+
+- Providers returning retryable errors (429 Rate Limit, 502/503/504 Bad Gateway, transport resets) are put into automatic cooldown.
+- While cooling, the provider is excluded from dynamic candidate pools.
+- If all providers in a tier are cooling, the scheduler activates fail-open logic to prevent total denial of service.
+
+---
+
+## 7. Observability & Security Architecture
+
+### Dedicated Loopback Metrics Architecture
+
+Prometheus metrics are served over a physically separate HTTP listener:
+- **Default Listener (`127.0.0.1:9209`)**: Binds strictly to loopback by default.
+- **Security Boundary**: The public API port (`:9208`) does **not** expose internal metrics. Scrapes cannot access client inference endpoints, and external clients cannot scrape internal operational telemetry.
+
+```text
++-----------------------+              +-----------------------+
+|  Public Ingress :9208 |              |  Loopback Only :9209  |
+|  /v1/chat/completions |              |  /metrics             |
+|  /v1/responses        |              +-----------------------+
+|  /v1/models           |                         ^
++-----------------------+                         |
+           |                               Internal Shared
+           +----------------------------> Registry (sync/atomic)
+```
+
+### Key Prometheus Metrics
+
+- `llm_requests_total`: Counter partitioned by status, route, logical model, provider, and client key.
+- `llm_request_duration_seconds`: Histogram of end-to-end request duration.
+- `llm_ttft_seconds`: Histogram of Time to First Token.
+- `llm_input_tokens_total` / `llm_output_tokens_total`: Accurate token accounting.
+- `llm_stream_breaks_total`: Counter for severed upstream streaming connections.
+- `llm_requests_in_flight`: Real-time gauge of active upstream requests per provider.
+- `llm_cooldown_until_seconds`: Gauge reflecting provider cooldown deadlines.
+
+### Structured Logging (`log/slog`)
+
+All log events are emitted to `stdout` in structured JSON:
+- Every request is assigned a unique `request_id` propagated across all goroutines and upstream attempts.
+- **Data Protection**: Prompts, system messages, tool inputs/outputs, and authentication credentials are strictly excluded from logs.
+- Errors are sanitized through `telemetry.SafeLogDetail` to prevent unbounded log expansion and secret leakage.
