@@ -1,575 +1,185 @@
 # LLM Gateway
 
-Небольшой OpenAI-compatible HTTP proxy на Go. Он использует
-[Bifrost Core](https://github.com/maximhq/bifrost) через Go API как provider execution layer, но
-сам владеет клиентским API, logical models, model discovery и routing policy.
+Легковесный OpenAI-совместимый HTTP-прокси на Go на базе [Bifrost Core](https://github.com/maximhq/bifrost).
 
-Пакет не содержит встроенных provider names, logical model IDs или mappings. Они полностью
-задаются конфигурацией конкретного deployment. Клиенты видят только объявленные logical models и
-не получают native model IDs, provider identities, внутренние URLs или provider credentials.
+Шлюз инкапсулирует работу с upstream-провайдерами: клиенты обращаются к виртуальным логическим моделям (например, `standard`, `fast`), не зная реальных идентификаторов моделей, провайдеров, внутренних URL и API-ключей.
 
-## API
+## Возможности
 
-| Endpoint | Назначение |
-| --- | --- |
-| `GET /healthz` | Минимальный health check без раскрытия topology |
-| `GET /metrics` | Prometheus text exposition (числовые метрики; loopback-листенер `metrics_host:metrics_port`, по умолчанию `127.0.0.1:9209`, без `client_api_keys`) |
-| `GET /v1/models` | Только logical models, выведенные из скомпилированных routing plans |
-| `POST /v1/chat/completions` | OpenAI Chat Completions, streaming и non-streaming |
-| `POST /v1/responses` | OpenAI Responses API, streaming и non-streaming |
-| `POST /admin/models/refresh` | Немедленное обновление provider-scoped model catalogs |
+- **OpenAI-совместимость:** поддержка `/v1/chat/completions` и `/v1/responses` в обычном и streaming (SSE) режимах.
+- **Логические модели:** сокрытие топологии и учетных данных провайдеров от клиентов.
+- **Декларативный роутинг:** цепочки правил (`filter`, `map`, `admission`, `balance`, `affinity`, `race`, `retry`, `hedge`, `timeout`).
+- **Балансировка и отказоустойчивость:** балансировка по ожидаемому TTFT (EWMA), автоматический cooldown при сбоях (429, 5xx), многоуровневый fallback (tiers) и hedging запросов.
+- **Управление стримами:** детекция обрывов (mid-stream breaks), защита от зацикливания ответов (loop guard) и idle-таймауты.
+- **Наблюдаемость:** Prometheus-метрики на отдельном loopback-порту и структурированные JSON-события (`log/slog`) с трассировкой по `request_id`.
+- **Безопасность:** авторизация клиентов по Bearer-токенам, безопасная передача секретов через переменные окружения (`env.VARIABLE_NAME`).
 
-Если `client_api_keys` непуст (список именованных ключей `{ "id": ..., "key": ... }`), все
-`/v1/*` и `/admin/*` endpoints требуют Bearer одного из ключей. Каждый запрос атрибутируется к
-не-секретному `id` ключа в метриках запросов и токенов (`api_key` dimension). Пустой список —
-keyless loopback.
+---
+
+## API Endpoints
+
+| Метод | Путь | Назначение | Авторизация |
+| --- | --- | --- | --- |
+| `POST` | `/v1/chat/completions` | OpenAI Chat Completions (streaming / non-streaming) | Bearer токен |
+| `POST` | `/v1/responses` | OpenAI Responses API (streaming / non-streaming) | Bearer токен |
+| `GET` | `/v1/models` | Список доступных логических моделей | Bearer токен |
+| `GET` | `/healthz` | Health check (`{"status":"ok"}`) | Без авторизации |
+| `POST` | `/admin/models/refresh` | Принудительное обновление каталогов моделей | Bearer токен |
+| `GET` | `/metrics` | Prometheus-метрики (по умолчанию `127.0.0.1:9209`) | Loopback, без токена |
+
+Если в конфигурации задан список `client_api_keys`, эндпоинты `/v1/*` и `/admin/*` требуют заголовок:
 
 ```text
-Authorization: Bearer <клиентский ключ>
+Authorization: Bearer <client_api_key>
 ```
 
-`/healthz` намеренно возвращает только `{"status":"ok"}`. `GET /metrics` не требует ключа и
-обслуживается отдельным loopback-листенером (см. [Метрики](#метрики)).
+---
 
-## Метрики
+## Быстрый старт
 
-Gateway экспортирует числовые метрики в Prometheus text exposition format (version 0.0.4) на
-выделенном loopback-листенере `metrics_host:metrics_port` (по умолчанию `127.0.0.1:9209`).
-Эндпоинт сознательно не публичен, не требует `client_api_keys` и не раскрывает provider
-credentials. Метрики считаются в счётчиках и гистограммах на лету, а не из логов.
-
-Димензии только низкой cardinality: `service`, `api_key`, `route`, `provider`, `native_model`,
-`model` (логическая), `status`, `error_type`, `from_provider`, `to_provider`,
-`reason`. `api_key` — не-секретный id клиентского ключа (пусто в keyless); `native_model` — реальный id модели у провайдера (`claude-sonnet-4`,
-`gpt-4o` …), `model` — логическое имя из маппинга gateway (`standard`, `fast` …);
-оба низкой cardinality (конечное множество маппинга). Высок-cardinality
-идентификаторы (`request_id`, session, user, api_key, client_ip, prompt hash)
-никогда не становятся лейблами.
-
-Семейства:
-
-- `llm_requests_total{route,model,provider,native_model,status}` — завершённые клиентские запросы.
-- `llm_request_duration_seconds{route,model,provider,native_model}` — гистограмма полного времени запроса (p50/p95).
-- `llm_ttft_seconds{model,provider,native_model}` — гистограмма времени до первого значимого события (winner).
-- `llm_input_tokens_total{model,provider,native_model}` / `llm_output_tokens_total{model,provider,native_model}` — накопленные токены usage.
-- `llm_attempts_total{provider,native_model,error_type}` — upstream попытки по терминальному классу ошибки.
-- `llm_stream_breaks_total{provider,native_model,error_type}` — обрывы winner-стрима после выбора (mid-stream). Обратная связь инкрементит и `llm_attempts_total` (тот же срез provider/native_model/error_type), так что провайдер деградирует так же, как при ошибках до выбора; отдельный счётчик отделяет mid-stream-обрывы от попыток планировщика.
-- `llm_repetition_detected_total{route,provider}` — срабатывания loop-guard (`repetition`): winner-стрим, повторивший K подряд идентичных нормализованных фрагментов, остановлен и передан в continue-путь. Ровно +1 на детекцию (не на фрагмент).
-- `llm_requests_in_flight{provider}` — текущие in-flight ветви.
-- `llm_fallbacks_total{from_provider,to_provider,reason}` — явные fallback-переходы.
-- `llm_balance_selections_total{route,provider}` — выбор провайдера балансировкой.
-- `llm_balance_health{provider}` — текущий health score (0..1) пула.
-- `llm_cooldown_until_seconds{provider,native_model}` — unix-дедлайн, до которого пара
-  (провайдер, нативная модель) охлаждается после retryable-ошибки (в семье отсутствует, когда
-  не охлаждена); остаток окна считается как `deadline − now` на стороне панели, так что
-  значение правдиво убывает между скрейпами.
-- `go_*` / `process_start_time_seconds` — минимальное runtime-состояние процесса.
-
-Скрейп-чек:
+### Сборка
 
 ```sh
-curl -s localhost:9209/metrics
+# Сборка бинарного файла в bin/llm-gateway
+make build
+
+# Или напрямую через Go:
+go build -o bin/llm-gateway ./cmd/llm-gateway
 ```
 
-## Структурированные события
+### Проверка конфигурации
 
-Параллельно метрикам gateway пишет **одну строку = один JSON event** в structured журнал
-(slog JSON, stdout → systemd journal). Каждая строка несёт как минимум `time`, `level`,
-`service` (`llm-gateway`), `event` (устойчивое имя) и низко-cardinality routing-контекст
-(`request_id`). Логи остаются событийными (расследование одного запроса по `request_id`),
-а не источником RPS/latency — это делают метрики.
-
-Димензии только низкой cardinality, те же, что у метрик: `service`, `route`, `provider`,
-`native_model`, `model` (логическая), `status`, `error_type`. `request_id` допустим **в поле**
-(для связывания), но никогда не становится лейблом метрики и не попадает в
-высоко-cardinality поля. Prompt, body, headers и API keys никогда не логируются.
-
-Иерархия событий — request → attempt, связывание по `request_id` (`attempt_id` опционален):
-
-- **Request-level** (по одному на запрос): `request_received`, `request_completed`,
-  `request_failed`. Обычный успешный запрос = минимум строк: одна `request_completed` с
-  `status_code`, `duration_ms`, `ttft_ms`, `input_tokens`, `output_tokens`, `cached_tokens`,
-  `stream`, `attempts`, `provider` (winner) и `route`.
-- **Attempt/transition-level** (только когда событие реально произошло):
-  `llm_attempt` (успех ретраен-попытки), `llm_retry`, `llm_fallback`, `hedge_launched`,
-  `semaphore_denied`, `cooldown_put`. Уровень: retry/fallback-переходы и cooldown — `warn`,
-  обычный успех — `info`, hedge/semaphore — `debug`.
-- **Mid-stream обрывы winner-стрима**: `llm_stream_break` (апстрим вернул ошибку после выбора
-  победителя) и `llm_stream_stalled` (стрим молчал дольше `stream_idle_timeout`). Оба — `warn`;
-  в полях — provider, error_type, status_code, а у stalled ещё и idle_ms. Оба ведут к записи
-  неудачи против провайдера (см. [Обрывы winner-стрима](#обрывы-winner-стрима)).
-- **Loop guard**: `llm_repetition_detected` — сработал `repetition`-порог (K подряд одинаковых
-  нормализованных фрагментов до `finish`); стрим остановлен без ретрансляции сработавшего
-  чанка и передан в continue-путь. `warn`; в полях — route, provider. Корреспондирует с
-  метрикой `llm_repetition_detected_total` и ведёт к `RecordStreamFailure` против провайдера.
-
-По `request_id` в журнале и в Prometheus-графе можно восстановить путь запроса: какие
-`request_completed`/`llm_retry`/`llm_fallback`-строки принадлежат одному запросу и где
-произошёл переход в retry/fallback/race (см. [f12-02](https://github.com/mytecor/lattice/blob/main/roadmap/f12-observability/f12-02-gateway-structured-events.md)).
-
-## Обрывы winner-стрима
-
-Планировщик выбирает победителя стрима по первому значимому событию; всё, что случается
-после этого, вне досягаемости route graph (retry/fallback уже отработали или отменены
-выбором winner). Поэтому обрыв апстримом уже выбранного winner-стрима обрабатывается
-отдельно:
-
-- **Обратная связь о здоровье.** Ошибка обрыва (`llm_stream_break`) попадает в ту же машину
-  состояния, что и ошибки до выбора: cooldown по retryable-классам, health-скор
-  (окно/errorBudget балансировки), release lease по `release_on`, `llm_attempts_total` и
-  отдельный `llm_stream_breaks_total`. Пара (провайдер, нативная модель), регулярно рвущая
-  стримы, перестаёт выигрывать выбор так же, как при ошибках соединения, не вытесняя этим
-  остальные модели провайдера.
-- **Idle-таймаут** (`stream_idle_timeout`, по умолчанию `5m`): winner-стрим, не приславший
-  ни одного события (включая keep-alive) этот срок, отменяется; клиент получает
-  типизированный timeout-error, а неудача записывается против провайдера как `llm_stream_stalled`.
-  Таймер перезапускается каждым событием, поэтому легитимные паузы reasoning-моделей
-  остаются в пределах лимита; timeout ограничивает только полностью замолчавший stream.
-- **Loop guard (`repetition`).** Опциональная политика на entry-route, объявляется рядом с
-  `continue` (объявляется явным правилом `action = "repetition"` на entry-route, по
-  умолчанию выключено — отсутствие правила ничего не меняет). Когда накопленный вывод
-  winner-стрима повторяет один и тот же нормализованный фрагмент `repeats`+ подряд (K ≥ 2,
-  по умолчанию 4; фрагмент длины `[minLen, maxLen]`, по умолчанию `[6, 256]`) до `finish`,
-  gateway останавливает стрим **без ретрансляции сработавшего чанка**, помечает обрыв как
-  `RecordStreamFailure` (провайдер получает cooldown) и re-dispatches через тот же
-  continue-путь с накопленным `partial` (`appendPartialChatHistory`). Детектор нормализует
-  текст (нижний регистр, схлопывание пробелов/пунктуации `. , ! ? ; : " '` в один
-  разделитель) и сбрасывается при переходе к новому winner, чтобы продолжение не было
-  пере-трипнуто хвостом зацикленного накопителя. Стоп цикла фиксируется метрикой
-  `llm_repetition_detected_total{route,provider}` и structured-событием
-  `llm_repetition_detected`. Когда продолжение невозможно (нет unused-провайдера), после
-  bounded-хоризонта `continue.wait` срабатывает терминальный error-contract ниже.
-- **Структурированный SSE error payload.** Терминальная ошибка стрима отдаётся как
-  `event: error` с машинно-читаемым телом:
-
-  ```json
-  {"error": {"message": "upstream stream failed", "type": "5xx", "status_code": 502,
-    "retryable": true, "partial": true, "request_id": "…"}}
-  ```
-
-  `retryable` вычисляется по фильтрам переходов entry-route (retry/fallback; без явных
-  переходов — общему retryable-набору), `partial` всегда `true` (контент уже частично
-  отдан). Текст `message` стабилен и остаётся совместимым с текстовым матчингом клиентов.
-- **Ни `[DONE]`, ни ретрая после flush.** После `event: error` фрейм `data: [DONE]`
-  намеренно не отправляется — стрим не завершился успешно. Gateway не ретраит после выбора
-  winner: prelude уже отдан клиенту, повтор дублировал бы контент; повтор — ответственность
-  клиента (например, pi-retry).
-
-## Routing
-
-`routing_rules` — плоская упорядоченная таблица rules. Каждый rule принадлежит именованному
-route (поле `route`) и выполняет одно действие с одной ответственностью; физически конфигурация
-остаётся плоским массивом, никаких вложенных `routes`/`plans`/`children` нет. Route —
-строковый scope (`standard`, `fast`); правила одного route компилируются в единую декларативную
-политику `CompiledRoute`, исполняемую динамическим Runtime Scheduler.
-
-Архитектура разделяет ответственность:
-- **Routing Rules** = eligibility (`filter`) + mapping & tiers (`map`) + execution & recovery policy (`admission`, `balance`, `race`, `retry`, `hedge`, `timeout`);
-- **Runtime Scheduler** = route admission queue + dynamic dispatch + recovery loop;
-- **Provider Runtime State** = capacity (`max_concurrent`) + inFlight + latency (EWMA TTFT) + health + cooldown.
-
-Типичный набор плоских правил для маршрута:
-
-```text
-filter → map (tier 0, 1...) → admission → balance → affinity → race → retry → hedge → timeout
+```sh
+./bin/llm-gateway --config configs/config.example.json check
+# или через make:
+make check-config
 ```
 
-- `filter` объявляет принадлежность маршрута модели (`where.model.eq = "standard"`) для entry route
-  (discovery и клиентский роутинг);
-- `map` привязывает список провайдеров к нативной модели и уровню (`tier`):
-  `providers = [ "a" "b" ]`, `nativeModel = "model-x"`, `tier = 0`. Fallback между моделями
-  задается уровнями (tiers), что устраняет необходимость плодить именованные подмаршруты
-  (`standard.fallback`, `standard.retry`);
-- `admission` управляет очередью и конкурентностью на уровне виртуальной модели:
-  `maxInFlight` (максимум активных запросов роута), `maxPending` (размер очереди ожидания),
-  `waitTimeout` (таймаут ожидания в очереди). При уходе клиента (`disconnect`) запрос
-  немедленно снимается с очереди без обращения к провайдерам;
-- `balance` осуществляет динамический выбор таргета непосредственно перед диспетчеризацией.
-  Стратегия `expected-ttft` вычисляет ожидаемое время до первого токена:
-  `expectedTTFT = ewmaTTFT * (1 + inFlight / maxConcurrent) / health`.
-  Поддерживает $\epsilon$-greedy exploration через параметр `exploration_rate` (по умолчанию
-  0.10 / 10% запросов зондируют альтернативных здоровых кандидатов в тире для актуализации EWMA).
-  Провайдер с заполненной емкостью `max_concurrent` автоматически уступает место менее
-  загруженным или резервным таргетам;
-- `affinity` закрепляет stateful Responses chain за выигравшим провайдером;
-- `race` задает размер параллельного запуска (`count = 1`);
-- `retry` управляет восстановлением: при сбое upstream attempt (429, 5xx, timeout, stream break,
-  model_not_found) логический запрос возвращается в планировщик, который исключает сбойный таргет
-  и динамически выбирает следующий лучший доступный таргет в текущем или следующем tier.
-  Клиентский HTTP/SSE поток при этом остается открытым и видит единый логический запрос;
-- `hedge` — динамический latency hedge: по истечении задержки `after` планировщик динамически
-  выбирает и запускает лучший неиспользованный таргет из пула;
-- `timeout` (`duration`, опционально `idle`) ограничивает время фазы выбора/ретраев/hedge
-  (`duration`) и допустимую паузу между чанками в открытом стриме (`idle`, по умолчанию равен
-  `duration`), которая также прокидывается в контекст Bifrost на запрос.
+### Запуск сервиса
 
-Пример (`settings.routing_rules` в Nix):
-
-```nix
-{ route = "standard"; action = "filter"; where.model.eq = "standard"; }
-
-# Tier 0 (основные провайдеры)
-{
-  route = "standard";
-  action = "map";
-  providers = [ "gonka-proxy" "dahl" "hyperfusion" ];
-  native = "deepseek-ai/DeepSeek-V4-Flash-0731";
-  tier = 0;
-}
-
-# Tier 1 (резервный fallback)
-{
-  route = "standard";
-  action = "map";
-  providers = [ "hyperfusion" ];
-  native = "gonka/deepseek-ai/DeepSeek-V4-Flash-0731";
-  tier = 1;
-}
-
-# Очередь маршрута
-{
-  route = "standard";
-  action = "admission";
-  maxInFlight = 4;
-  maxPending = 16;
-  waitTimeout = "30s";
-}
-
-# Балансировка по задержке и нагрузке
-{
-  route = "standard";
-  action = "balance";
-  strategy = "expected-ttft";
-}
-
-# Сессии и исполнение
-{ route = "standard"; action = "affinity"; sources = [ "responses.conversation" ]; ttl = "24h"; }
-{ route = "standard"; action = "race"; count = 1; }
-{ route = "standard"; action = "retry"; attempts = 2; backoff = { type = "exponential"; initial = "200ms"; max = "1s"; }; }
-{ route = "standard"; action = "hedge"; after = "20s"; }
-{ route = "standard"; action = "timeout"; duration = "60s"; idle = "2m"; }
-{ route = "standard"; action = "continue"; idle = "2m"; reshare = "full"; retries = 2; wait = "5m"; }
+```sh
+./bin/llm-gateway --config configs/config.example.json serve
 ```
 
-Одна ветка, вернувшая ошибку при живой другой ветке, сама по себе не создаёт новый call: ранний
-overlap контролирует только `hedge`. Streaming и non-streaming пути гарантируют одинаковые
-invariants: initial race получает только top `count`, каждый route — только свои target-пары,
-`unused` не повторяет used providers, и после winner/cancellation/timeout/исчерпания semaphore
-budget новые upstream calls не стартуют. Локально отклонённые каталогом target-пары (см.
-discovery ниже) никогда не стартуют upstream call и не расходуют `max_calls`/
-`max_calls_per_provider`, поэтому провайдер с другим native alias в subroute всё ещё достижим.
+---
 
-Provider с retryable failure получает cooldown, по умолчанию 15 секунд. Ключ кулдауна — пара
-(провайдер, нативная модель): ошибка одной нативной модели охлаждает только её, остальные
-модели того же провайдера остаются в candidate pool. Охлаждённые пары не входят в candidate
-pool; если охлаждаются все, gateway fail-open пробует pool снова. Отменённые losers не влияют
-ни на cooldown, ни на lease.
+## Конфигурация
 
-Compilation строго валидирует граф перед запуском: пустой `route`, route без race, `map` без
-активной provider selection, duplicate provider в pool, `race.count` сверх pool, missing target,
-orphan subroute, duplicate entry model, semaphore/timeout на subroute (эти действия request-wide и
-живут на entry route) и routing cycles дают точную configuration error с route, action и индексом
-rule.
+Конфигурация задается в формате JSON (полный пример см. в [configs/config.example.json](configs/config.example.json)). Значения секретов поддерживают загрузку из переменных окружения с префиксом `env.` (например, `"api_key": "env.OPENAI_API_KEY"`).
 
-### Typed routing rules
-
-Внешний `RoutingRule`-union отсутствует: каждый action — отдельный Go type со своими полями,
-валидацией и применением к compiler state. JSON decoder читает минимальный envelope `route` +
-`action` и декодирует тот же объект в конкретный type с `DisallowUnknownFields` — неизвестный
-action, неизвестное поле и поле чужого action отклоняются на decode boundary. `map`/`retry`/
-`fallback`/`hedge` больше не несут provider lists, `scope`, `count`, `on` или `fallback_strategy`:
-эти поля удалены и при наличии fail fast. Compiled scheduler зависит только от immutable
-routing graph (map route name → `compiledRoute`; переходы — скомпилированные ссылки на target
-route), не от JSON DTO. NixOS module передаёт `settings.routing_rules` без преобразований;
-тот же строгий Go decoder используется командой `check` во время Nix build и командой
-`serve` при запуске.
-
-Добавление нового action не трогает общий union-struct и центральный compiler switch (его нет):
-нужно только зарегистрировать action в `ruleRegistry` (`rule.go`, позиция в pipeline + factory),
-написать новый файл `rule_<action>.go` (тип, `apply(*stageContext)`, defaults/validation) и
-покрыть новый action тестами в `rule_<action>_test.go` (положительный decode/compile и
-отрицательные кейсы). Nix-схему обновлять не нужно.
-
-## Model discovery
-
-Discovery provider-scoped: каждый provider владеет своим catalog snapshot и refresh state.
-`models_url` может явно направить discovery на независимый совместимый endpoint:
-
-```text
-provider-a.inference_url → https://inference-a.example/v1
-provider-a.models_url    → https://catalog.example/v1/models
-provider-b.inference_url → https://inference-b.example/v1
-provider-b.models_url    → отсутствует; выводится как https://inference-b.example/v1/models
-```
-
-`inference_url` задаёт **полный** путь до OpenAI-совместимой точки входа и включает версионный
-сегмент. Gateway не добавляет `/v1` автоматически: к `inference_url` приклеивается только операция
-(`/chat/completions`, `/responses`). Поэтому provider может хостить API под произвольным
-маршрутизированным префиксом: `https://…/functions/v1/gonka` даст upstream
-`/…/functions/v1/gonka/chat/completions`, а обычный OpenAI-прокси с `inference_url`
-`https://api.proxy.gonka.gg/v1` даст `/v1/chat/completions`.
-
-Для provider с `base_provider: openai`, если `models_url` не задан, gateway добавляет к той же
-полной базе только `/models`. Неявный каталог и явно заданный `models_url` используют один и тот же
-provider `api_key`: отдельного `models_api_key` нет — у провайдера один общий ключ. Для остальных
-Bifrost adapters discovery требует явного `models_url`.
-
-Каждый executable target валидируется по точному совпадению native ID с каталогом конкретного
-provider перед dispatch:
-
-- last-known-good snapshot есть и native присутствует — target допустим;
-- snapshot есть, native отсутствует — target завершается typed классом `model_not_found` и может
-  активировать настроенный fallback;
-- inferred catalog недоступен и snapshot ещё не получен — сохраняется optimistic вызов явно
-  настроенного native ID;
-- explicit `models_url` недоступен без last-known-good — fail closed;
-- неудачный refresh не уничтожает last-known-good конкретного provider.
-
-Лексикографический fallback на произвольную модель из каталога удалён полностью: resolver никогда
-не выбирает несвязанный native ID. `model_not_found` — явный опт-ин класс в `on` для retry и
-fallback; отсутствие native в snapshot классифицируется надёжно, без поиска подстрок в тексте
-ошибок.
-
-Catalog обновляется каждые 10 минут или вручную. Неуспешный refresh сохраняет last-known-good
-snapshot.
-
-## Пример конфигурации: Gonka
-
-Standalone binary поддерживает literal secrets и ссылки `env.VARIABLE_NAME`. NixOS module вместо
-этого передаёт ключи **только как environment-переменные**: в runtime config указываются имена
-(`env.<NAME>`), а значения раскладывает `llm-gateway-env.service` из agenix-секретов в
-`/run/llm-gateway-env/keys.env` (mode `0600`), который gateway service читает через
-`EnvironmentFile`. Ни имена
-`gonka-*`, ни модели `stupid`/`standard` не являются требованиями package — это только пример
-конкретного deployment.
-
-Обычные OpenAI/Anthropic/Gemini-compatible instances регистрируются в Bifrost как custom
-providers и сохраняют свой deployment ID. Vertex является исключением: Bifrost поддерживает
-его только как built-in provider `vertex`. Gateway отображает внешний routing ID (например,
-`google-vertex`) в built-in Bifrost key, не меняя labels, cooldown или route filters.
+### Пример конфигурации
 
 ```json
 {
   "host": "127.0.0.1",
   "port": 9208,
-  "client_api_keys": [
-    { "id": "pi-desktop", "key": "env.LLM_GATEWAY_CLIENT_KEY" }
-  ],
+  "metrics_host": "127.0.0.1",
+  "metrics_port": 9209,
+  "log_level": "info",
   "catalog_refresh_interval": "10m",
+  "client_api_keys": [
+    {
+      "id": "app-client",
+      "key": "env.CLIENT_API_KEY"
+    }
+  ],
   "providers": [
     {
-      "id": "gonka-proxy",
+      "id": "upstream-primary",
       "base_provider": "openai",
-      "inference_url": "https://proxy.gonka.gg/v1",
-      "api_key": "env.PROXY_GONKA_GG_API_KEY",
+      "inference_url": "https://api.openai.com/v1",
+      "api_key": "env.OPENAI_API_KEY",
       "priority": 10,
       "cooldown": "15s",
       "request_timeout": "60s"
     },
     {
-      "id": "gonka-openbroker",
+      "id": "upstream-backup",
       "base_provider": "openai",
-      "inference_url": "https://api.openbroker.gonka.gg/v1",
-      "models_url": "https://proxy.gonka.gg/v1/models",
-      "api_key": "env.OPENBROKER_GONKA_GG_API_KEY",
-      "priority": 10,
+      "inference_url": "https://api.backup-provider.com/v1",
+      "api_key": "env.BACKUP_API_KEY",
+      "priority": 5,
       "cooldown": "15s",
       "request_timeout": "60s"
     }
   ],
-    "routing_rules": [
-    {"route": "stupid", "action": "filter", "where": {"model": {"eq": "stupid"}}},
-    {"route": "stupid", "action": "filter", "where": {"provider": {"in": ["gonka-proxy", "gonka-openbroker"]}}},
-    {"route": "stupid", "action": "map", "native": "MiniMaxAI/MiniMax-M2.7"},
-    {"route": "stupid", "action": "rank", "strategy": "priority"},
-    {"route": "stupid", "action": "lease",
-      "source": "winner", "duration": "10m", "renew_on_success": true,
-      "release_on": ["429", "5xx", "timeout", "connection_error"],
-      "release_after_slow_starts": 3, "slow_start": "3s"},
-    {"route": "stupid", "action": "affinity",
-      "sources": ["responses.conversation", "responses.previous_response_id"],
-      "ttl": "24h", "on_missing": "ignore", "on_provider_failure": "fail-closed"},
-    {"route": "stupid", "action": "race", "count": 2},
-    {"route": "stupid", "action": "retry",
-      "target": "stupid.retry", "attempts": 2,
-      "backoff": {"type": "exponential", "initial": "200ms", "max": "1s"}},
-    {"route": "stupid", "action": "hedge", "after": "3s", "target": "stupid.hedge"},
-    {"route": "stupid", "action": "semaphore",
-      "max_calls": 4, "max_in_flight": 3, "max_calls_per_provider": 1},
-    {"route": "stupid", "action": "timeout", "duration": "60s"},
-    {"route": "stupid.retry", "action": "filter",
-      "where": {"error": {"in": ["429", "5xx", "timeout", "connection_error", "invalid_response"]}}},
-    {"route": "stupid.retry", "action": "filter",
-      "where": {"provider": {"in": ["gonka-proxy", "gonka-openbroker"], "unused": true}}},
-    {"route": "stupid.retry", "action": "map", "native": "MiniMaxAI/MiniMax-M2.7"},
-    {"route": "stupid.retry", "action": "rank", "strategy": "priority"},
-    {"route": "stupid.retry", "action": "race", "count": 1},
-    {"route": "stupid.hedge", "action": "filter",
-      "where": {"provider": {"in": ["gonka-proxy", "gonka-openbroker"], "unused": true}}},
-    {"route": "stupid.hedge", "action": "map", "native": "MiniMaxAI/MiniMax-M2.7"},
-    {"route": "stupid.hedge", "action": "rank", "strategy": "priority"},
-    {"route": "stupid.hedge", "action": "race", "count": 1},
+  "routing_rules": [
+    { "route": "standard", "action": "filter", "where": { "model": { "eq": "standard" } } },
+    { "route": "standard", "action": "filter", "where": { "provider": { "in": ["upstream-primary", "upstream-backup"] } } },
+    { "route": "standard", "action": "map", "native": "gpt-4o" },
+    { "route": "standard", "action": "rank", "strategy": "priority" },
+    { "route": "standard", "action": "race", "count": 1 },
+    {
+      "route": "standard",
+      "action": "retry",
+      "target": "standard.retry",
+      "attempts": 2,
+      "backoff": { "type": "exponential", "initial": "200ms", "max": "1s" }
+    },
+    { "route": "standard", "action": "timeout", "duration": "60s" },
 
-    {"route": "standard", "action": "filter", "where": {"model": {"eq": "standard"}}},
-    {"route": "standard", "action": "filter", "where": {"provider": {"in": ["gonka-proxy", "gonka-openbroker"]}}},
-    {"route": "standard", "action": "map", "native": "deepseek-ai/DeepSeek-V4-Flash-0731"},
-    {"route": "standard", "action": "rank", "strategy": "priority"},
-    {"route": "standard", "action": "lease",
-      "source": "winner", "duration": "10m", "renew_on_success": true,
-      "release_on": ["429", "5xx", "timeout", "connection_error"],
-      "release_after_slow_starts": 3, "slow_start": "3s"},
-    {"route": "standard", "action": "affinity",
-      "sources": ["responses.conversation", "responses.previous_response_id"],
-      "ttl": "24h", "on_missing": "ignore", "on_provider_failure": "fail-closed"},
-    {"route": "standard", "action": "race", "count": 2},
-    {"route": "standard", "action": "retry",
-      "target": "standard.retry", "attempts": 2,
-      "backoff": {"type": "exponential", "initial": "200ms", "max": "1s"}},
-    {"route": "standard", "action": "hedge", "after": "3s", "target": "standard.hedge"},
-    {"route": "standard", "action": "semaphore",
-      "max_calls": 4, "max_in_flight": 3, "max_calls_per_provider": 1},
-    {"route": "standard", "action": "timeout", "duration": "60s"},
-    {"route": "standard.retry", "action": "filter",
-      "where": {"error": {"in": ["429", "5xx", "timeout", "connection_error", "invalid_response"]}}},
-    {"route": "standard.retry", "action": "filter",
-      "where": {"provider": {"in": ["gonka-proxy", "gonka-openbroker"], "unused": true}}},
-    {"route": "standard.retry", "action": "map", "native": "deepseek-ai/DeepSeek-V4-Flash-0731"},
-    {"route": "standard.retry", "action": "rank", "strategy": "priority"},
-    {"route": "standard.retry", "action": "race", "count": 1},
-    {"route": "standard.hedge", "action": "filter",
-      "where": {"provider": {"in": ["gonka-proxy", "gonka-openbroker"], "unused": true}}},
-    {"route": "standard.hedge", "action": "map", "native": "deepseek-ai/DeepSeek-V4-Flash-0731"},
-    {"route": "standard.hedge", "action": "rank", "strategy": "priority"},
-    {"route": "standard.hedge", "action": "race", "count": 1},
-
-    {"route": "standard", "action": "fallback", "target": "standard.fallback"},
-    {"route": "standard.fallback", "action": "filter",
-      "where": {"error": {"in": ["model_not_found", "429", "5xx", "timeout", "connection_error"]}}},
-    {"route": "standard.fallback", "action": "filter",
-      "where": {"provider": {"in": ["gonka-openbroker"]}}},
-    {"route": "standard.fallback", "action": "map", "native": "gonka/deepseek-ai/DeepSeek-V4-Flash-0731"},
-    {"route": "standard.fallback", "action": "rank", "strategy": "priority"},
-    {"route": "standard.fallback", "action": "race", "count": 1}
+    { "route": "standard.retry", "action": "filter", "where": { "error": { "in": ["429", "5xx", "timeout", "connection_error"] } } },
+    { "route": "standard.retry", "action": "filter", "where": { "provider": { "in": ["upstream-primary", "upstream-backup"], "unused": true } } },
+    { "route": "standard.retry", "action": "map", "native": "gpt-4o" },
+    { "route": "standard.retry", "action": "rank", "strategy": "priority" },
+    { "route": "standard.retry", "action": "race", "count": 1 }
   ]
-
-## Сборка и запуск
-
-Сборка бинарника:
-
-```sh
-go build -o bin/llm-gateway ./cmd/llm-gateway
-# или
-make build
+}
 ```
 
-Запуск:
+---
 
-```sh
-go run ./cmd/llm-gateway --config /path/to/config.json serve
-# или
-./bin/llm-gateway --config /path/to/config.json serve
+## Маршрутизация (Routing Rules)
+
+Маршрутизация задается плоским списком правил (`routing_rules`). Каждое правило относится к определенному маршруту (`route`) и выполняет конкретное действие (`action`):
+
+```text
+filter → map → admission → balance → affinity → race → retry → hedge → timeout
 ```
 
-или через Nix package:
+- **`filter`**: фильтрация запросов по имени модели (`where.model.eq`), списку провайдеров (`where.provider.in`), классу ошибки (`where.error.in`) или статусу использования (`unused: true`).
+- **`map`**: сопоставление виртуальной модели с реальной моделью провайдера (`native`), с опциональной привязкой к уровню (`tier`).
+- **`admission`**: контроль очередей и конкурентности (`maxInFlight`, `maxPending`, `waitTimeout`).
+- **`balance`**: динамический выбор таргета (например, по ожидаемой задержке первого токена: `expected-ttft` с поддержкой $\epsilon$-greedy exploration).
+- **`affinity`**: привязка цепочек Responses API к выигравшему провайдеру по сессионному идентификатору.
+- **`race`**: количество параллельных запросов (`count`) к лучшим провайдерам (первый успешный ответ выигрывает).
+- **`retry`**: маршрутизация при ошибках (429, 5xx, таймауты) на резервные провайдеры с настройкой экспоненциального бэкоффа.
+- **`hedge`**: запуск параллельного резервного запроса, если основной не ответил за указанное время (`after`).
+- **`timeout`**: ограничение общего времени запроса (`duration`) и допустимой паузы между чанками стрима (`idle`).
+
+---
+
+## Наблюдаемость
+
+### Метрики Prometheus
+
+Метрики отдаются в формате Prometheus на выделенном loopback-адресе (`127.0.0.1:9209/metrics`).
+
+Проверка сбора метрик:
 
 ```sh
-nix build .#packages.x86_64-linux.llm-gateway
+curl -s localhost:9209/metrics
 ```
 
-На NixOS runtime настраивается через
-[`modules/llm-gateway`](https://github.com/mytecor/lattice/tree/main/modules/llm-gateway). Homelab mapping находится в
-[`nodes/mytecor-homelab/config.nix`](https://github.com/mytecor/lattice/blob/main/nodes/mytecor-homelab/config.nix).
+Ключевые метрики:
+- `llm_requests_total` — счетчик завершенных запросов по статусам, маршрутам и провайдерам.
+- `llm_request_duration_seconds` — гистограмма полного времени выполнения запросов.
+- `llm_ttft_seconds` — время до получения первого токена (Time to First Token).
+- `llm_input_tokens_total` / `llm_output_tokens_total` — учет использованных токенов.
+- `llm_attempts_total` / `llm_stream_breaks_total` — upstream-попытки и обрывы стримов.
+- `llm_requests_in_flight` — текущее количество активных запросов по провайдерам.
+- `llm_cooldown_until_seconds` — время окончания кулдауна провайдера/модели при сбоях.
 
-## Проверка и тесты
+### Структурированные логи
+
+Логирование осуществляется через стандартный Go-пакет `log/slog` в формате JSON (в `stdout`). Каждый запрос маркируется уникальным `request_id`, связывающим события попыток (`request_received`, `llm_attempt`, `llm_retry`, `request_completed`, `request_failed`). Тела запросов, промпты и ключи авторизации не логируются.
+
+---
+
+## Тестирование и линтинг
 
 ```sh
-go test ./...
-go test -race ./...
-go run ./cmd/llm-gateway --require-env-secrets --allowed-env CLIENT_KEY,PROVIDER_KEY \
-  --config /path/to/config.json check
-nix flake check --no-build
+make test       # запуск модульных тестов
+make test-race  # запуск тестов с проверкой гонок (race detector)
+make lint       # линтинг (golangci-lint или go vet)
 ```
-
-Через `make`:
-
-```sh
-make test       # запуск юнит-тестов
-make test-race  # тесты с race detector
-make lint       # линтер (golangci-lint / go vet)
-```
-
-`check` выполняет strict decode и компиляцию route graph, но не резолвит
-`env.NAME`; поэтому его можно безопасно запускать во время Nix build без
-runtime credentials. `--require-env-secrets` запрещает literal credentials и
-проверяет синтаксис environment variable names; `--allowed-env` сверяет ссылки
-с environment names, объявленными service wrapper.
-
-Тесты покрывают:
-
-- реальный Bifrost custom-provider path для Chat и Responses;
-- оба streaming API;
-- typed `filter`: model eq, provider in/not_in/unused, error in, attempt lt, несколько
-  последовательных filters, unknown filter field, unknown operator, invalid value type,
-  unknown error class, empty in, missing где-dimension;
-- mapping: filter a,b → map X; filter c → map Y; каждый provider получает свой native, duplicate
-  provider в одном pool отклоняется;
-- entry route: model=standard → standard; model=stupid → stupid; unknown model → явная ошибка без
-  dispatch; subroutes никогда не становятся logical models;
-- bounded race: ровно top-`count` targets, first-success и игнорирование первой ошибки;
-- cancellation проигравшего provider и client disconnect;
-- retry subroute: 429 → retry route applicable → retry call; 400 → не applicable → оригинальный
-  terminal failure без нового call; attempts и backoff; unused pool exhaustion возвращает
-  оригинал;
-- fallback subroute: model_not_found/5xx → fallback; 400 → не applicable; общий semaphore budget;
-- nested transitions standard → standard.fallback → standard.fallback.retry;
-- hedge, стартующий только target route после delay, без клонирования pool и без задержки
-  быстрого terminal failure;
-- semaphore bounds `max_calls`, `max_in_flight`, `max_calls_per_provider` при race, retry, hedge,
-  timeout и client cancellation;
-- provider-scoped catalog semantics: exact-match-only, partial refresh независим по provider,
-  last-known-good, inferred optimistic и explicit fail-closed;
-- `model_not_found` переводит выполнение на явно настроенный fallback subroute и никогда не
-  выбирает несвязанную модель; dual-alias provider (один native в entry, другой в fallback) не
-  вызывает один endpoint дважды;
-- lease acquire/renew/expire/release, slow-start threshold и нейтральность loser cancellations;
-- Responses affinity: Chat без affinity, `previous_response_id`, conversation boundary,
-  missing/expired mapping, pinned success/failure (fail-closed, весь граф переходов подавлен) и
-  отсутствие cross-provider stateful retry;
-- persistence opaque affinity mapping через файл mode 0600;
-- config validation: поля/порядок, empty pool, duplicate provider, map без selection, race без
-  pool, missing race/target, orphan route, duplicate entry model, routing cycles, semaphore/timeout
-  on subroute, cascade rejection всех legacy полей (`match`, `map.providers`, `retry.scope/count/on`,
-  `fallback.on/fallbackStrategy`);
-- logical/native model rewrite и удаление Bifrost routing metadata из client responses;
-- отсутствие новых upstream calls после winner/cancellation/timeout/semaphore exhaustion;
-- метрики: рендер exposition format (порядок, TYPE/HELP, один line per label set, histogram
-  buckets/le-"+Inf"/sum/count), отсутствие высоко-cardinality лейблов, точность in-flight gauge
-  и попыток при concurrent ветвях (`-race` чисто); end-to-end request → counters/duration/tokens/
-  attempts/balance через серверный мэп.
-- структурированные события: `request_completed` несёт полный набор полей (status_code,
-  duration_ms, ttft_ms, tokens, stream, attempts, provider/route), `request_failed` при ошибке,
-  `llm_retry`+`llm_attempt success` ровно при ретрае, `llm_fallback` при fallback,
-  отсутствие prompt/секретов в любом событии (`-race` чисто).
-
-## Безопасность
-
-- Provider secrets не входят в публичный Nix config и Git.
-- Runtime config имеет mode `0600` и находится в `/run/llm-gateway`.
-- Bifrost content logging не включён; executor использует silent logger. Собственные
-  структурированные логи gateway не содержат request body, prompt, headers или credentials.
-- Ошибки клиенту содержат только безопасный error class, без internal URL, key или native ID.
-- Provider-facing raw OpenAI body получает native model только после проверки logical model.
-- `/v1/models` публикует только logical IDs, выведенные из скомпилированных plans; native IDs и
-  provider metadata не попадают в client responses и безопасные ошибки.
-- `GET /metrics` не требует `client_api_keys` и обслуживается отдельным loopback-листенером
-  (`metrics_host:metrics_port`); он намеренно не публичен и не раскрывает provider credentials.
-
-Полный план и незавершённые шаги cutover находятся в
-[`f7-07-bifrost-go-proxy.md`](https://github.com/mytecor/lattice/blob/main/roadmap/f7-llm-gateway/f7-07-bifrost-go-proxy.md).
-
-## План: context transformation
-
-Встроенный pre-routing pipeline `tool-output-compress` → `history-compact` → `context-select`
-описан в [F16: design и задачи f16-01..f16-09](https://github.com/mytecor/lattice/tree/main/roadmap/f16-context-transformation).
-Это план, текущий runtime историю не сжимает. MVP ограничен полной `messages[]` в Chat
-Completions; Responses/affinity сохраняют текущий контракт.
