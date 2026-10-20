@@ -116,7 +116,7 @@ and receive completion callbacks. Completion runs when the upstream stream ends
 or cancels, rather than when a channel is returned. `session.heartbeat` defaults to 20 seconds (a negative duration disables it).
 Heartbeats remain
 non-meaningful for selection/TTFT and do not enter stored conversation history.
-Existing compiled routing rules retain their behavior.
+Existing compiled rules retain their behavior.
 
 ## Direct browser-driver protocol
 

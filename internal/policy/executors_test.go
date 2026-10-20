@@ -8,7 +8,7 @@ import (
 
 func sessionConfig(t *testing.T, kind string) Config {
 	t.Helper()
-	raw := `{"providers":[{"id":"p","executor":"` + kind + `","command":["driver"],"session":{"default_cwd":"` + t.TempDir() + `"}}],"routing_rules":[{"route":"main","action":"filter","where":{"model":{"eq":"agent"}}},{"route":"main","action":"map","providers":["p"],"native":"default"},{"route":"main","action":"race","count":1}]}`
+	raw := `{"providers":[{"id":"p","executor":"` + kind + `","command":["driver"],"session":{"default_cwd":"` + t.TempDir() + `"}}],"rules":[{"route":"main","action":"filter","where":{"model":{"eq":"agent"}}},{"route":"main","action":"map","providers":["p"],"native":"default"},{"route":"main","action":"race","count":1}]}`
 	var cfg Config
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		t.Fatal(err)
@@ -56,17 +56,17 @@ func TestSessionRoutesRejectSpeculationAndReplay(t *testing.T) {
 		`{"route":"main","action":"repetition"}`,
 	} {
 		cfg := sessionConfig(t, "acp")
-		var rules RoutingRules
+		var rules Rules
 		if err := json.Unmarshal([]byte("["+action+"]"), &rules); err != nil {
 			t.Fatal(err)
 		}
-		cfg.RoutingRules = append(cfg.RoutingRules, rules...)
+		cfg.Rules = append(cfg.Rules, rules...)
 		if _, err := CompileConfig(cfg); err == nil {
 			t.Fatalf("accepted %s", action)
 		}
 	}
 	cfg := sessionConfig(t, "acp")
-	cfg.RoutingRules[len(cfg.RoutingRules)-1].(*RaceRule).Count = 0
+	cfg.Rules[len(cfg.Rules)-1].(*RaceRule).Count = 0
 	if _, err := CompileConfig(cfg); err == nil || !strings.Contains(err.Error(), "stateful") {
 		t.Fatal("accepted implicit stateful race", err)
 	}

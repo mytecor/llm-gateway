@@ -16,7 +16,7 @@ func TestProviderCapacityHeldForSelectedStreamLifetime(t *testing.T) {
 	cfg := policy.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Providers[0].MaxConcurrent = 1
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.MapRuleDirect("standard", []string{"a"}, "model-x", 0),
 		policy.RankRuleHelper("standard"),
@@ -78,7 +78,7 @@ func TestProviderCapacityHeldForSelectedStreamLifetime(t *testing.T) {
 
 func TestInternalRetryExcludesEveryFailedRaceTarget(t *testing.T) {
 	cfg := policy.TestConfig()
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.MapRuleDirect("standard", []string{"a", "b", "c"}, "model-x", 0),
 		policy.RankRuleHelper("standard"),
@@ -117,7 +117,7 @@ func TestInternalHedgeReevaluatesCapacityAtFireTime(t *testing.T) {
 	for i := range cfg.Providers {
 		cfg.Providers[i].MaxConcurrent = 1
 	}
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.MapRuleDirect("standard", []string{"a", "b", "c"}, "model-x", 0),
 		policy.RankRuleHelper("standard"),
@@ -174,7 +174,7 @@ func TestScopedInvalidUpstreamFailureIsReschedulable(t *testing.T) {
 
 func TestStreamingInternalRetryHidesPreWinnerFailure(t *testing.T) {
 	cfg := policy.TestConfig()
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.MapRuleDirect("standard", []string{"a", "b"}, "model-x", 0),
 		policy.RankRuleHelper("standard"),

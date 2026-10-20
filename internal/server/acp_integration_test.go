@@ -216,7 +216,7 @@ func newNativeServer(t *testing.T, kind, mode string, timeout time.Duration, sto
 	}
 	raw, _ := json.Marshal(map[string]any{
 		"providers": []any{map[string]any{"id": "native", "executor": kind, "command": []string{exe, mode}, "session": map[string]any{"default_cwd": cwd, "store_path": store, "turn_timeout": timeout.String()}}},
-		"routing_rules": []any{
+		"rules": []any{
 			map[string]any{"route": "agent", "action": "filter", "where": map[string]any{"model": map[string]string{"eq": "fake"}}},
 			map[string]any{"route": "agent", "action": "map", "providers": []string{"native"}, "native": "default"},
 			map[string]any{"route": "agent", "action": "race", "count": 1},

@@ -16,7 +16,7 @@ func continueConfig(t *testing.T) *policy.CompiledConfig {
 	t.Helper()
 	cfg := policy.TestConfig()
 	cfg.Providers = cfg.Providers[:2] // a, b
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a", "b"),
 		policy.MapRuleHelper("standard", "native-model"),

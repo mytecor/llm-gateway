@@ -218,7 +218,7 @@ func TestServerHoldRecoveryBoundedWhenProviderRepeatedlyBreaks(t *testing.T) {
 	cfg := policy.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Providers[0].Cooldown = policy.Duration{Duration: 10 * time.Millisecond}
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a"),
 		policy.MapRuleHelper("standard", "native-model"),
@@ -290,7 +290,7 @@ func continueConfigRetriesWait(t *testing.T, retries int, wait time.Duration) *p
 	t.Helper()
 	cfg := policy.TestConfig()
 	cfg.Providers = cfg.Providers[:2] // a, b
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a", "b"),
 		policy.MapRuleHelper("standard", "native-model"),
@@ -326,7 +326,7 @@ func continueConfigHold(t *testing.T, retries int, wait, cooldown time.Duration)
 		cfg.Providers[i].Cooldown = policy.Duration{Duration: cooldown}
 	}
 	cfg.Providers = cfg.Providers[:2] // a, b
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a", "b"),
 		policy.MapRuleHelper("standard", "native-model"),

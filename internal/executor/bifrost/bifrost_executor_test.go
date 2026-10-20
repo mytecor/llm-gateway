@@ -23,7 +23,7 @@ func bifrostTestConfig(t *testing.T, upstreamURL string) *policy.CompiledConfig 
 	cfg.Providers[0].InferenceURL = upstreamURL
 	cfg.Providers[0].APIKey = "provider-secret"
 	cfg.Providers[0].AllowPrivateNetwork = true
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "mock-openai"),
 		policy.MapRuleHelper("standard", "native-model"),
@@ -69,7 +69,7 @@ func TestBifrostExecutorRegistersVertexAsStandardProvider(t *testing.T) {
 		VertexRegion:          "global",
 		VertexAuthCredentials: `{"type":"service_account"}`,
 	}}
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("smart", "smart"),
 		policy.FilterProvider("smart", "google-vertex"),
 		policy.MapRuleHelper("smart", "gemini-4-argon"),

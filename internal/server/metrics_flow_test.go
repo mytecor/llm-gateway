@@ -21,7 +21,7 @@ const withUsageBody = `{"id":"chat-1","model":"native-model","choices":[{"index"
 func TestMetricsFlowThroughServer(t *testing.T) {
 	cfg := policy.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a"),
 		policy.MapRuleHelper("standard", "native-model"),
@@ -117,7 +117,7 @@ func TestMetricsPerClientKey(t *testing.T) {
 		{ID: "primary", Key: "key-a"},
 		{ID: "secondary", Key: "key-b"},
 	}
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a"),
 		policy.MapRuleHelper("standard", "native-model"),

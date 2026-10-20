@@ -9,7 +9,7 @@ import (
 
 // stageState tracks the per-route compilation of the provider selection and
 // the pending candidate pool. Each named route owns one stageState; rules of
-// the same route execute in order of appearance in the global routing_rules.
+// the same route execute in order of appearance in the global rules.
 type stageState struct {
 	providerUniverse    map[string]bool // providers referenced by the route's provider filters
 	selection           map[string]bool // current provider selection built by the last provider filter
@@ -171,7 +171,7 @@ type routeCompileResult struct {
 	entries map[string]*CompiledRoute // logical model → entry route
 }
 
-// compileRules compiles the flat routing rule list into the immutable named
+// compileRules compiles the flat rule list into the immutable named
 // route graph. Rules are grouped by route preserving the order of first
 // appearance; within a route they execute in order of appearance. Each rule
 // applies itself through typed dispatch, so there is no central switch
@@ -185,14 +185,14 @@ func compileRoutes(rules []Rule, providers map[string]Provider) (*routeCompileRe
 	for index, rule := range rules {
 		route := rule.route()
 		if route == "" {
-			return nil, fmt.Errorf("routing rule %d has no route", index)
+			return nil, fmt.Errorf("rule %d has no route", index)
 		}
 		action := rule.action()
 		if action == "" {
-			return nil, fmt.Errorf("routing rule %d (route %q) has no action", index, route)
+			return nil, fmt.Errorf("rule %d (route %q) has no action", index, route)
 		}
 		if _, ok := ruleRegistry[action]; !ok {
-			return nil, fmt.Errorf("routing rule %d (route %q) has unsupported action %q", index, route, action)
+			return nil, fmt.Errorf("rule %d (route %q) has unsupported action %q", index, route, action)
 		}
 		if _, exists := groups[route]; !exists {
 			order = append(order, route)

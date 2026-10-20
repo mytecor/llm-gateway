@@ -26,7 +26,7 @@ func TestRunCheckValidConfig(t *testing.T) {
 		"providers": [
 			{"id": "a", "base_provider": "openai", "inference_url": "https://a.invalid"}
 		],
-		"routing_rules": [
+		"rules": [
 			{"route": "standard", "action": "filter", "where": {"model": {"eq": "standard"}}},
 			{"route": "standard", "action": "filter", "where": {"provider": {"in": ["a"]}}},
 			{"route": "standard", "action": "map", "native": "native-model"},

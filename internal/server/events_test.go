@@ -140,7 +140,7 @@ func postCompletion(t *testing.T, url, body string) (*http.Response, string) {
 func TestRequestCompletedEventCarriesFullFields(t *testing.T) {
 	cfg := policy.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a"),
 		policy.MapRuleHelper("standard", "native-model"),
@@ -193,7 +193,7 @@ func TestRequestCompletedEventCarriesFullFields(t *testing.T) {
 func TestRequestFailedEventOnTimeout(t *testing.T) {
 	cfg := policy.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a"),
 		policy.MapRuleHelper("standard", "native-model"),
@@ -241,7 +241,7 @@ func TestRetryEmitsAttemptEvents(t *testing.T) {
 	// First provider always fails with 429; second succeeds. Entry route races
 	// provider a only (count=1) and retries into standard.retry which picks
 	// the unused provider b.
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a"),
 		policy.MapRuleHelper("standard", "native-model"),
@@ -300,7 +300,7 @@ func TestRetryEmitsAttemptEvents(t *testing.T) {
 func TestFallbackEmitsFallbackEvent(t *testing.T) {
 	cfg := policy.TestConfig()
 	cfg.Providers = cfg.Providers[:2]
-	cfg.RoutingRules = append([]policy.Rule{
+	cfg.Rules = append([]policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a"),
 		policy.MapRuleHelper("standard", "native-model"),
@@ -341,7 +341,7 @@ func TestCooldownPutEventFiresOnRetryableFailure(t *testing.T) {
 	cfg := policy.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Providers[0].Cooldown = policy.Duration{Duration: 5 * time.Minute}
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a"),
 		policy.MapRuleHelper("standard", "native-model"),
@@ -386,7 +386,7 @@ func TestCooldownPutEventFiresOnRetryableFailure(t *testing.T) {
 func TestEveryEventLineCarriesServiceAndEventName(t *testing.T) {
 	cfg := policy.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a"),
 		policy.MapRuleHelper("standard", "native-model"),
@@ -422,7 +422,7 @@ func TestEventsNeverContainSecrets(t *testing.T) {
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Providers[0].APIKey = secret
 	cfg.ClientAPIKeys = []policy.ClientKey{{ID: "primary", Key: secret}}
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a"),
 		policy.MapRuleHelper("standard", "native-model"),

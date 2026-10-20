@@ -117,7 +117,7 @@ Configuration is specified in JSON format (see [configs/config.example.json](con
       "request_timeout": "60s"
     }
   ],
-  "routing_rules": [
+  "rules": [
     { "route": "standard", "action": "filter", "where": { "model": { "eq": "standard" } } },
     { "route": "standard", "action": "filter", "where": { "provider": { "in": ["upstream-primary", "upstream-backup"] } } },
     { "route": "standard", "action": "map", "native": "gpt-4o" },
@@ -143,9 +143,9 @@ Configuration is specified in JSON format (see [configs/config.example.json](con
 
 ---
 
-## Routing Rules
+## Rules
 
-Routing is configured as a flat list of rules (`routing_rules`). Each rule targets a specific route (`route`) and executes a concrete action (`action`):
+Routing is configured as a flat list of rules (`rules`). Each rule targets a specific route (`route`) and executes a concrete action (`action`):
 
 ```text
 filter → map → admission → balance → affinity → race → retry → hedge → timeout

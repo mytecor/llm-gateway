@@ -39,7 +39,7 @@ func TestTimeoutRuleExplicitIdleAndContinuePolicy(t *testing.T) {
 	}
 
 	cfg := testConfig()
-	cfg.RoutingRules = []Rule{
+	cfg.Rules = []Rule{
 		filterModel("smart", "smart"),
 		filterProvider("smart", "a"),
 		mapRule("smart", "native-model"),
@@ -62,7 +62,7 @@ func TestTimeoutRuleExplicitIdleAndContinuePolicy(t *testing.T) {
 		t.Fatalf("streamIdleTimeout = %v, want 5m from timeout.idle", got)
 	}
 
-	cfg.RoutingRules = append(cfg.RoutingRules, &ContinueRule{
+	cfg.Rules = append(cfg.Rules, &ContinueRule{
 		RuleBase: RuleBase{Route: "smart", Action: ActionContinue},
 		Retries:  2,
 		Wait:     Duration{Duration: 5 * time.Minute},

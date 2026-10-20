@@ -31,7 +31,7 @@
       "request_timeout": "60s"
     }
   ],
-  "routing_rules": [
+  "rules": [
     {
       "route": "standard",
       "action": "filter",

@@ -97,10 +97,10 @@ var ruleRegistry = map[string]ruleDescriptor{
 	ActionRepetition: {rank: 14, new: func() Rule { return &RepetitionRule{} }},
 }
 
-// ruleErrf formats a routing-rule error that always carries the rule index,
+// ruleErrf formats a rule error that always carries the rule index,
 // the named route and the action followed by the concrete cause (never
 // credentials or internal URLs).
 func ruleErrf(index int, route, action, format string, args ...any) error {
-	return fmt.Errorf("routing rule %d (route %q, action %q): %s",
+	return fmt.Errorf("rule %d (route %q, action %q): %s",
 		index, route, action, fmt.Sprintf(format, args...))
 }

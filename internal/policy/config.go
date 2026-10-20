@@ -98,7 +98,7 @@ type Config struct {
 	StreamIdleTimeout      Duration     `json:"stream_idle_timeout"`
 	AffinityFile           string       `json:"affinity_file,omitempty"`
 	Providers              []Provider   `json:"providers"`
-	RoutingRules           RoutingRules `json:"routing_rules"`
+	Rules                  Rules        `json:"rules"`
 }
 
 // ClientKey is one named client credential. ID is the non-secret identity
@@ -821,7 +821,7 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 		}
 	}
 
-	result, err := compileRoutes(cfg.RoutingRules, compiled.Providers)
+	result, err := compileRoutes(cfg.Rules, compiled.Providers)
 	if err != nil {
 		return nil, err
 	}

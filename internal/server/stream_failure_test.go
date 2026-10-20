@@ -24,7 +24,7 @@ func singleProviderStreamConfig(t *testing.T) *policy.CompiledConfig {
 	t.Helper()
 	cfg := policy.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a"),
 		policy.MapRuleHelper("standard", "native-model"),

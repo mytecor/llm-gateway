@@ -290,7 +290,7 @@ func TestRaceReleasesInFlightGauge(t *testing.T) {
 
 func TestEntryRouteSelectionByModel(t *testing.T) {
 	cfg := policy.TestConfig()
-	cfg.RoutingRules = append(policy.EntryRules([]string{"a", "b"}, 1),
+	cfg.Rules = append(policy.EntryRules([]string{"a", "b"}, 1),
 		policy.FilterModel("stupid", "stupid"),
 		policy.FilterProvider("stupid", "c"),
 		policy.MapRuleHelper("stupid", "native-model"),
@@ -328,7 +328,7 @@ func TestEntryRouteSelectionByModel(t *testing.T) {
 
 func TestDuplicateEntryModelRejected(t *testing.T) {
 	cfg := policy.TestConfig()
-	cfg.RoutingRules = append(cfg.RoutingRules,
+	cfg.Rules = append(cfg.Rules,
 		policy.FilterModel("second", "standard"),
 		policy.FilterProvider("second", "c"),
 		policy.MapRuleHelper("second", "native-model"),
@@ -1625,7 +1625,7 @@ func TestAffinityResolutionFailureRemainsPinned(t *testing.T) {
 	})
 	rules := policy.EntryRules([]string{"a", "b"}, 2)
 	rules = append(rules[:4], append([]policy.Rule{affinity}, rules[4:]...)...)
-	cfg.RoutingRules = rules
+	cfg.Rules = rules
 	compiled, err := policy.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -1723,7 +1723,7 @@ func compiledWithCatalogs(t *testing.T, rules []policy.Rule, catalogs map[string
 		{ID: "b", BaseProvider: "openai", InferenceURL: "https://b.invalid", Priority: 10},
 		{ID: "c", BaseProvider: "openai", InferenceURL: "https://c.invalid", Priority: 5},
 	}
-	cfg.RoutingRules = rules
+	cfg.Rules = rules
 	compiled, err := policy.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)

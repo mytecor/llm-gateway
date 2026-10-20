@@ -97,7 +97,7 @@ func TestCompileConfigBuildsFlatPipeline(t *testing.T) {
 
 func TestCompileConfigBoundedPipeline(t *testing.T) {
 	cfg := testConfig()
-	cfg.RoutingRules = boundedPipeline("standard")
+	cfg.Rules = boundedPipeline("standard")
 	compiled, err := compileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -134,7 +134,7 @@ func TestCompileConfigBoundedPipeline(t *testing.T) {
 
 func TestCompileConfigConsecutiveMapsAccumulateAndDeduplicate(t *testing.T) {
 	cfg := testConfig()
-	cfg.RoutingRules = []Rule{
+	cfg.Rules = []Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "a"),
 		mapRule("standard", "native-model"),
@@ -154,7 +154,7 @@ func TestCompileConfigConsecutiveMapsAccumulateAndDeduplicate(t *testing.T) {
 
 func TestCompileConfigRejectsDuplicateProviderInPool(t *testing.T) {
 	cfg := testConfig()
-	cfg.RoutingRules = []Rule{
+	cfg.Rules = []Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "a"),
 		mapRule("standard", "native-x"),
@@ -171,7 +171,7 @@ func TestCompileConfigRejectsDuplicateProviderInPool(t *testing.T) {
 
 func TestCompileConfigRejectsUnknownProvider(t *testing.T) {
 	cfg := testConfig()
-	cfg.RoutingRules = []Rule{
+	cfg.Rules = []Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "ghost"),
 		mapRule("standard", "native-model"),
@@ -186,7 +186,7 @@ func TestCompileConfigRejectsUnknownProvider(t *testing.T) {
 
 func TestCompileConfigRejectsParameterlessHedge(t *testing.T) {
 	cfg := testConfig()
-	cfg.RoutingRules = append(cfg.RoutingRules[:5],
+	cfg.Rules = append(cfg.Rules[:5],
 		hedgeRule("standard", 0, "standard.hedge"),
 		filterError("standard.hedge", "429"),
 		filterProvider("standard.hedge", "b", "c"),
@@ -202,7 +202,7 @@ func TestCompileConfigRejectsParameterlessHedge(t *testing.T) {
 
 func TestCompileConfigRejectsMapAfterRank(t *testing.T) {
 	cfg := testConfig()
-	cfg.RoutingRules = []Rule{
+	cfg.Rules = []Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "a", "b"),
 		mapRule("standard", "native-model"),
@@ -219,7 +219,7 @@ func TestCompileConfigRejectsMapAfterRank(t *testing.T) {
 
 func TestCompileConfigRejectsRaceWithoutMap(t *testing.T) {
 	cfg := testConfig()
-	cfg.RoutingRules = []Rule{
+	cfg.Rules = []Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "a", "b"),
 		raceRule("standard", 2),
@@ -232,7 +232,7 @@ func TestCompileConfigRejectsRaceWithoutMap(t *testing.T) {
 
 func TestCompileConfigRejectsMissingRace(t *testing.T) {
 	cfg := testConfig()
-	cfg.RoutingRules = []Rule{
+	cfg.Rules = []Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "a", "b"),
 		mapRule("standard", "native-model"),
@@ -246,7 +246,7 @@ func TestCompileConfigRejectsMissingRace(t *testing.T) {
 
 func TestCompileConfigRejectsMissingTargetRoute(t *testing.T) {
 	cfg := testConfig()
-	cfg.RoutingRules = append(cfg.RoutingRules[:5],
+	cfg.Rules = append(cfg.Rules[:5],
 		retryRule("standard", "does.not.exist", 2),
 	)
 	_, err := compileConfig(cfg)
@@ -257,7 +257,7 @@ func TestCompileConfigRejectsMissingTargetRoute(t *testing.T) {
 
 func TestCompileConfigRejectsOrphanRoute(t *testing.T) {
 	cfg := testConfig()
-	cfg.RoutingRules = append(cfg.RoutingRules[:5],
+	cfg.Rules = append(cfg.Rules[:5],
 		filterProvider("ghost.way", "c"),
 		mapRule("ghost.way", "native-model"),
 		rankRule("ghost.way"),
@@ -271,7 +271,7 @@ func TestCompileConfigRejectsOrphanRoute(t *testing.T) {
 
 func TestCompileConfigRejectsRoutingCycle(t *testing.T) {
 	cfg := testConfig()
-	cfg.RoutingRules = []Rule{
+	cfg.Rules = []Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "a", "b"),
 		mapRule("standard", "native-model"),
@@ -293,7 +293,7 @@ func TestCompileConfigRejectsRoutingCycle(t *testing.T) {
 
 func TestCompileConfigRejectsDuplicateEntryModel(t *testing.T) {
 	cfg := testConfig()
-	cfg.RoutingRules = append(cfg.RoutingRules,
+	cfg.Rules = append(cfg.Rules,
 		filterModel("second", "standard"),
 		filterProvider("second", "c"),
 		mapRule("second", "native-model"),
@@ -308,7 +308,7 @@ func TestCompileConfigRejectsDuplicateEntryModel(t *testing.T) {
 
 func TestCompileConfigRejectsMapWithoutSelection(t *testing.T) {
 	cfg := testConfig()
-	cfg.RoutingRules = []Rule{
+	cfg.Rules = []Rule{
 		filterModel("standard", "standard"),
 		mapRule("standard", "native-model"),
 		rankRule("standard"),
@@ -331,7 +331,7 @@ func TestCompileConfigSubrouteInheritsRequestWideGuards(t *testing.T) {
 
 func TestCompileConfigRejectsInvalidLease(t *testing.T) {
 	cfg := testConfig()
-	cfg.RoutingRules = []Rule{
+	cfg.Rules = []Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "a", "b"),
 		mapRule("standard", "native-model"),
@@ -350,7 +350,7 @@ func TestCompileConfigRejectsInvalidLease(t *testing.T) {
 
 func TestCompileConfigRejectsInvalidAffinity(t *testing.T) {
 	cfg := testConfig()
-	cfg.RoutingRules = []Rule{
+	cfg.Rules = []Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "a", "b"),
 		mapRule("standard", "native-model"),
@@ -371,7 +371,7 @@ func TestCompileConfigRejectsInvalidAffinity(t *testing.T) {
 
 func TestCompileConfigRejectsInvalidSemaphore(t *testing.T) {
 	cfg := testConfig()
-	cfg.RoutingRules = append(cfg.RoutingRules[:5], semaphoreRule("standard", 0, 1, 1))
+	cfg.Rules = append(cfg.Rules[:5], semaphoreRule("standard", 0, 1, 1))
 	_, err := compileConfig(cfg)
 	if err == nil || !strings.Contains(err.Error(), "positive") {
 		t.Fatalf("expected semaphore error, got %v", err)
@@ -380,7 +380,7 @@ func TestCompileConfigRejectsInvalidSemaphore(t *testing.T) {
 
 func TestCompileConfigModifiersRequireRace(t *testing.T) {
 	cfg := testConfig()
-	cfg.RoutingRules = []Rule{
+	cfg.Rules = []Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "a", "b"),
 		mapRule("standard", "native-model"),
@@ -536,7 +536,7 @@ func TestCheckConfigDoesNotResolveRuntimeSecrets(t *testing.T) {
   "providers": [
     {"id":"a","base_provider":"openai","inference_url":"https://a.invalid","api_key":"env.MISSING_PROVIDER_KEY"}
   ],
-  "routing_rules": [
+  "rules": [
     {"route":"standard","action":"filter","where":{"model":{"eq":"standard"}}},
     {"route":"standard","action":"filter","where":{"provider":{"in":["a"]}}},
     {"route":"standard","action":"map","native":"native-model"},
@@ -609,7 +609,7 @@ func TestCompileBoundedPipelineJSON(t *testing.T) {
     {"id":"b","base_provider":"openai","inference_url":"https://b.invalid","priority":10},
     {"id":"c","base_provider":"openai","inference_url":"https://c.invalid","priority":5}
   ],
-  "routing_rules": [
+  "rules": [
     {"route":"standard","action":"filter","where":{"model":{"eq":"standard"}}},
     {"route":"standard","action":"filter","where":{"provider":{"in":["a","b","c"]}}},
     {"route":"standard","action":"map","native":"native-model"},
@@ -696,7 +696,7 @@ func TestCompileJSONRejectsUnknownPublicField(t *testing.T) {
   "providers": [
     {"id":"a","base_provider":"openai","inference_url":"https://a.invalid","priority":20}
   ],
-  "routing_rules": [
+  "rules": [
     {"route":"standard","action":"filter","where":{"model":{"eq":"standard"}}},
     {"route":"standard","action":"filter","where":{"provider":{"in":["a"]}}},
     {"route":"standard","action":"map","native":"native-model"},
@@ -723,7 +723,7 @@ func TestCompileJSONRejectsZeroValuedMisplacedField(t *testing.T) {
   "providers": [
     {"id":"a","base_provider":"openai","inference_url":"https://a.invalid"}
   ],
-  "routing_rules": [
+  "rules": [
     {"route":"standard","action":"filter","where":{"model":{"eq":"standard"}}},
     {"route":"standard","action":"filter","where":{"provider":{"in":["a"]}}},
     {"route":"standard","action":"map","native":"native-model","count":0},
@@ -749,7 +749,7 @@ func TestCompileJSONRejectsUnknownAction(t *testing.T) {
   "providers": [
     {"id":"a","base_provider":"openai","inference_url":"https://a.invalid"}
   ],
-  "routing_rules": [
+  "rules": [
     {"route":"standard","action":"mystery"}
   ]
 }`
@@ -773,7 +773,7 @@ func TestCompileJSONRejectsMissingRequiredRuleField(t *testing.T) {
   "providers": [
     {"id":"a","base_provider":"openai","inference_url":"https://a.invalid"}
   ],
-  "routing_rules": [
+  "rules": [
     {"route":"standard","action":"filter","where":{"model":{"eq":"standard"}}},
     {"route":"standard","action":"map","native":"native-model"},
     {"route":"standard","action":"rank","strategy":"priority"},

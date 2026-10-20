@@ -185,7 +185,7 @@ func TestConfig() Config {
 		{ID: "b", BaseProvider: "openai", InferenceURL: "https://b.invalid", Priority: 10},
 		{ID: "c", BaseProvider: "openai", InferenceURL: "https://c.invalid", Priority: 5},
 	}
-	cfg.RoutingRules = RoutingRules{
+	cfg.Rules = Rules{
 		FilterModel("standard", "standard"),
 		FilterProvider("standard", "a", "b"),
 		MapRuleHelper("standard", "native-model"),
@@ -202,7 +202,7 @@ func TestConfig() Config {
 }
 
 func TestConfigWithRules(cfg Config, rules []Rule) Config {
-	cfg.RoutingRules = rules
+	cfg.Rules = rules
 	return cfg
 }
 
@@ -230,7 +230,7 @@ func RulesConfig(t testing.TB, n int, rules []Rule) *CompiledConfig {
 		})
 	}
 	cfg.Providers = providers
-	cfg.RoutingRules = rules
+	cfg.Rules = rules
 	compiled, err := CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)

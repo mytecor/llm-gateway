@@ -19,7 +19,7 @@ import (
 func TestServerAuthModelsAndLogicalRewrite(t *testing.T) {
 	cfg := policy.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a"),
 		policy.MapRuleHelper("standard", "native-model"),
@@ -129,7 +129,7 @@ func TestUnknownModelFailsBeforeExecutor(t *testing.T) {
 func TestServerStreamsWinnerWithLogicalModel(t *testing.T) {
 	cfg := policy.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a"),
 		policy.MapRuleHelper("standard", "native-model"),
@@ -201,7 +201,7 @@ func TestManualRefreshDoesNotExposeProviderNamespace(t *testing.T) {
 func TestServerReportsFailureAfterStreamingWinner(t *testing.T) {
 	cfg := policy.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a"),
 		policy.MapRuleHelper("standard", "native-model"),
@@ -241,7 +241,7 @@ func affinityServerConfig(t *testing.T) *policy.CompiledConfig {
 	t.Helper()
 	cfg := policy.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a"),
 		policy.MapRuleHelper("standard", "native-model"),

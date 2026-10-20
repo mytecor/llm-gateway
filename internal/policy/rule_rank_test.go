@@ -69,7 +69,7 @@ func TestRankRulePreservesTierOrder(t *testing.T) {
 	// Provider b has priority 100, provider a has priority 10
 	cfg.Providers[1].Priority = 100 // b
 	cfg.Providers[0].Priority = 10  // a
-	cfg.RoutingRules = []Rule{
+	cfg.Rules = []Rule{
 		FilterModel("standard", "standard"),
 		mapRuleDirect("standard", []string{"a"}, "model-x", 0),
 		mapRuleDirect("standard", []string{"b"}, "model-y", 1),

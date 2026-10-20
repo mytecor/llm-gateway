@@ -18,7 +18,7 @@ import (
 func TestAdmissionContinuationReleaseHandoverNoLeak(t *testing.T) {
 	cfg := policy.TestConfig()
 	maxPending := 4
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.MapRuleDirect("standard", []string{"a", "b"}, "model-x", 0),
 		&policy.AdmissionRule{
@@ -71,7 +71,7 @@ func TestAdmissionContinuationReleaseHandoverNoLeak(t *testing.T) {
 
 func TestInternalRetryHidesProviderErrorsFromClient(t *testing.T) {
 	cfg := policy.TestConfig()
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.MapRuleDirect("standard", []string{"a", "b"}, "model-x", 0),
 		policy.MapRuleDirect("standard", []string{"c"}, "model-y", 1),
@@ -127,7 +127,7 @@ func TestInternalRetryHidesProviderErrorsFromClient(t *testing.T) {
 func TestInternalRetryFallbackToSameProviderDifferentTier(t *testing.T) {
 	cfg := policy.TestConfig()
 	// Provider a is in tier 0 with model-x (fails 404), and in tier 1 with model-y (succeeds)
-	cfg.RoutingRules = []policy.Rule{
+	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.MapRuleDirect("standard", []string{"a"}, "model-x", 0),
 		policy.MapRuleDirect("standard", []string{"a"}, "model-y", 1),
