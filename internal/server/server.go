@@ -1,0 +1,1096 @@
+package server
+
+import (
+	"sort"
+	"github.com/mytecor/llm-gateway/internal/model"
+	"github.com/mytecor/llm-gateway/internal/policy"
+	"github.com/mytecor/llm-gateway/internal/scheduler"
+	"github.com/mytecor/llm-gateway/internal/subsystem"
+	"github.com/mytecor/llm-gateway/internal/telemetry"
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"time"
+)
+
+const maxRequestBody = 16 << 20
+
+type Server struct {
+	config          *policy.CompiledConfig
+	catalog         *subsystem.Catalog
+	runner          *scheduler.Runner
+	mux             *http.ServeMux
+	logger          *slog.Logger
+	metrics         *telemetry.Metrics
+	requestSequence atomic.Uint64
+}
+
+func NewServer(config *policy.CompiledConfig, catalog *subsystem.Catalog, runner *scheduler.Runner) *Server {
+	server := &Server{
+		config: config, catalog: catalog, runner: runner, mux: http.NewServeMux(), logger: config.Logger,
+		metrics: runner.Metrics(),
+	}
+	server.mux.HandleFunc("GET /healthz", server.health)
+	server.mux.HandleFunc("GET /metrics", server.metricsHandler)
+	server.mux.HandleFunc("GET /v1/models", server.auth(server.models))
+	server.mux.HandleFunc("POST /v1/chat/completions", server.auth(server.chat))
+	server.mux.HandleFunc("POST /v1/responses", server.auth(server.responses))
+	server.mux.HandleFunc("POST /admin/models/refresh", server.auth(server.refresh))
+	return server
+}
+
+func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	s.mux.ServeHTTP(writer, request)
+}
+
+// NewMetricsHandler builds a dedicated http.Handler serving only GET /metrics
+// from the given registry. It is mounted on the separate loopback metrics
+// listener and exposes no other endpoint, so a scrape cannot reach the client
+// API surface.
+func NewMetricsHandler(metrics *telemetry.Metrics) http.Handler {
+	mux := http.NewServeMux()
+	handler := &metricsOnly{metrics: metrics}
+	mux.HandleFunc("GET /metrics", handler.serve)
+	return mux
+}
+
+type metricsOnly struct {
+	metrics *telemetry.Metrics
+}
+
+func (m *metricsOnly) serve(writer http.ResponseWriter, _ *http.Request) {
+	writer.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	writer.WriteHeader(http.StatusOK)
+	if err := m.metrics.WriteExposition(writer); err != nil {
+		_, _ = io.WriteString(writer, "# error rendering metrics\n")
+	}
+}
+
+func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
+	return func(writer http.ResponseWriter, request *http.Request) {
+		if len(s.config.ClientKeys) == 0 {
+			next(writer, request)
+			return
+		}
+		provided := strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
+		for id, expected := range s.config.ClientKeys {
+			if len(provided) == len(expected) && subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1 {
+				// Pin the non-secret client key ID into the request context so
+				// the request- and usage-level metrics attribute this request to
+				// the key it was authenticated with.
+				next(writer, request.WithContext(telemetry.WithClientKey(request.Context(), id)))
+				return
+			}
+		}
+		writeAPIError(writer, http.StatusUnauthorized, "invalid_api_key")
+	}
+}
+
+func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
+	writeJSON(writer, http.StatusOK, map[string]any{"status": "ok"})
+}
+
+// routeOf resolves the entry route name for a logical model, used as the
+// route label on request-level metrics. Every discoverable logical model maps
+// to exactly one entry route, so the label set stays low-cardinality.
+func (s *Server) routeOf(logical string) string {
+	if entry, ok := s.config.Models[logical]; ok {
+		return entry.Name
+	}
+	return ""
+}
+
+// metricsHandler handles GET /metrics without client authentication: the
+// endpoint is deliberately non-public (its own loopback listener, see config)
+// and must not require the client API key.
+func (s *Server) metricsHandler(writer http.ResponseWriter, _ *http.Request) {
+	writer.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	writer.WriteHeader(http.StatusOK)
+	if err := s.metrics.WriteExposition(writer); err != nil {
+		telemetry.LogEvent(context.Background(), s.logger, slog.LevelError, "metrics_exposition_failed", "detail", telemetry.SafeLogDetail(err.Error()))
+	}
+}
+
+// observeRequest records the request-level observation: counter, histogram and
+// token accumulation share one call so the request lifecycle is recorded once
+// at exactly one terminal point. The empty provider and native convey that no
+// branch ever succeeded (for example a pre-dispatch rejection). The client key
+// id comes from the authenticated request context (empty in keyless mode).
+func (s *Server) observeRequest(request *http.Request, logical, provider, native, status string, duration time.Duration) {
+	s.metrics.ObserveRequest(s.routeOf(logical), logical, provider, native, status, telemetry.ClientKeyFrom(request.Context()), duration)
+}
+
+// observeTokens accumulates usage from a non-stream response body and returns
+// the parsed usage so the caller can embed it into the request_completed event.
+// Providers that omit usage contribute nothing. The hasUsage flag tells whether
+// the provider reported usage at all (zero tokens with hasUsage=false mean
+// "unknown", not "zero"). provider and native identify the winning branch.
+func (s *Server) observeTokens(request *http.Request, logical, provider, native string, response []byte) (input, output, cached int64, hasUsage bool) {
+	summary, ok := model.ExtractUsageFull(response)
+	if !ok {
+		return 0, 0, 0, false
+	}
+	s.metrics.ObserveTokens(logical, provider, native, telemetry.ClientKeyFrom(request.Context()), summary.Input, summary.Output)
+	return summary.Input, summary.Output, summary.CachedTokens, true
+}
+
+func (s *Server) models(writer http.ResponseWriter, _ *http.Request) {
+	created := time.Now().Unix()
+	data := make([]map[string]any, 0, len(s.config.LogicalIDs))
+	for _, id := range s.config.LogicalIDs {
+		data = append(data, map[string]any{
+			"id": id, "object": "model", "created": created, "owned_by": "lattice",
+		})
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"object": "list", "data": data})
+}
+
+func (s *Server) chat(writer http.ResponseWriter, request *http.Request) {
+	s.inference(writer, request, model.RequestChat)
+}
+
+func (s *Server) responses(writer http.ResponseWriter, request *http.Request) {
+	s.inference(writer, request, model.RequestResponses)
+}
+
+func (s *Server) inference(writer http.ResponseWriter, request *http.Request, kind model.RequestKind) {
+	started := time.Now()
+	requestID := strconv.FormatUint(s.requestSequence.Add(1), 10)
+	request = request.WithContext(telemetry.WithRequestID(request.Context(), requestID))
+	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, maxRequestBody))
+	if err != nil {
+		telemetry.LogEvent(request.Context(), s.logger, slog.LevelWarn, "request_rejected",
+			"kind", kind,
+			"status_code", http.StatusBadRequest,
+			"reason", "invalid_body",
+		)
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	var metadata struct {
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
+	}
+	if err := json.Unmarshal(body, &metadata); err != nil || strings.TrimSpace(metadata.Model) == "" {
+		telemetry.LogEvent(request.Context(), s.logger, slog.LevelWarn, "request_rejected",
+			"kind", kind,
+			"status_code", http.StatusBadRequest,
+			"reason", "invalid_json_or_model",
+		)
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if _, exists := s.config.Models[metadata.Model]; !exists {
+		telemetry.LogEvent(request.Context(), s.logger, slog.LevelWarn, "request_rejected",
+			"kind", kind,
+			"logical_model", metadata.Model,
+			"status_code", http.StatusNotFound,
+			"reason", "model_not_found",
+		)
+		writeAPIError(writer, http.StatusNotFound, "model_not_found")
+		return
+	}
+	telemetry.LogEvent(request.Context(), s.logger, slog.LevelInfo, "request_received",
+		"kind", kind,
+		"logical_model", metadata.Model,
+		"stream", metadata.Stream,
+	)
+	executeRequest := model.ExecuteRequest{Kind: kind, Body: body}
+	if metadata.Stream {
+		s.stream(writer, request, metadata.Model, executeRequest, started)
+		return
+	}
+	result, callErr := s.runner.RunWithResult(request.Context(), metadata.Model, executeRequest)
+	if callErr != nil {
+		telemetry.LogEvent(request.Context(), s.logger, slog.LevelWarn, "request_failed",
+			"kind", kind,
+			"logical_model", metadata.Model,
+			"stream", metadata.Stream,
+			"status_code", model.CallErrorStatus(callErr),
+			"error_type", string(callErr.Class),
+			"duration_ms", time.Since(started).Milliseconds(),
+		)
+		s.observeRequest(request, metadata.Model, "", "", "failed", time.Since(started))
+		writeCallError(writer, callErr)
+		return
+	}
+	response := result.Body
+	// Bind the winning provider to the opaque Responses state identifiers;
+	// the identifiers themselves and the request body never reach the logs.
+	if kind == model.RequestResponses {
+		s.bindResponsesAffinity(metadata.Model, result.Provider, response, "")
+	}
+	provider := result.Provider
+	input, output, cached, hasUsage := s.observeTokens(request, metadata.Model, result.Provider, result.Model, response)
+	response, err = model.SanitizeJSON(response, metadata.Model)
+	if err != nil {
+		telemetry.LogEvent(request.Context(), s.logger, slog.LevelError, "request_failed",
+			"kind", kind,
+			"logical_model", metadata.Model,
+			"stream", metadata.Stream,
+			"status_code", http.StatusBadGateway,
+			"error_type", string(model.ErrorInvalid),
+			"duration_ms", time.Since(started).Milliseconds(),
+		)
+		s.observeRequest(request, metadata.Model, provider, result.Model, "failed", time.Since(started))
+		writeAPIError(writer, http.StatusBadGateway, "invalid_upstream_response")
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(response)
+	telemetry.LogEvent(request.Context(), s.logger, slog.LevelInfo, "request_completed",
+		"kind", kind,
+		"route", s.routeOf(metadata.Model),
+		"logical_model", metadata.Model,
+		"provider", provider,
+		"native_model", result.Model,
+		"stream", metadata.Stream,
+		"status_code", http.StatusOK,
+		"status", "success",
+		"duration_ms", time.Since(started).Milliseconds(),
+		"ttft_ms", result.TTFT.Milliseconds(),
+		"input_tokens", input,
+		"output_tokens", output,
+		"cached_tokens", cached,
+		"has_usage", hasUsage,
+		"attempts", result.Attempts,
+	)
+	s.observeRequest(request, metadata.Model, provider, result.Model, "success", time.Since(started))
+}
+
+func (s *Server) stream(writer http.ResponseWriter, request *http.Request, logical string, executeRequest model.ExecuteRequest, started time.Time) {
+	flusher, ok := writer.(http.Flusher)
+	if !ok {
+		writeAPIError(writer, http.StatusInternalServerError, "streaming_not_supported")
+		return
+	}
+	requestID := telemetry.RequestIDFrom(request.Context())
+	headersFlushed := false
+	flushSSEHeaders := func() {
+		if headersFlushed {
+			return
+		}
+		headersFlushed = true
+		writer.Header().Set("Content-Type", "text/event-stream")
+		writer.Header().Set("Cache-Control", "no-cache")
+		writer.Header().Set("Connection", "keep-alive")
+		writer.WriteHeader(http.StatusOK)
+		flusher.Flush()
+	}
+	partial := &subsystem.PartialStreamOutput{}
+	// writeClientKeepAlive emits an SSE comment keep-alive plus, for chat
+	// streams that have not yet started plain text content, a no-op OpenAI
+	// delta chunk (an empty tool-call arguments delta once tool_calls started,
+	// or a single whitespace reasoning_content delta during prefill/thinking).
+	// OpenAI SDK SSE parsers strip ": ping" comments before yielding chunks, so
+	// client-side stall watchdogs (such as pi-retry's 90s message_update timer)
+	// only re-arm when a parsed SSE data chunk produces a stream event.
+	writeClientKeepAlive := func() bool {
+		flushSSEHeaders()
+		if _, err := io.WriteString(writer, ": ping\n\n"); err != nil {
+			return false
+		}
+		if executeRequest.Kind == model.RequestChat {
+			chunkID := partial.LastChunkID
+			if chunkID == "" {
+				chunkID = "chatcmpl-" + requestID
+			}
+			if partial.GotToolCalls && len(partial.ToolCalls) > 0 {
+				idx := partial.ToolCalls[len(partial.ToolCalls)-1].Index
+				keepAliveChunk, _ := json.Marshal(map[string]any{
+					"id":     chunkID,
+					"object": "chat.completion.chunk",
+					"model":  logical,
+					"choices": []map[string]any{{
+						"index": 0,
+						"delta": map[string]any{
+							"tool_calls": []map[string]any{{
+								"index":    idx,
+								"function": map[string]any{"arguments": ""},
+							}},
+						},
+					}},
+				})
+				if _, err := fmt.Fprintf(writer, "data: %s\n\n", keepAliveChunk); err != nil {
+					return false
+				}
+			} else if !partial.GotText {
+				keepAliveChunk, _ := json.Marshal(map[string]any{
+					"id":     chunkID,
+					"object": "chat.completion.chunk",
+					"model":  logical,
+					"choices": []map[string]any{{
+						"index": 0,
+						"delta": map[string]any{"reasoning_content": " "},
+					}},
+				})
+				if _, err := fmt.Fprintf(writer, "data: %s\n\n", keepAliveChunk); err != nil {
+					return false
+				}
+			}
+		}
+		flusher.Flush()
+		return true
+	}
+
+	type selectResult struct {
+		selected *scheduler.SelectedStream
+		callErr  *model.CallError
+	}
+	selectCh := make(chan selectResult, 1)
+	go func() {
+		sel, err := s.runner.SelectStream(request.Context(), logical, executeRequest)
+		selectCh <- selectResult{selected: sel, callErr: err}
+	}()
+	selectKeepAlive := time.NewTicker(policy.ContinueRecoveryKeepAlive)
+	var selected *scheduler.SelectedStream
+	var callErr *model.CallError
+selectWait:
+	for {
+		select {
+		case res := <-selectCh:
+			selected = res.selected
+			callErr = res.callErr
+			break selectWait
+		case <-selectKeepAlive.C:
+			if !writeClientKeepAlive() {
+				selectKeepAlive.Stop()
+				return
+			}
+		}
+	}
+	selectKeepAlive.Stop()
+
+	if callErr != nil {
+		telemetry.LogEvent(request.Context(), s.logger, slog.LevelWarn, "request_failed",
+			"kind", executeRequest.Kind, "logical_model", logical, "stream", true,
+			"status_code", model.CallErrorStatus(callErr), "error_type", string(callErr.Class),
+			"duration_ms", time.Since(started).Milliseconds(),
+		)
+		if headersFlushed {
+			s.observeRequest(request, logical, "", "", "failed", time.Since(started))
+			writeStreamError(writer, flusher, callErr, requestID, s.runner.StreamRetryable(logical, callErr))
+			return
+		}
+		writeCallError(writer, callErr)
+		return
+	}
+	cancelCurrent := func() {
+		selected.Cancel()
+		if selected.Release != nil {
+			selected.Release()
+			selected.Release = nil
+		}
+	}
+	defer func() { cancelCurrent() }()
+	flushSSEHeaders()
+
+	// Bind the winning provider to the opaque response id as it appears in the
+	// winner's stream (response.created / response.completed events).
+	bind := func(event model.StreamEvent) {
+		if executeRequest.Kind != model.RequestResponses {
+			return
+		}
+		s.bindResponsesAffinity(logical, selected.Provider, event.Data, event.Event)
+	}
+	// Usage is accumulated across the winner's buffered prelude and the
+	// remaining stream (final usage chunk or delta fields); events report the
+	// summed totals plus whether any usage was reported at all.
+	var inTokens, outTokens, cachedTokens int64
+	var hasUsage bool
+	// A chat-completion winner stream must end with a choices[].finish_reason
+	// chunk. A stream that closes cleanly without one is a truncated or empty
+	// upstream response (observed 2026-09-17: gonka carriers cutting long GLM
+	// streams at the ~300s mark and answering load with an instant empty
+	// stream), not a completed request — relaying it as success ([DONE], no
+	// error) makes the client finish an unfinished turn with
+	// "Stream ended without finish_reason" while the provider keeps a clean
+	// health record and keeps winning races. Such a close is therefore
+	// surfaced as a retryable upstream failure fed into cooldown/health.
+	sawFinishReason := false
+	markFinish := func(data []byte) {
+		if !sawFinishReason && executeRequest.Kind == model.RequestChat && model.ExtractFinishReason(data) {
+			sawFinishReason = true
+		}
+	}
+	// The idle watchdog bounds a silently stalled winner stream: the route
+	// deadline only guards the selection phase, so without it a winner that
+	// stops emitting events hangs until the client gives up. Any event (not
+	// only meaningful content — provider keep-alives count) re-arms the timer;
+	// zero disables the watchdog. The timeout is deliberately generous so
+	// legitimate reasoning pauses survive. When the route carries the
+	// "continue" policy, its own idle threshold replaces the global one: the
+	// stall is then a takeover trigger rather than a terminal error.
+	continueCfg, continueEnabled := s.runner.ContinuePolicy(logical)
+	idleTimeout := s.runner.StreamIdleTimeout(logical)
+	if continueEnabled && continueCfg.Idle > 0 {
+		idleTimeout = continueCfg.Idle
+	}
+	// The optional loop-guard policy (the "repetition" rule): when the
+	// winner's accumulated output begins self-repeating, the gateway stops
+	// the stream and re-dispatches through the continue path. Absent policy
+	// (the default, exactly like continue) arms nothing and the relay behaves
+	// exactly as before.
+	repetitionCfg, repetitionEnabled := s.runner.RepetitionPolicy(logical)
+	var repDetector *subsystem.RepetitionDetector
+	if repetitionEnabled {
+		repDetector = subsystem.NewRepetitionDetector(repetitionCfg)
+	}
+	var idleTimer *time.Timer
+	var idleC <-chan time.Time
+	if idleTimeout > 0 {
+		idleTimer = time.NewTimer(idleTimeout)
+		defer idleTimer.Stop()
+		idleC = idleTimer.C
+	}
+	rearmIdle := func() {
+		if idleTimer == nil {
+			return
+		}
+		if !idleTimer.Stop() {
+			select {
+			case <-idleTimer.C:
+			default:
+			}
+		}
+		idleTimer.Reset(idleTimeout)
+	}
+	cur := selected
+	clientKey := telemetry.ClientKeyFrom(request.Context())
+	observe := func(data []byte) {
+		if summary, ok := model.ExtractUsageFull(data); ok {
+			inTokens += summary.Input
+			outTokens += summary.Output
+			cachedTokens += summary.CachedTokens
+			hasUsage = true
+			s.metrics.ObserveTokens(logical, cur.Provider, cur.Model, clientKey, summary.Input, summary.Output)
+		}
+	}
+	// The partial output accumulator feeds the "continue" rule: every relayed
+	// assistant delta (content and reasoning) is remembered so a takeover can
+	// reshape it into assistant context for the next provider.
+	observePartial := func(data []byte) { subsystem.AccumulatePartial(data, partial) }
+	// The providers whose streams have broken during this request. Only genuine
+	// breaks accumulate here — providers that merely lost the original race
+	// stay eligible for a takeover, so the continuation can still reach them.
+	var brokenProviders []string
+	// takeover attempts an in-gateway stream continuation: the current winner
+	// stalled or broke, so the request is re-dispatched to a different
+	// provider with the partial output reshared, and the same client SSE
+	// stream is continued with the new winner. Returns true when a
+	// continuation started; false leaves the caller to surface the terminal
+	// error for `broken`. Only streaming chat requests participate.
+	// swapTo adopts a freshly selected continuation stream as the current
+	// winner on the same client SSE stream: cancels the previous winner, records
+	// it in the broken set (so an in-chain continuation never re-hits it) and
+	// relays the new winner's buffered prelude. Shared by single-provider
+	// takeovers and whole-chain retries.
+	swapTo := func(next *scheduler.SelectedStream) bool {
+		cur.Cancel()
+		brokenProviders = append(brokenProviders, cur.Provider)
+		if cur.Release != nil {
+			if next.Release != nil {
+				next.Release()
+			}
+			next.Release = cur.Release
+			cur.Release = nil
+		}
+		cancelCurrent = func() {
+			next.Cancel()
+			if next.Release != nil {
+				next.Release()
+				next.Release = nil
+			}
+		}
+		cur = next
+		sawFinishReason = false
+		// A fresh winner means a fresh stream: reset the loop guard so the
+		// new provider is not immediately re-tripped by the tail of the old
+		// one's accumulated loop. Without this, the first event of the
+		// continuation (even an empty-delta finish chunk) re-trips the guard,
+		// exhausting the chain and surfacing a terminal error instead of
+		// completing the continued stream.
+		if repDetector != nil {
+			repDetector.Reset()
+		}
+		rearmIdle()
+		for _, event := range cur.Buffered {
+			observePartial(event.Data)
+			observe(event.Data)
+			markFinish(event.Data)
+			if !writeStreamEvent(writer, flusher, logical, executeRequest.Kind, event) {
+				return false
+			}
+		}
+		return true
+	}
+	logoutContinue := func(event string, from string, next *scheduler.SelectedStream) {
+		telemetry.LogEvent(request.Context(), s.logger, slog.LevelInfo, event,
+			"kind", executeRequest.Kind, "logical_model", logical, "stream", true,
+			"from_provider", from,
+			"to_provider", next.Provider,
+			"reshare", continueCfg.Reshare,
+			"established_ms", time.Since(started).Milliseconds(),
+		)
+	}
+	// dispatchContinue re-dispatches the request through the continue path with
+	// the given broken-exclusion set, adopting the fresh winner. A nil result
+	// reports that the re-dispatch produced no winner (ContinueStream error).
+	dispatchContinue := func(broken []string) *scheduler.SelectedStream {
+		next, callErr := s.runner.ContinueStream(request.Context(), logical, executeRequest, partial, broken)
+		if callErr != nil {
+			telemetry.LogEvent(request.Context(), s.logger, slog.LevelWarn, "llm_continue_failed",
+				"kind", executeRequest.Kind, "logical_model", logical, "stream", true,
+				"from_provider", cur.Provider,
+				"status_code", model.CallErrorStatus(callErr), "error_type", string(callErr.Class),
+				"attempts", cur.Attempts,
+			)
+			return nil
+		}
+		return next
+	}
+	// chainRetriesLeft is the whole-chain retry budget: after a takeover has no
+	// eligible provider left (every provider already broke during this request),
+	// the gateway re-dispatches the entire chain from the top with the partial
+	// output reshared, instead of surfacing a terminal error. Cooldown still
+	// gates the just-broken providers, so the fresh pass races the healthy ones.
+	chainRetriesLeft := continueCfg.Retries
+	// takeover attempts an in-gateway stream continuation: the current winner
+	// stalled or broke, so the request is re-dispatched to a different provider
+	// with the partial output reshared, and the same client SSE stream is
+	// continued with the new winner. When no provider remains (ContinueStream
+	// finds no eligible target), the whole chain is re-dispatched from the top
+	// while the chain-retry budget lasts. Returns true when any continuation
+	// started; false leaves the caller to surface the terminal error.
+	takeover := func(broken *model.CallError) bool {
+		if !continueEnabled || executeRequest.Kind != model.RequestChat {
+			return false
+		}
+		// Never let the in-gateway continuation cross a tool-call boundary:
+		// once the relayed winner has emitted any tool-call delta, a stall or
+		// break can only land in the middle of that call's arguments JSON.
+		// Continuing on another provider would reshare the dangling tool-call
+		// as prose (see subsystem.AppendPartialChatHistory) and produce a truncated call
+		// on the client, so surface a retryable error here and let a
+		// retry-capable client (pi) re-issue the request cleanly instead.
+		if partial.GotToolCalls {
+			return false
+		}
+		// Exclude the provider whose stream just broke from the immediate
+		// takeover. brokenProviders only absorbs a broken provider when swapTo
+		// appends it AFTER the dispatch that produced the next winner, so
+		// without this the just-broke provider stays eligible for exactly one
+		// more round: when it is also the fastest (or fail-open re-races the
+		// pool while everyone is cooling), the continuation re-hits the same
+		// upstream it should be fleeing — burning a full re-dispatch on the
+		// provider the takeover exists to avoid ("continue on other
+		// providers"). The set is deduplicated later by runtime.exclude, so the
+		// overlap with swapTo's own append is harmless.
+		excluded := append(append([]string(nil), brokenProviders...), cur.Provider)
+		if next := dispatchContinue(excluded); next != nil {
+			from := cur.Provider
+			continued := swapTo(next)
+			s.metrics.ObserveContinue(from, next.Provider, "takeover")
+			logoutContinue("llm_continue", from, next)
+			return continued
+		}
+		// The chain is exhausted: every provider in the pool broke during this
+		// request. Re-dispatch the whole chain from the top, forgetting which
+		// providers broke (cooldown still gates them), reusing the accumulated
+		// partial output so the model continues instead of restarting. Only when
+		// the budget is positive do we attempt whole-chain retries, so the
+		// exhausted metric stays honest: zero retries means no whole-chain
+		// re-dispatch happened at all, and that is just the plain terminal error.
+		retried := false
+		for chainRetriesLeft > 0 {
+			chainRetriesLeft--
+			retried = true
+			telemetry.LogEvent(request.Context(), s.logger, slog.LevelWarn, "llm_chain_retry",
+				"kind", executeRequest.Kind, "logical_model", logical, "stream", true,
+				"from_provider", cur.Provider,
+				"retries_left", chainRetriesLeft,
+				"established_ms", time.Since(started).Milliseconds(),
+			)
+			s.metrics.ObserveChainRetry("started")
+			brokenProviders = nil
+			if next := dispatchContinue(nil); next != nil {
+				from := cur.Provider
+				continued := swapTo(next)
+				s.metrics.ObserveContinue(from, next.Provider, "chain_retry")
+				s.metrics.ObserveChainRetry("completed")
+				logoutContinue("llm_continue", from, next)
+				return continued
+			}
+		}
+		if retried {
+			s.metrics.ObserveChainRetry("exhausted")
+		}
+		return false
+	}
+
+	// holdForRecovery holds the relayed stream open while the provider pool
+	// recovers from an exhausted takeover, instead of surfacing the terminal
+	// error the client would see. It is the "keep the stream open" tail of a
+	// failed takeover: while the whole pool is down/cooling, the gateway stays
+	// silent-and-open on the same SSE stream, sending periodic keep-alives so
+	// client-side watchdogs (pi's stall watchdog, the idle timeout) do not kill
+	// it, and re-attempts the continuation until a provider recovers, the
+	// client disconnects, or the bounded continue.wait horizon expires. Returns
+	// true when a recovered winner took over the stream (the caller must
+	// continue relaying); false when the wait ended without a winner (the
+	// client disconnected, or the horizon expired and the caller must surface
+	// the terminal error as a last resort).
+	holdRecoveriesLeft := max(1, continueCfg.Retries)
+	holdForRecovery := func(broken *model.CallError) bool {
+		if !continueEnabled || executeRequest.Kind != model.RequestChat || holdRecoveriesLeft <= 0 {
+			return false
+		}
+		// A held stream must never be crossed over a tool-call boundary: the
+		// dangling tool-call cannot be reshared as prose (see
+		// subsystem.AppendPartialChatHistory), so surface the retryable error instead of
+		// waiting to reproduce it on every recovered provider.
+		if partial.GotToolCalls {
+			return false
+		}
+		wait := continueCfg.Wait
+		if wait <= 0 {
+			return false
+		}
+		holdRecoveriesLeft--
+		horizon := time.NewTimer(wait)
+		defer horizon.Stop()
+		recheck := time.NewTicker(policy.ContinueRecoveryRecheck)
+		defer recheck.Stop()
+		keepAlive := time.NewTicker(policy.ContinueRecoveryKeepAlive)
+		defer keepAlive.Stop()
+		telemetry.LogEvent(request.Context(), s.logger, slog.LevelWarn, "llm_stream_held",
+			"kind", executeRequest.Kind, "logical_model", logical, "stream", true,
+			"provider", cur.Provider,
+			"native_model", cur.Model,
+			"status_code", model.CallErrorStatus(broken), "error_type", string(broken.Class),
+			"wait_ms", wait.Milliseconds(),
+			"attempts", cur.Attempts,
+			"duration_ms", time.Since(started).Milliseconds(),
+		)
+		for {
+			select {
+			case <-request.Context().Done():
+				// Client disconnected while we waited: nothing left to surface.
+				return false
+			case <-horizon.C:
+				telemetry.LogEvent(request.Context(), s.logger, slog.LevelWarn, "llm_stream_hold_exhausted",
+					"kind", executeRequest.Kind, "logical_model", logical, "stream", true,
+					"provider", cur.Provider,
+					"wait_ms", wait.Milliseconds(),
+					"duration_ms", time.Since(started).Milliseconds(),
+				)
+				return false
+			case <-keepAlive.C:
+				// SSE comment + delta keep-alive: re-arms client-side watchdogs
+				// (including pi-retry's 90s message_update timer), and drains/
+				// re-arms the gateway's own idle timer so a stale watchdog value
+				// cannot spuriously fire the moment the stream hands back to the
+				// relay loop.
+				if !writeClientKeepAlive() {
+					return false
+				}
+				rearmIdle()
+			case <-recheck.C:
+				// Re-attempt a continuation. Cooldown gates the just-broken
+				// providers (strict availability), so a provider is re-raced
+				// only once its recovery window expires — this is what waits out
+				// a sustained pool outage without hammering it.
+				next, callErr := s.runner.ContinueStream(request.Context(), logical, executeRequest, partial, nil)
+				if callErr != nil {
+					// Pool still down; keep waiting.
+					continue
+				}
+				from := cur.Provider
+				continued := swapTo(next)
+				// A fresh winner restarts the idle watchdog from now: the timer
+				// base has shifted (the whole hold elapsed on its previous arm),
+				// so re-arm or a subsequent genuine stall would never fire.
+				rearmIdle()
+				s.metrics.ObserveContinue(from, next.Provider, "wait_recovery")
+				logoutContinue("llm_continue", from, next)
+				return continued
+			}
+		}
+	}
+	// stopLoop handles a loop-guard firing (the "repetition" rule): the
+	// accumulated output of the winning provider's stream began self-
+	// repeating, so the gateway stops relaying that loop and dispatches
+	// through the existing continue path with the accumulated partial
+	// reshared — the same takeover used by a stall or a missing
+	// finish_reason. The metric fires exactly once per detection; the failure
+	// is fed back so the looping provider cools down. Returns true when a
+	// continuation took over the stream (the caller keeps relaying the new
+	// winner), false when the caller must surface the terminal error and
+	// return.
+	stopLoop := func() bool {
+		s.metrics.ObserveRepetition(s.routeOf(logical), cur.Provider)
+		telemetry.LogEvent(request.Context(), s.logger, slog.LevelWarn, "llm_repetition_detected",
+			"kind", executeRequest.Kind, "logical_model", logical, "stream", true,
+			"provider", cur.Provider,
+			"native_model", cur.Model,
+			"partial_chars", len(partial.Content),
+			"established_ms", time.Since(started).Milliseconds(),
+		)
+		loop := &model.CallError{Class: model.ErrorUpstream, Status: http.StatusBadGateway,
+			Cause: errors.New("repetition loop detected in stream")}
+		s.runner.RecordStreamFailure(request.Context(), logical, cur.Provider, cur.Model, loop)
+		if takeover(loop) || holdForRecovery(loop) {
+			return true
+		}
+		s.observeRequest(request, logical, cur.Provider, cur.Model, "failed", time.Since(started))
+		writeStreamError(writer, flusher, loop, requestID, s.runner.StreamRetryable(logical, loop))
+		return false
+	}
+	for _, event := range selected.Buffered {
+		bind(event)
+		observePartial(event.Data)
+		observe(event.Data)
+		markFinish(event.Data)
+		// Loop guard across the buffered prelude too: keep the detector primed
+		// so a loop that starts inside the prelude is caught at the first
+		// remaining event (or here, when the prelude already trips it).
+		if executeRequest.Kind == model.RequestChat && repDetector != nil && repDetector.Detect(subsystem.StreamTextDelta(string(event.Data))) {
+			if stopLoop() {
+				break
+			}
+			return
+		}
+		if !writeStreamEvent(writer, flusher, logical, executeRequest.Kind, event) {
+			return
+		}
+	}
+	clientKeepAlive := time.NewTicker(policy.ContinueRecoveryKeepAlive)
+	defer clientKeepAlive.Stop()
+	completeStreamSuccess := func() {
+		if executeRequest.Kind == model.RequestChat {
+			_, _ = io.WriteString(writer, "data: [DONE]\n\n")
+			flusher.Flush()
+		}
+		telemetry.LogEvent(request.Context(), s.logger, slog.LevelInfo, "request_completed",
+			"kind", executeRequest.Kind,
+			"route", s.routeOf(logical),
+			"logical_model", logical,
+			"provider", cur.Provider,
+			"native_model", cur.Model,
+			"stream", true,
+			"status_code", http.StatusOK,
+			"status", "success",
+			"duration_ms", time.Since(started).Milliseconds(),
+			"ttft_ms", cur.TTFT.Milliseconds(),
+			"input_tokens", inTokens,
+			"output_tokens", outTokens,
+			"cached_tokens", cachedTokens,
+			"has_usage", hasUsage,
+			"attempts", cur.Attempts,
+		)
+		s.observeRequest(request, logical, cur.Provider, cur.Model, "success", time.Since(started))
+	}
+	finalizeCompletedStream := func() bool {
+		if executeRequest.Kind != model.RequestChat {
+			return false
+		}
+		if sawFinishReason && (partial.GotText || partial.GotToolCalls) {
+			completeStreamSuccess()
+			return true
+		}
+		if continueEnabled && !sawFinishReason && partial.HasCompleteToolCalls() {
+			chunk := subsystem.SynthesizeToolCallFinishChunk(partial.LastChunkID, logical)
+			if !writeStreamEvent(writer, flusher, logical, executeRequest.Kind, model.StreamEvent{Data: chunk}) {
+				return true
+			}
+			sawFinishReason = true
+			s.metrics.ObserveContinue(cur.Provider, cur.Provider, "finalize_tool_calls")
+			telemetry.LogEvent(request.Context(), s.logger, slog.LevelInfo, "llm_continue",
+				"kind", executeRequest.Kind, "logical_model", logical, "stream", true,
+				"from_provider", cur.Provider,
+				"to_provider", cur.Provider,
+				"reshare", "finalize_tool_calls",
+				"established_ms", time.Since(started).Milliseconds(),
+			)
+			completeStreamSuccess()
+			return true
+		}
+		return false
+	}
+	for {
+		select {
+		case <-clientKeepAlive.C:
+			if !writeClientKeepAlive() {
+				return
+			}
+		case <-request.Context().Done():
+			telemetry.LogEvent(request.Context(), s.logger, slog.LevelDebug, "request_cancelled",
+				"kind", executeRequest.Kind, "logical_model", logical, "stream", true,
+				"provider", cur.Provider,
+				"native_model", cur.Model,
+				"attempts", cur.Attempts,
+				"duration_ms", time.Since(started).Milliseconds(),
+			)
+			s.observeRequest(request, logical, cur.Provider, cur.Model, "cancelled", time.Since(started))
+			return
+		case <-idleC:
+			stall := &model.CallError{Class: model.ErrorTimeout, Status: 504, Cause: fmt.Errorf("no stream events for %s", idleTimeout)}
+			telemetry.LogEvent(request.Context(), s.logger, slog.LevelWarn, "llm_stream_stalled",
+				"kind", executeRequest.Kind, "logical_model", logical, "stream", true,
+				"provider", cur.Provider,
+				"native_model", cur.Model,
+				"idle_ms", idleTimeout.Milliseconds(),
+				"attempts", cur.Attempts,
+				"duration_ms", time.Since(started).Milliseconds(),
+			)
+			s.runner.RecordStreamFailure(request.Context(), logical, cur.Provider, cur.Model, stall)
+			if finalizeCompletedStream() {
+				return
+			}
+			if !sawFinishReason && (takeover(stall) || holdForRecovery(stall)) {
+				continue
+			}
+			s.observeRequest(request, logical, cur.Provider, cur.Model, "failed", time.Since(started))
+			writeStreamError(writer, flusher, stall, requestID, s.runner.StreamRetryable(logical, stall))
+			return
+		case event, open := <-cur.Remaining:
+			if !open {
+				// A chat stream that closes without any finish_reason chunk did
+				// not complete, whatever the transport says: the client would
+				// end its turn on a truncated response. With the "continue" rule
+				// the close is a takeover trigger; without it, surface the same
+				// structured retryable error as a mid-stream break so the
+				// provider enters cooldown and a retry-capable client retries.
+				if executeRequest.Kind == model.RequestChat && !sawFinishReason {
+					broken := &model.CallError{Class: model.ErrorUpstream, Status: http.StatusBadGateway,
+						Cause: errors.New("winner stream ended without finish_reason")}
+					telemetry.LogEvent(request.Context(), s.logger, slog.LevelWarn, "request_failed",
+						"kind", executeRequest.Kind, "logical_model", logical, "stream", true,
+						"provider", cur.Provider,
+						"native_model", cur.Model,
+						"status_code", model.CallErrorStatus(broken), "error_type", string(broken.Class),
+						"reason", "missing_finish_reason",
+						"attempts", cur.Attempts,
+						"duration_ms", time.Since(started).Milliseconds(),
+						"input_tokens", inTokens,
+						"output_tokens", outTokens,
+						"cached_tokens", cachedTokens,
+						"has_usage", hasUsage,
+					)
+					s.runner.RecordStreamFailure(request.Context(), logical, cur.Provider, cur.Model, broken)
+					if finalizeCompletedStream() {
+						return
+					}
+					if takeover(broken) || holdForRecovery(broken) {
+						continue
+					}
+					s.observeRequest(request, logical, cur.Provider, cur.Model, "failed", time.Since(started))
+					writeStreamError(writer, flusher, broken, requestID, s.runner.StreamRetryable(logical, broken))
+					return
+				}
+				// A chat stream that closed WITH a finish_reason but delivered
+				// neither text content nor a tool-call is not an answer — the
+				// provider reasoned (or produced nothing) and stopped, leaving
+				// the client on an empty turn (observed 2026-09-18: GLM-5.3-Flash
+				// continuation relaying 3010 reasoning tokens and 0 content, and
+				// carriers capping completions at 4096 tokens; both end with a
+				// finish_reason so the plain sawFinishReason check cannot see
+				// them). Relaying it as success makes the client finish on an
+				// empty assistant message while the provider keeps a clean
+				// health record, exactly the class of failure "continue" exists
+				// to absorb — so surface it as a retryable outage and let the
+				// takeover re-dispatch instead.
+				if executeRequest.Kind == model.RequestChat && sawFinishReason && !partial.GotText && !partial.GotToolCalls {
+					broken := &model.CallError{Class: model.ErrorUpstream, Status: http.StatusBadGateway,
+						Cause: errors.New("winner stream ended with empty completion (no content, no tool calls)")}
+					telemetry.LogEvent(request.Context(), s.logger, slog.LevelWarn, "request_failed",
+						"kind", executeRequest.Kind, "logical_model", logical, "stream", true,
+						"provider", cur.Provider,
+						"native_model", cur.Model,
+						"status_code", model.CallErrorStatus(broken), "error_type", string(broken.Class),
+						"reason", "empty_completion",
+						"attempts", cur.Attempts,
+						"duration_ms", time.Since(started).Milliseconds(),
+						"input_tokens", inTokens,
+						"output_tokens", outTokens,
+						"cached_tokens", cachedTokens,
+						"has_usage", hasUsage,
+					)
+					s.runner.RecordStreamFailure(request.Context(), logical, cur.Provider, cur.Model, broken)
+					if takeover(broken) || holdForRecovery(broken) {
+						continue
+					}
+					s.observeRequest(request, logical, cur.Provider, cur.Model, "failed", time.Since(started))
+					writeStreamError(writer, flusher, broken, requestID, s.runner.StreamRetryable(logical, broken))
+					return
+				}
+				completeStreamSuccess()
+				return
+			}
+			if event.Err != nil {
+				telemetry.LogEvent(request.Context(), s.logger, slog.LevelWarn, "request_failed",
+					"kind", executeRequest.Kind, "logical_model", logical, "stream", true,
+					"provider", cur.Provider,
+					"native_model", cur.Model,
+					"status_code", model.CallErrorStatus(event.Err), "error_type", string(event.Err.Class),
+					"attempts", cur.Attempts,
+					"duration_ms", time.Since(started).Milliseconds(),
+					"input_tokens", inTokens,
+					"output_tokens", outTokens,
+					"cached_tokens", cachedTokens,
+					"has_usage", hasUsage,
+				)
+				// Feed the failure back into cooldown/health/lease/metrics: the
+				// scheduler returned at selection, so without this the provider
+				// would stay "healthy" no matter how often it breaks streams.
+				s.runner.RecordStreamFailure(request.Context(), logical, cur.Provider, cur.Model, event.Err)
+				if finalizeCompletedStream() {
+					return
+				}
+				if !sawFinishReason && (takeover(event.Err) || holdForRecovery(event.Err)) {
+					continue
+				}
+				s.observeRequest(request, logical, cur.Provider, cur.Model, "failed", time.Since(started))
+				writeStreamError(writer, flusher, event.Err, requestID, s.runner.StreamRetryable(logical, event.Err))
+				return
+			}
+			rearmIdle()
+			observePartial(event.Data)
+			observe(event.Data)
+			markFinish(event.Data)
+			// Loop guard: feed the accumulated output to the optional repetition
+			// detector. On a trip, do NOT relay this chunk — stop the loop here
+			// and re-dispatch through the continue path.
+			if executeRequest.Kind == model.RequestChat && repDetector != nil && repDetector.Detect(subsystem.StreamTextDelta(string(event.Data))) {
+				if stopLoop() {
+					continue
+				}
+				return
+			}
+			bind(event)
+			if !writeStreamEvent(writer, flusher, logical, executeRequest.Kind, event) {
+				return
+			}
+		}
+	}
+}
+
+func writeStreamEvent(writer http.ResponseWriter, flusher http.Flusher, logical string, kind model.RequestKind, event model.StreamEvent) bool {
+	data, err := model.SanitizeJSON(event.Data, logical)
+	if err != nil {
+		return false
+	}
+	if kind == model.RequestResponses && event.Event != "" {
+		if _, err := fmt.Fprintf(writer, "event: %s\n", event.Event); err != nil {
+			return false
+		}
+	}
+	if _, err := fmt.Fprintf(writer, "data: %s\n\n", data); err != nil {
+		return false
+	}
+	flusher.Flush()
+	return true
+}
+
+func (s *Server) refresh(writer http.ResponseWriter, request *http.Request) {
+	errorsByProvider := s.catalog.Refresh(request.Context())
+	failed := make([]string, 0, len(errorsByProvider))
+	for providerID := range errorsByProvider {
+		failed = append(failed, providerID)
+	}
+	sort.Strings(failed)
+	status := http.StatusOK
+	if len(failed) > 0 {
+		status = http.StatusBadGateway
+	}
+	writeJSON(writer, status, map[string]any{"refreshed": len(failed) == 0, "failed_count": len(failed)})
+}
+
+func (s *Server) bindResponsesAffinity(logical, provider string, data []byte, eventType string) {
+	ttl, ok := s.runner.AffinityBindTTL(logical)
+	if !ok || provider == "" || s.runner.Affinity() == nil {
+		return
+	}
+	if eventType == "" {
+		for _, id := range subsystem.ResponseBodyAffinityIDs(data) {
+			if id != "" {
+				s.runner.Affinity().Bind(id, provider, ttl)
+			}
+		}
+		return
+	}
+	for _, id := range subsystem.StreamResponseAffinityIDs(data, eventType) {
+		if id != "" {
+			s.runner.Affinity().Bind(id, provider, ttl)
+		}
+	}
+}
+
+func writeCallError(writer http.ResponseWriter, callErr *model.CallError) {
+	status := model.CallErrorStatus(callErr)
+	typeName := "upstream_error"
+	if callErr != nil {
+		typeName = string(callErr.Class)
+	}
+	writeAPIError(writer, status, typeName)
+}
+
+func writeAPIError(writer http.ResponseWriter, status int, kind string) {
+	writeJSON(writer, status, map[string]any{
+		"error": map[string]any{"message": http.StatusText(status), "type": kind},
+	})
+}
+
+// writeStreamError emits the terminal SSE error event of a relayed winner
+// stream. Headers and the buffered prelude are already flushed at this point,
+// so the SSE body is the only channel left: the payload is machine-readable
+// (status_code/retryable/partial/request_id) while the message text stays the
+// stable "upstream stream failed" string that text-matching clients rely on.
+// Deliberately no trailing "data: [DONE]" follows: the stream did not
+// complete, and a terminating marker would let clients treat the turn as
+// successfully finished.
+func writeStreamError(writer http.ResponseWriter, flusher http.Flusher, callErr *model.CallError, requestID string, retryable bool) {
+	payload, _ := json.Marshal(map[string]any{
+		"error": streamErrorPayload(callErr, requestID, retryable),
+	})
+	_, _ = fmt.Fprintf(writer, "event: error\ndata: %s\n\n", payload)
+	flusher.Flush()
+}
+
+// streamErrorPayload builds the machine-readable error body of the SSE
+// "event: error" frame. partial is always true: the winner was selected on a
+// meaningful event, so content has already been relayed to the client before
+// the failure arrived — an in-gateway retry could only duplicate it, which is
+// why retrying is left to the client.
+func streamErrorPayload(callErr *model.CallError, requestID string, retryable bool) map[string]any {
+	type_ := "upstream_error"
+	if callErr != nil {
+		type_ = string(callErr.Class)
+	}
+	payload := map[string]any{
+		"message":     "upstream stream failed",
+		"type":        type_,
+		"status_code": model.CallErrorStatus(callErr),
+		"retryable":   retryable,
+		"partial":     true,
+	}
+	if requestID != "" {
+		payload["request_id"] = requestID
+	}
+	return payload
+}
+
+func writeJSON(writer http.ResponseWriter, status int, payload any) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(status)
+	_ = json.NewEncoder(writer).Encode(payload)
+}

@@ -11,6 +11,13 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/mytecor/llm-gateway/internal/executor/bifrost"
+	"github.com/mytecor/llm-gateway/internal/policy"
+	"github.com/mytecor/llm-gateway/internal/scheduler"
+	"github.com/mytecor/llm-gateway/internal/server"
+	"github.com/mytecor/llm-gateway/internal/subsystem"
+	"github.com/mytecor/llm-gateway/internal/telemetry"
 )
 
 // Run executes the llm-gateway CLI commands ("check" or "serve").
@@ -30,56 +37,56 @@ func Run(arguments []string) error {
 		return errors.New("usage: llm-gateway --config PATH <check|serve>")
 	}
 	if command == "check" {
-		cfg, err := decodeConfig(*configPath)
+		cfg, err := policy.DecodeConfig(*configPath)
 		if err != nil {
 			return err
 		}
 		if *requireEnvSecrets {
-			if err := validateEnvSecretReferences(cfg, parseAllowedEnv(*allowedEnv)); err != nil {
+			if err := policy.ValidateEnvSecretReferences(cfg, parseAllowedEnv(*allowedEnv)); err != nil {
 				return fmt.Errorf("validate config: %w", err)
 			}
 		}
-		if _, err := compileConfig(cfg); err != nil {
+		if _, err := policy.CompileConfig(cfg); err != nil {
 			return fmt.Errorf("validate config: %w", err)
 		}
 		return nil
 	}
-	cfg, err := loadConfig(*configPath)
+	cfg, err := policy.LoadConfig(*configPath)
 	if err != nil {
 		return err
 	}
-	compiled, err := compileConfig(cfg)
+	compiled, err := policy.CompileConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("validate config: %w", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	catalog := newCatalog(compiled)
-	reportCatalogErrors(compiled.logger, catalog.Refresh(ctx))
-	catalog.Start(ctx, compiled.raw.CatalogRefreshInterval.Duration, func(errorsByGroup map[string]error) {
-		reportCatalogErrors(compiled.logger, errorsByGroup)
+	catalog := subsystem.NewCatalog(compiled)
+	reportCatalogErrors(compiled.Logger, catalog.Refresh(ctx))
+	catalog.Start(ctx, compiled.Raw.CatalogRefreshInterval.Duration, func(errorsByGroup map[string]error) {
+		reportCatalogErrors(compiled.Logger, errorsByGroup)
 	})
-	executor, err := newBifrostExecutor(ctx, compiled)
+	executor, err := bifrost.NewBifrostExecutor(ctx, compiled)
 	if err != nil {
 		return err
 	}
 	defer executor.Close()
-	runner := newRunner(compiled, catalog, executor)
+	runner := scheduler.NewRunner(compiled, catalog, executor)
 	defer runner.Close()
 	httpServer := &http.Server{
-		Addr:              fmt.Sprintf("%s:%d", compiled.raw.Host, compiled.raw.Port),
-		Handler:           newServer(compiled, catalog, runner),
+		Addr:              fmt.Sprintf("%s:%d", compiled.Raw.Host, compiled.Raw.Port),
+		Handler:           server.NewServer(compiled, catalog, runner),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       90 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
-	logEvent(context.Background(), compiled.logger, slog.LevelInfo, "gateway_starting",
+	telemetry.LogEvent(context.Background(), compiled.Logger, slog.LevelInfo, "gateway_starting",
 		"address", httpServer.Addr,
-		"metrics_address", fmt.Sprintf("%s:%d", compiled.raw.MetricsHost, compiled.raw.MetricsPort),
-		"log_level", compiled.raw.LogLevel,
-		"providers", len(compiled.providers),
-		"models", len(compiled.logicalIDs),
+		"metrics_address", fmt.Sprintf("%s:%d", compiled.Raw.MetricsHost, compiled.Raw.MetricsPort),
+		"log_level", compiled.Raw.LogLevel,
+		"providers", len(compiled.Providers),
+		"models", len(compiled.LogicalIDs),
 	)
 
 	// The metrics listener is a dedicated loopback endpoint (metrics_host /
@@ -88,8 +95,8 @@ func Run(arguments []string) error {
 	// registry backs both listeners, so a scrape of the dedicated address and a
 	// scrape of the API address observe one consistent surface.
 	metricsServer := &http.Server{
-		Addr:              fmt.Sprintf("%s:%d", compiled.raw.MetricsHost, compiled.raw.MetricsPort),
-		Handler:           newMetricsHandler(runner.Metrics()),
+		Addr:              fmt.Sprintf("%s:%d", compiled.Raw.MetricsHost, compiled.Raw.MetricsPort),
+		Handler:           server.NewMetricsHandler(runner.Metrics()),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       90 * time.Second,
 	}
@@ -111,10 +118,6 @@ func Run(arguments []string) error {
 	}
 }
 
-func run(arguments []string) error {
-	return Run(arguments)
-}
-
 func parseAllowedEnv(value string) map[string]bool {
 	allowed := make(map[string]bool)
 	if value == "" {
@@ -128,9 +131,9 @@ func parseAllowedEnv(value string) map[string]bool {
 
 func reportCatalogErrors(logger *slog.Logger, errorsByProvider map[string]error) {
 	for providerID, err := range errorsByProvider {
-		logEvent(context.Background(), logger, slog.LevelWarn, "catalog_refresh_failed",
+		telemetry.LogEvent(context.Background(), logger, slog.LevelWarn, "catalog_refresh_failed",
 			"provider", providerID,
-			"detail", safeLogDetail(err.Error()),
+			"detail", telemetry.SafeLogDetail(err.Error()),
 		)
 	}
 }
