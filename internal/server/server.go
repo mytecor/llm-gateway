@@ -1,24 +1,27 @@
 package server
 
 import (
-	"sort"
+	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/scheduler"
 	"github.com/mytecor/llm-gateway/internal/subsystem"
 	"github.com/mytecor/llm-gateway/internal/telemetry"
-	"context"
-	"crypto/subtle"
-	"encoding/json"
-	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 )
 
 const maxRequestBody = 16 << 20
@@ -142,13 +145,22 @@ func (s *Server) observeTokens(request *http.Request, logical, provider, native 
 	return summary.Input, summary.Output, summary.CachedTokens, true
 }
 
-func (s *Server) models(writer http.ResponseWriter, _ *http.Request) {
+func (s *Server) models(writer http.ResponseWriter, request *http.Request) {
 	created := time.Now().Unix()
 	data := make([]map[string]any, 0, len(s.config.LogicalIDs))
 	for _, id := range s.config.LogicalIDs {
-		data = append(data, map[string]any{
-			"id": id, "object": "model", "created": created, "owned_by": "lattice",
-		})
+		entry := map[string]any{"id": id, "object": "model", "created": created, "owned_by": "lattice"}
+		if details, err := s.runner.ModelDetails(request.Context(), id); err == nil {
+			if len(details.ReasoningEfforts) > 0 {
+				entry["reasoning_efforts"] = details.ReasoningEfforts
+				levels := map[string]string{}
+				for _, effort := range details.ReasoningEfforts {
+					levels[effort] = effort
+				}
+				entry["thinking_level_map"] = levels
+			}
+		}
+		data = append(data, entry)
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
@@ -176,8 +188,9 @@ func (s *Server) inference(writer http.ResponseWriter, request *http.Request, ki
 		return
 	}
 	var metadata struct {
-		Model  string `json:"model"`
-		Stream bool   `json:"stream"`
+		Model     string `json:"model"`
+		Stream    bool   `json:"stream"`
+		SessionID string `json:"session_id"`
 	}
 	if err := json.Unmarshal(body, &metadata); err != nil || strings.TrimSpace(metadata.Model) == "" {
 		telemetry.LogEvent(request.Context(), s.logger, slog.LevelWarn, "request_rejected",
@@ -203,7 +216,33 @@ func (s *Server) inference(writer http.ResponseWriter, request *http.Request, ki
 		"logical_model", metadata.Model,
 		"stream", metadata.Stream,
 	)
-	executeRequest := model.ExecuteRequest{Kind: kind, Body: body}
+	call := model.Call{ID: requestID, Principal: telemetry.ClientKeyFrom(request.Context()), LogicalModel: metadata.Model, CWD: strings.TrimSpace(request.Header.Get("X-Agent-CWD"))}
+	for _, value := range []string{request.Header.Get("X-Session-Affinity"), request.Header.Get("Session-ID"), request.Header.Get("session_id"), request.Header.Get("X-Client-Request-ID"), metadata.SessionID} {
+		if strings.TrimSpace(value) != "" {
+			call.Conversation = strings.TrimSpace(value)
+			break
+		}
+	}
+	if len(call.Conversation) > 512 || strings.IndexFunc(call.Conversation, unicode.IsControl) >= 0 {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_session_id")
+		return
+	}
+	if route := s.config.Models[metadata.Model]; route.Stateful {
+		if kind != model.RequestChat {
+			writeAPIError(writer, http.StatusBadRequest, "unsupported_request_kind")
+			return
+		}
+		if call.Conversation == "" {
+			var id [16]byte
+			if _, err := rand.Read(id[:]); err != nil {
+				writeAPIError(writer, 500, "session_id_failed")
+				return
+			}
+			call.Conversation = "session-" + hex.EncodeToString(id[:])
+		}
+		writer.Header().Set("X-Session-ID", call.Conversation)
+	}
+	executeRequest := model.ExecuteRequest{Kind: kind, Body: body, Call: call}
 	if metadata.Stream {
 		s.stream(writer, request, metadata.Model, executeRequest, started)
 		return
@@ -1025,6 +1064,10 @@ func writeCallError(writer http.ResponseWriter, callErr *model.CallError) {
 	if callErr != nil {
 		typeName = string(callErr.Class)
 	}
+	if callErr != nil && callErr.Code != "" {
+		writeJSON(writer, status, map[string]any{"error": map[string]any{"message": http.StatusText(status), "type": typeName, "code": callErr.Code}})
+		return
+	}
 	writeAPIError(writer, status, typeName)
 }
 
@@ -1066,6 +1109,9 @@ func streamErrorPayload(callErr *model.CallError, requestID string, retryable bo
 		"status_code": model.CallErrorStatus(callErr),
 		"retryable":   retryable,
 		"partial":     true,
+	}
+	if callErr != nil && callErr.Code != "" {
+		payload["code"] = callErr.Code
 	}
 	if requestID != "" {
 		payload["request_id"] = requestID

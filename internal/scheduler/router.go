@@ -1,12 +1,12 @@
 package scheduler
 
 import (
+	"context"
+	"errors"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/subsystem"
 	"github.com/mytecor/llm-gateway/internal/telemetry"
-	"context"
-	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -169,6 +169,12 @@ func (r *Runner) RecordStreamFailure(ctx context.Context, logical, provider, nat
 // error payload so a retry-capable client can decide on typed data instead of
 // matching the message text.
 func (r *Runner) StreamRetryable(logical string, callErr *model.CallError) bool {
+	if callErr != nil && callErr.Replay == model.ReplayUnknown {
+		return false
+	}
+	if route, ok := r.config.Models[logical]; ok && route.Stateful {
+		return false
+	}
 	if callErr == nil {
 		return false
 	}
@@ -278,7 +284,7 @@ func (r *Runner) runPlan(ctx context.Context, logical string, request model.Exec
 // cancellation or a known affinity pin (fail-closed) terminates the graph.
 func (r *Runner) executeRoute(ctx context.Context, logical string, route *policy.CompiledRoute, request model.ExecuteRequest, streamMode bool, runtime *routeRuntime) *routeOutcome {
 	outcome := r.raceRoute(ctx, logical, route, request, streamMode, runtime)
-	if outcome.err == nil || outcome.err.Class == model.ErrorCancelled || outcome.pinned {
+	if outcome.err == nil || outcome.err.Class == model.ErrorCancelled || outcome.err.Replay == model.ReplayUnknown || outcome.pinned {
 		return outcome
 	}
 	if outcome.empty {
@@ -736,6 +742,9 @@ func streamSelectionContextError(ctx context.Context) *model.CallError {
 }
 
 func isReschedulableError(callErr *model.CallError) bool {
+	if callErr != nil && callErr.Replay == model.ReplayUnknown {
+		return false
+	}
 	if callErr == nil {
 		return false
 	}
@@ -788,4 +797,19 @@ func (r *Runner) probeStream(ctx context.Context, target model.Target, request m
 			}
 		}
 	}
+}
+
+// ModelDetails returns optional native metadata for a single-target logical model.
+func (r *Runner) ModelDetails(ctx context.Context, logical string) (model.ModelInfo, error) {
+	route, ok := r.config.Models[logical]
+	if !ok || len(route.Pool) != 1 {
+		return model.ModelInfo{}, nil
+	}
+	source, ok := r.executor.(interface {
+		ModelDetails(context.Context, model.Target) (model.ModelInfo, error)
+	})
+	if !ok {
+		return model.ModelInfo{}, nil
+	}
+	return source.ModelDetails(ctx, route.Pool[0])
 }

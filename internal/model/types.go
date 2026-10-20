@@ -28,10 +28,14 @@ const (
 )
 
 type CallError struct {
+	// Code is a stable public code; Cause may contain private diagnostics.
+	Code   string
 	Class  ErrorClass
 	Status int
 	Cause  error
 	Scope  FailureScope
+	// Replay records whether the upstream may already have changed state.
+	Replay ReplaySafety
 }
 
 func (e *CallError) Error() string {
@@ -49,7 +53,7 @@ func (e *CallError) HTTPStatus() int {
 	status := 502 // http.StatusBadGateway
 	if e != nil {
 		switch e.Status {
-		case 400, 401, 403, 404, 408, 429, 499, 503, 504:
+		case 400, 401, 403, 404, 408, 409, 429, 499, 503, 504:
 			status = e.Status
 		}
 	}
@@ -76,7 +80,27 @@ const (
 	RequestResponses RequestKind = "responses"
 )
 
+// Call identifies a client invocation independently of an upstream attempt.
+type Call struct {
+	ID, Principal, Conversation, LogicalModel, CWD string
+}
+
+// Attempt identifies one scheduler branch. Bodies are isolated before middleware.
+type Attempt struct {
+	ID     int
+	Target Target
+}
+type ReplaySafety string
+
+const (
+	ReplayUnknown   ReplaySafety = "unknown"
+	ReplayNotSent   ReplaySafety = "not_sent"
+	ReplayCompleted ReplaySafety = "completed"
+)
+
 type ExecuteRequest struct {
+	Call              Call
+	Attempt           Attempt
 	Kind              RequestKind
 	Body              []byte
 	StreamIdleTimeout time.Duration

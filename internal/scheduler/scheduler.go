@@ -1,11 +1,11 @@
 package scheduler
 
 import (
+	"context"
+	"errors"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/telemetry"
-	"context"
-	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -483,7 +483,9 @@ func (sc *schedule) runBranch(ctx context.Context, id int, cancel context.Cancel
 	started := sc.r.now()
 	var res *branchResult
 	if sc.stream {
-		res = sc.r.probeStream(ctx, target, sc.request)
+		request := sc.request
+		request.Attempt = model.Attempt{ID: id, Target: target}
+		res = sc.r.probeStream(ctx, target, request)
 		if res.selected != nil {
 			res.selected.Provider = target.Provider
 			res.selected.Model = target.Model
@@ -496,7 +498,9 @@ func (sc *schedule) runBranch(ctx context.Context, id int, cancel context.Cancel
 			handedOff = true
 		}
 	} else {
-		body, callErr := sc.r.executor.Do(ctx, target, sc.request)
+		request := sc.request
+		request.Attempt = model.Attempt{ID: id, Target: target}
+		body, callErr := sc.r.executor.Do(ctx, target, request)
 		callErr = normalizeContextError(ctx, callErr)
 		res = &branchResult{winner: callErr == nil, body: body, err: callErr}
 	}

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -109,11 +110,24 @@ type ClientKey struct {
 	Key string `json:"key"`
 }
 
+type SessionSettings struct {
+	DefaultCWD   string   `json:"default_cwd"`
+	AllowedRoots []string `json:"allowed_roots,omitempty"`
+	StorePath    string   `json:"store_path,omitempty"`
+	TTL          Duration `json:"ttl,omitempty"`
+	TurnTimeout  Duration `json:"turn_timeout,omitempty"`
+	Heartbeat    Duration `json:"heartbeat,omitempty"`
+}
+
 type Provider struct {
-	ID           string `json:"id"`
-	BaseProvider string `json:"base_provider"`
-	InferenceURL string `json:"inference_url"`
-	ModelsURL    string `json:"models_url,omitempty"`
+	// Executor defaults to bifrost for backward compatibility.
+	Executor     string           `json:"executor,omitempty"`
+	Command      []string         `json:"command,omitempty"`
+	Session      *SessionSettings `json:"session,omitempty"`
+	ID           string           `json:"id"`
+	BaseProvider string           `json:"base_provider"`
+	InferenceURL string           `json:"inference_url"`
+	ModelsURL    string           `json:"models_url,omitempty"`
 	// VertexProjectID and VertexRegion configure Vertex's resource path.
 	// VertexAuthCredentials carries service-account JSON independently from an
 	// optional Vertex API key; production uses OAuth because the standard
@@ -189,7 +203,9 @@ type CatalogSource struct {
 // never touches the JSON DTOs. Target names are resolved to pointers at the
 // compile stage, so a missing target or a routing cycle already fails there.
 type CompiledRoute struct {
-	Name string
+	// Stateful routes are bound to one native target and cannot be replayed.
+	Stateful bool
+	Name     string
 	// Entry is true when the route carries a request-level model filter: it is
 	// a discoverable logical entry route. Subroutes (retry/fallback/hedge
 	// targets) are not Entry and never become logical models.
@@ -642,6 +658,7 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 		ClientKeys:     make(map[string]string, len(cfg.ClientAPIKeys)),
 	}
 	bifrostProviderKeys := make(map[string]string, len(cfg.Providers))
+	sessionStorePaths := map[string]string{}
 	for _, clientKey := range cfg.ClientAPIKeys {
 		id := strings.TrimSpace(clientKey.ID)
 		if id == "" {
@@ -665,6 +682,84 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 		provider.VertexRegion = strings.TrimSpace(provider.VertexRegion)
 		provider.VertexAuthCredentials = strings.TrimSpace(provider.VertexAuthCredentials)
 		provider.StripParams = trimNonEmpty(provider.StripParams)
+		provider.Executor = strings.TrimSpace(provider.Executor)
+		if provider.Executor == "" {
+			provider.Executor = "bifrost"
+		}
+		if provider.Executor != "bifrost" && provider.Executor != "acp" && provider.Executor != "web" {
+			return nil, fmt.Errorf("provider %q: unknown executor %q", provider.ID, provider.Executor)
+		}
+		if _, exists := compiled.Providers[provider.ID]; exists {
+			return nil, fmt.Errorf("duplicate provider id %q", provider.ID)
+		}
+		if provider.Executor != "bifrost" {
+			if provider.ID == "" || len(provider.Command) == 0 || strings.TrimSpace(provider.Command[0]) == "" {
+				return nil, errors.New("session providers require id and command")
+			}
+			if provider.InferenceURL != "" || provider.BaseProvider != "" || provider.ModelsURL != "" || provider.APIKey != "" || provider.VertexAuthCredentials != "" || len(provider.Headers) > 0 || len(provider.StripParams) > 0 || len(provider.SetParams) > 0 || provider.BifrostMaxRetries != 0 {
+				return nil, fmt.Errorf("provider %q: HTTP/Bifrost settings are not supported by %s executor", provider.ID, provider.Executor)
+			}
+			if provider.Session == nil {
+				provider.Session = &SessionSettings{}
+			}
+			settings := *provider.Session
+			if settings.DefaultCWD == "" {
+				var err error
+				settings.DefaultCWD, err = os.Getwd()
+				if err != nil {
+					return nil, err
+				}
+			}
+			if !filepath.IsAbs(settings.DefaultCWD) {
+				return nil, fmt.Errorf("provider %q: session.default_cwd must be absolute", provider.ID)
+			}
+			for _, root := range settings.AllowedRoots {
+				if !filepath.IsAbs(root) {
+					return nil, fmt.Errorf("provider %q: allowed roots must be absolute", provider.ID)
+				}
+			}
+			if settings.TTL.Duration < 0 || settings.TurnTimeout.Duration < 0 {
+				return nil, fmt.Errorf("provider %q: session durations must not be negative", provider.ID)
+			}
+			if settings.TTL.Duration == 0 {
+				settings.TTL.Duration = 10 * time.Minute
+			}
+			if settings.TurnTimeout.Duration == 0 {
+				settings.TurnTimeout.Duration = 30 * time.Minute
+			}
+			if settings.StorePath != "" {
+				path, err := filepath.Abs(settings.StorePath)
+				if err != nil {
+					return nil, err
+				}
+				if other, exists := sessionStorePaths[path]; exists {
+					return nil, fmt.Errorf("providers %q and %q must not share session.store_path", other, provider.ID)
+				}
+				sessionStorePaths[path] = provider.ID
+				settings.StorePath = path
+			}
+			provider.Session = &settings
+			if provider.RequestTimeout.Duration < 0 || provider.Cooldown.Duration < 0 {
+				return nil, fmt.Errorf("provider %q: durations must not be negative", provider.ID)
+			}
+			if provider.RequestTimeout.Duration == 0 {
+				provider.RequestTimeout.Duration = settings.TurnTimeout.Duration
+			}
+			if provider.Cooldown.Duration == 0 {
+				provider.Cooldown.Duration = 15 * time.Second
+			}
+			if provider.MaxConcurrent == 0 {
+				provider.MaxConcurrent = provider.MaxConcurrentCamel
+			}
+			if provider.MaxConcurrent <= 0 {
+				provider.MaxConcurrent = 16
+			}
+			compiled.Providers[provider.ID] = provider
+			continue
+		}
+		if len(provider.Command) > 0 || provider.Session != nil {
+			return nil, fmt.Errorf("provider %q: command/session require a session executor", provider.ID)
+		}
 		if provider.ID == "" || provider.InferenceURL == "" {
 			return nil, errors.New("every provider requires id and inference_url")
 		}
@@ -743,6 +838,9 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 				compiled.Providers[target.Provider] = p
 			}
 		}
+	}
+	if err := validateSessionRoutes(result.routes, compiled.Providers); err != nil {
+		return nil, err
 	}
 	compiled.Routes = result.routes
 	compiled.Models = result.entries

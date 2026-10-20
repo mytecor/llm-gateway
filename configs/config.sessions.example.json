@@ -1,0 +1,38 @@
+{
+  "host": "127.0.0.1",
+  "port": 9208,
+  "log_level": "info",
+  "providers": [
+    {
+      "id": "coding-agent",
+      "executor": "acp",
+      "command": ["claude-agent-acp"],
+      "session": {
+        "default_cwd": "/absolute/path/to/project",
+        "allowed_roots": ["/absolute/path/to/project"],
+        "store_path": "/absolute/path/to/state/acp-sessions.json",
+        "ttl": "10m",
+        "turn_timeout": "30m"
+      }
+    },
+    {
+      "id": "browser-model",
+      "executor": "web",
+      "command": ["python3", "/absolute/path/to/browser_driver.py"],
+      "session": {
+        "default_cwd": "/absolute/path/to/project",
+        "allowed_roots": ["/absolute/path/to/project"],
+        "ttl": "10m",
+        "turn_timeout": "30m"
+      }
+    }
+  ],
+  "routing_rules": [
+    {"route": "agent", "action": "filter", "where": {"model": {"eq": "agent"}}},
+    {"route": "agent", "action": "map", "providers": ["coding-agent"], "native": "default"},
+    {"route": "agent", "action": "race", "count": 1},
+    {"route": "browser", "action": "filter", "where": {"model": {"eq": "browser"}}},
+    {"route": "browser", "action": "map", "providers": ["browser-model"], "native": "default"},
+    {"route": "browser", "action": "race", "count": 1}
+  ]
+}

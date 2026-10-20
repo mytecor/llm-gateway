@@ -1,6 +1,6 @@
 # LLM Gateway
 
-Легковесный OpenAI-совместимый HTTP-прокси на Go на базе [Bifrost Core](https://github.com/maximhq/bifrost).
+OpenAI-совместимый шлюз на Go с нативными ACP/web executors и API-провайдерами на базе [Bifrost Core](https://github.com/maximhq/bifrost).
 
 Шлюз инкапсулирует работу с upstream-провайдерами: клиенты обращаются к виртуальным логическим моделям (например, `standard`, `fast`), не зная реальных идентификаторов моделей, провайдеров, внутренних URL и API-ключей.
 
@@ -15,6 +15,24 @@
 - **Безопасность:** авторизация клиентов по Bearer-токенам, безопасная передача секретов через переменные окружения (`env.VARIABLE_NAME`).
 
 ---
+
+## Нативные ACP и web executors
+
+Помимо обычных API-провайдеров, gateway запускает ACP-агентов непосредственно
+через agentrun и подключает browser drivers без промежуточного HTTP-сервиса.
+Общий runtime управляет сессиями, историей, resume и ожидающими tool calls.
+Инструменты из OpenAI `tools` исполняет клиент (например, pi); gateway возвращает
+`tool_calls` и передаёт полученные tool results ожидающему движку. Для ACP это
+работает через session-scoped MCP bridge.
+
+Существующие провайдеры используют `executor: "bifrost"` по умолчанию. Нативные
+исполнители выбираются через `executor: "acp"` или `"web"` с `command` и `session`.
+Для них поддержан текстовый Chat Completions API; stateful-маршруты требуют одного
+таргета, `race count: 1` и отключённых retry/fallback/hedge/continue/repetition.
+
+[Пример конфигурации](configs/config.sessions.example.json) ·
+[Сессии, инструменты и протокол browser driver](docs/session-executors.md).
+Драйвер конкретного веб-сайта реализуется отдельно; Muse-драйвер не включён.
 
 ## API Endpoints
 

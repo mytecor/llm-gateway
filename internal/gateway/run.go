@@ -11,7 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mytecor/llm-gateway/internal/executor/bifrost"
+	"github.com/mytecor/llm-gateway/internal/executor"
+	"github.com/mytecor/llm-gateway/internal/mcpbridge"
 	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/scheduler"
 	"github.com/mytecor/llm-gateway/internal/server"
@@ -21,6 +22,9 @@ import (
 
 // Run executes the llm-gateway CLI commands ("check" or "serve").
 func Run(arguments []string) error {
+	if len(arguments) > 0 && arguments[0] == "__mcp-bridge" {
+		return mcpbridge.Run(context.Background(), arguments[1:])
+	}
 	flags := flag.NewFlagSet("llm-gateway", flag.ContinueOnError)
 	configPath := flags.String("config", "", "path to runtime JSON config")
 	requireEnvSecrets := flags.Bool("require-env-secrets", false, "reject literal secrets in public config")
@@ -66,12 +70,12 @@ func Run(arguments []string) error {
 	catalog.Start(ctx, compiled.Raw.CatalogRefreshInterval.Duration, func(errorsByGroup map[string]error) {
 		reportCatalogErrors(compiled.Logger, errorsByGroup)
 	})
-	executor, err := bifrost.NewBifrostExecutor(ctx, compiled)
+	executors, err := executor.New(ctx, compiled)
 	if err != nil {
 		return err
 	}
-	defer executor.Close()
-	runner := scheduler.NewRunner(compiled, catalog, executor)
+	defer executors.Close()
+	runner := scheduler.NewRunner(compiled, catalog, executors)
 	defer runner.Close()
 	httpServer := &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", compiled.Raw.Host, compiled.Raw.Port),

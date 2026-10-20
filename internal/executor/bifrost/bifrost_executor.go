@@ -1,14 +1,14 @@
 package bifrost
 
 import (
-	"github.com/mytecor/llm-gateway/internal/model"
-	"github.com/mytecor/llm-gateway/internal/policy"
-	"github.com/mytecor/llm-gateway/internal/telemetry"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/mytecor/llm-gateway/internal/model"
+	"github.com/mytecor/llm-gateway/internal/policy"
+	"github.com/mytecor/llm-gateway/internal/telemetry"
 	"log/slog"
 	"strings"
 	"time"
@@ -595,7 +595,6 @@ func reasoningTextFromDetails(details []schemas.ChatReasoningDetails) string {
 	return builder.String()
 }
 
-
 // MeaningfulPayload reports whether an SSE data payload carries substantive model output.
 func MeaningfulPayload(data []byte, event string) bool {
 	return meaningfulPayload(data, event)
@@ -626,6 +625,12 @@ func meaningfulPayload(data []byte, event string) bool {
 	for _, choice := range object.Choices {
 		for _, key := range []string{"content", "reasoning", "reasoning_content", "tool_calls"} {
 			raw := bytes.TrimSpace(choice.Delta[key])
+			if key != "tool_calls" {
+				var value string
+				if json.Unmarshal(raw, &value) == nil && strings.TrimSpace(strings.ReplaceAll(value, "\u200b", "")) == "" {
+					continue
+				}
+			}
 			if len(raw) > 0 && !bytes.Equal(raw, []byte("null")) && !bytes.Equal(raw, []byte(`""`)) && !bytes.Equal(raw, []byte("[]")) {
 				return true
 			}
