@@ -121,7 +121,10 @@ type SessionSettings struct {
 
 type Provider struct {
 	// Executor defaults to bifrost for backward compatibility.
+	// Native executors: "acp", "web", "external", "subprocess".
 	Executor     string           `json:"executor,omitempty"`
+	Protocol     string           `json:"protocol,omitempty"`
+	ToolStrategy string           `json:"tool_strategy,omitempty"`
 	Command      []string         `json:"command,omitempty"`
 	Session      *SessionSettings `json:"session,omitempty"`
 	ID           string           `json:"id"`
@@ -686,11 +689,14 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 		if provider.Executor == "" {
 			provider.Executor = "bifrost"
 		}
-		if provider.Executor != "bifrost" && provider.Executor != "acp" && provider.Executor != "web" {
+		if provider.Executor != "bifrost" && provider.Executor != "acp" && provider.Executor != "web" && provider.Executor != "external" && provider.Executor != "subprocess" {
 			return nil, fmt.Errorf("provider %q: unknown executor %q", provider.ID, provider.Executor)
 		}
 		if _, exists := compiled.Providers[provider.ID]; exists {
 			return nil, fmt.Errorf("duplicate provider id %q", provider.ID)
+		}
+		if provider.Executor == "bifrost" && (provider.Protocol != "" || provider.ToolStrategy != "") {
+			return nil, fmt.Errorf("provider %q: protocol and tool_strategy are not supported by bifrost executor", provider.ID)
 		}
 		if provider.Executor != "bifrost" {
 			if provider.ID == "" || len(provider.Command) == 0 || strings.TrimSpace(provider.Command[0]) == "" {
@@ -698,6 +704,32 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 			}
 			if provider.InferenceURL != "" || provider.BaseProvider != "" || provider.ModelsURL != "" || provider.APIKey != "" || provider.VertexAuthCredentials != "" || len(provider.Headers) > 0 || len(provider.StripParams) > 0 || len(provider.SetParams) > 0 || provider.BifrostMaxRetries != 0 {
 				return nil, fmt.Errorf("provider %q: HTTP/Bifrost settings are not supported by %s executor", provider.ID, provider.Executor)
+			}
+			provider.Protocol = strings.TrimSpace(strings.ToLower(provider.Protocol))
+			if provider.Executor == "acp" {
+				if provider.Protocol != "" && provider.Protocol != "acp" {
+					return nil, fmt.Errorf("provider %q: executor acp conflicts with protocol %q", provider.ID, provider.Protocol)
+				}
+				provider.Protocol = "acp"
+			} else if provider.Executor == "web" {
+				if provider.Protocol != "" && provider.Protocol != "driver" && provider.Protocol != "web" && provider.Protocol != "ndjson" {
+					return nil, fmt.Errorf("provider %q: executor web conflicts with protocol %q", provider.ID, provider.Protocol)
+				}
+				provider.Protocol = "driver"
+			} else if provider.Executor == "external" || provider.Executor == "subprocess" {
+				if provider.Protocol == "" {
+					provider.Protocol = "driver"
+				}
+				if provider.Protocol != "acp" && provider.Protocol != "driver" && provider.Protocol != "web" && provider.Protocol != "ndjson" {
+					return nil, fmt.Errorf("provider %q: unknown external protocol %q", provider.ID, provider.Protocol)
+				}
+			}
+			provider.ToolStrategy = strings.TrimSpace(strings.ToLower(provider.ToolStrategy))
+			if provider.ToolStrategy != "" && provider.ToolStrategy != "auto" && provider.ToolStrategy != "mcp" && provider.ToolStrategy != "prompt" && provider.ToolStrategy != "wire" && provider.ToolStrategy != "both" {
+				return nil, fmt.Errorf("provider %q: unknown tool strategy %q", provider.ID, provider.ToolStrategy)
+			}
+			if provider.Protocol == "acp" && provider.ToolStrategy != "" && provider.ToolStrategy != "auto" && provider.ToolStrategy != "mcp" {
+				return nil, fmt.Errorf("provider %q: ACP protocol supports only auto or mcp tool_strategy, got %q", provider.ID, provider.ToolStrategy)
 			}
 			if provider.Session == nil {
 				provider.Session = &SessionSettings{}

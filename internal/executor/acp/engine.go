@@ -12,6 +12,7 @@ import (
 
 	"github.com/dmora/agentrun"
 	agentacp "github.com/dmora/agentrun/engine/acp"
+	"github.com/mytecor/llm-gateway/internal/mcpbridge"
 	"github.com/mytecor/llm-gateway/internal/session"
 )
 
@@ -144,19 +145,24 @@ func (e *Engine) Start(ctx context.Context, spec session.Spec) (session.Session,
 		options[agentrun.OptionSystemPrompt] = spec.System
 	}
 	native := agentrun.Session{CWD: spec.CWD, Model: spec.Model, Options: options}
-	var facade *mcpFacade
+	var facade *mcpbridge.Facade
 	if len(spec.Tools) > 0 {
 		var err error
-		facade, err = newMCPFacade(context.Background(), spec.Tools, spec.CallTool)
+		var bridgeTools []mcpbridge.Tool
+		for _, tool := range spec.Tools {
+			bridgeTools = append(bridgeTools, mcpbridge.Tool{Name: tool.Function.Name, Description: tool.Function.Description, InputSchema: tool.Function.Parameters})
+		}
+		facade, err = mcpbridge.NewFacade(context.Background(), bridgeTools, spec.CallTool)
 		if err != nil {
 			return nil, err
 		}
-		native.MCPServers = []agentrun.MCPServer{facade.descriptor}
+		desc := facade.Descriptor()
+		native.MCPServers = []agentrun.MCPServer{{Name: desc.Name, Command: desc.Command, Args: desc.Args}}
 	}
 	proc, err := e.engine.Start(ctx, native)
 	if err != nil {
 		if facade != nil {
-			facade.close()
+			facade.Close()
 		}
 		return nil, nativeError(err)
 	}
@@ -191,7 +197,7 @@ func (e *Engine) Start(ctx context.Context, spec session.Spec) (session.Session,
 
 type nativeSession struct {
 	process agentrun.Process
-	facade  *mcpFacade
+	facade  *mcpbridge.Facade
 	init    session.Event
 	once    sync.Once
 }
@@ -251,7 +257,7 @@ func (s *nativeSession) Close() error {
 	var err error
 	s.once.Do(func() {
 		if s.facade != nil {
-			s.facade.close()
+			s.facade.Close()
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

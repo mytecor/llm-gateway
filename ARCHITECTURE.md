@@ -32,9 +32,9 @@ flowchart TD
             BifrostExec["Bifrost HTTP Executor<br/>(OpenAI, Anthropic, Vertex, etc.)"]
             SessionExec["Session Runtime Adapter<br/>(History, Turn Lifecycle, Checkpoints)"]
             
-            subgraph NativeEngines["Native Subprocess Engines"]
-                ACPEngine["ACP Engine (agentrun)<br/>+ Stdio MCP Bridge"]
-                WebEngine["Web Engine<br/>(Browser Driver Protocol)"]
+            subgraph NativeEngines["External Subprocess Engines"]
+                ExternalEngine["Unified External Engine<br/>(ACP & Driver Protocols)"]
+                MCPSystem["Stdio MCP Bridge & Tool Codecs"]
             end
         end
         
@@ -43,19 +43,20 @@ flowchart TD
 
     UpstreamHTTP["Upstream Cloud APIs<br/>(OpenAI, Anthropic, Bedrock, etc.)"]
     SubprocessAgents["Local Agent Processes<br/>(agentrun, ACP runners)"]
-    HeadlessBrowsers["Browser Drivers<br/>(Headless Chrome, Web Automation)"]
+    HeadlessBrowsers["Browser Drivers & CLI Processes<br/>(Headless Chrome, Web Automation)"]
 
     Client --> Server
     Server --> Auth
     Auth --> Scheduler
     Scheduler <--> Subsystems
-    Scheduler --> Executors
+    Scheduler --> BifrostExec
+    Scheduler --> SessionExec
     
     BifrostExec --> UpstreamHTTP
-    SessionExec --> ACPEngine
-    SessionExec --> WebEngine
-    ACPEngine --> SubprocessAgents
-    WebEngine --> HeadlessBrowsers
+    SessionExec --> ExternalEngine
+    ExternalEngine <--> MCPSystem
+    ExternalEngine --> SubprocessAgents
+    ExternalEngine --> HeadlessBrowsers
     
     Server -.-> Telemetry
     Scheduler -.-> Telemetry
@@ -85,8 +86,9 @@ llm-gateway/
 │   ├── executor/               # Executor registry, interfaces, and backend drivers
 │   │   ├── bifrost/            # Bifrost Core HTTP upstream adapter
 │   │   ├── session/            # Stateful session adaptation to OpenAI protocol
-│   │   ├── acp/                # Agent Communication Protocol engine (agentrun + MCP)
-│   │   └── web/                # Native browser driver adapter
+│   │   ├── external/           # Unified external subprocess engine (ACP and Driver protocols)
+│   │   ├── acp/                # Agent Communication Protocol adapter (agentrun + MCP)
+│   │   └── web/                # Native browser driver adapter (legacy alias)
 │   ├── gateway/                # Daemon lifecycle, CLI commands (check, serve), signals
 │   ├── mcpbridge/              # Private stdio Model Context Protocol (MCP) bridge
 │   ├── model/                  # Domain types, capabilities, error taxonomy, token usage
@@ -121,24 +123,46 @@ The gateway delegates stateful operations to independent, thread-safe subsystems
 Routing is modeled as a linear pipeline executed by the scheduler for each incoming request:
 
 ```mermaid
-flowchart LR
-    In([Request]) --> Filter["1. Filter<br/>(model/provider/error)"]
-    Filter --> Map["2. Map<br/>(logical -> native)"]
-    Map --> Rank["3. Rank<br/>(priority/weight)"]
-    Rank --> Admission["4. Admission<br/>(concurrency bounds)"]
-    Admission --> Lease["5. Lease<br/>(dynamic capacity)"]
-    Lease --> Balance["6. Balance<br/>(expected-ttft / p2c)"]
-    Balance --> Affinity["7. Affinity<br/>(session stickiness)"]
-    Affinity --> Race["8. Race / Hedge<br/>(parallel dispatch)"]
+flowchart TD
+    In([Incoming Request]) --> Stage1
+
+    subgraph Stage1["1. Selection & Filtering"]
+        Filter["Filter<br/>(where.model.eq, unused: true)"]
+        Map["Map<br/>(logical model &rarr; native ID)"]
+        Filter --> Map
+    end
+
+    subgraph Stage2["2. Prioritization & Balancing"]
+        Rank["Rank<br/>(priority, weights)"]
+        Balance["Balance<br/>(expected-ttft / p2c / &epsilon;-greedy)"]
+        Affinity["Affinity<br/>(session stickiness)"]
+        Rank --> Balance --> Affinity
+    end
+
+    subgraph Stage3["3. Execution & Concurrency"]
+        Admission["Admission<br/>(maxInFlight, queuing)"]
+        Lease["Lease<br/>(dynamic capacity & slow-start)"]
+        Race["Race / Hedge<br/>(parallel dispatch & backup)"]
+        Admission --> Lease --> Race
+    end
+
+    Stage1 --> Stage2
+    Stage2 --> Stage3
     Race --> Upstream[(Upstream Call)]
-    
-    Upstream -- Error --> Retry["9. Retry / Fallback<br/>(subroute transition)"]
-    Upstream -- Stream Break --> Continue["10. Continue<br/>(mid-stream resume)"]
-    Upstream -- Token Loop --> Repetition["11. Repetition<br/>(loop breaker)"]
-    Upstream -- Success --> Out([Client Response])
-    
-    Retry --> Filter
-    Continue --> Filter
+
+    subgraph Stage4["4. Flow Control & Error Recovery"]
+        Retry["Retry / Fallback<br/>(subroute transition)"]
+        Continue["Continue<br/>(mid-stream resume)"]
+        Repetition["Repetition Guard<br/>(sliding n-gram breaker)"]
+    end
+
+    Upstream -->|Error: 429, 5xx, Timeout| Retry
+    Upstream -->|Severed Stream| Continue
+    Upstream -->|Degenerate Loop| Repetition
+    Upstream -->|Success| Out([Client Response])
+
+    Retry -->|Reroute| Filter
+    Continue -->|Fallback Route| Filter
 ```
 
 ### Pipeline Stages
@@ -182,7 +206,7 @@ sequenceDiagram
     Agent->>Bridge: Call Tool (MCP call)
     Bridge->>GW: Pending Tool Call Event
     GW-->>Client: SSE: tool_calls (finish_reason: "tool_calls", [DONE])
-    Note over GW,Agent: Request detaches; Turn stays pending in memory
+    Note over GW,Agent: Request detaches<br/>Turn stays pending in memory
     
     Client->>Client: Execute tool locally
     Client->>GW: POST /v1/chat/completions (history + role: "tool" results)
@@ -199,12 +223,18 @@ sequenceDiagram
   - Computes canonical history hashes to compute deltas: only new messages are delivered to existing native sessions.
   - Manages turn lifecycle, idle eviction (`session.ttl`), and turn timeouts (`session.turn_timeout`).
   - Implements atomic checkpointing (`session.store_path`) to persist resume IDs and session metadata across restarts.
-- **`internal/executor/acp`**:
-  - Spawns and manages ACP agents directly via `agentrun`.
-  - Bridges client-defined OpenAI `tools` to the agent using a private, session-scoped stdio MCP server (`internal/mcpbridge`).
-- **`internal/executor/web`**:
-  - Connects directly to browser automation drivers without an intermediary HTTP service.
-  - Implements bidirectional text-based tool calling protocols.
+- **`internal/executor/external`**:
+  - Unified engine for local subprocess execution (`executor: "external"` / `"subprocess"`).
+  - Protocol abstraction: supports `protocol: "acp"` (via `agentrun`) and `protocol: "driver"` (line-delimited JSON IPC over stdio).
+  - Pluggable tool strategies (`tool_strategy`):
+    - `mcp`: Bridges client tools into a private, session-scoped stdio MCP server (`internal/mcpbridge`).
+    - `prompt`: Injects tool schemas into the system prompt and parses JSON responses (`DecodeToolResponse`) for text-only models.
+    - `wire`: Uses direct line protocol events (`tool_call`, `tool_result`).
+    - `both` / `auto`: Accepts both wire events and text prompt JSON.
+- **`internal/executor/acp` & `internal/executor/web`**:
+  - Backward-compatible adapters and legacy aliases delegating to the unified external execution layer.
+- **`internal/mcpbridge`**:
+  - Provides the private stdio MCP subprocess mode and the in-gateway session HTTP facade (`mcpbridge.Facade`).
 
 ---
 
@@ -242,15 +272,30 @@ Prometheus metrics are served over a physically separate HTTP listener:
 - **Default Listener (`127.0.0.1:9209`)**: Binds strictly to loopback by default.
 - **Security Boundary**: The public API port (`:9208`) does **not** expose internal metrics. Scrapes cannot access client inference endpoints, and external clients cannot scrape internal operational telemetry.
 
-```text
-+-----------------------+              +-----------------------+
-|  Public Ingress :9208 |              |  Loopback Only :9209  |
-|  /v1/chat/completions |              |  /metrics             |
-|  /v1/responses        |              +-----------------------+
-|  /v1/models           |                         ^
-+-----------------------+                         |
-           |                               Internal Shared
-           +----------------------------> Registry (sync/atomic)
+```mermaid
+flowchart LR
+    Client["External Clients<br/>(SDKs, cURL, Apps)"]
+    
+    subgraph Public["Public Ingress (:9208)"]
+        direction TB
+        API["Public API Endpoints<br/>• /v1/chat/completions<br/>• /v1/responses<br/>• /v1/models"]
+    end
+
+    subgraph Core["Gateway Core Runtime"]
+        Registry["Internal Metrics Registry<br/>(sync/atomic, zero-allocation)"]
+    end
+
+    subgraph Loopback["Isolated Loopback (127.0.0.1:9209)"]
+        direction TB
+        Metrics["Prometheus Endpoint<br/>• /metrics"]
+    end
+
+    Prometheus["Prometheus Scraper<br/>(Localhost / Monitoring)"]
+
+    Client -->|Inference Traffic| API
+    API -->|Record Metrics| Registry
+    Registry -->|Read Telemetry| Metrics
+    Prometheus -->|Scrape /metrics| Metrics
 ```
 
 ### Key Prometheus Metrics

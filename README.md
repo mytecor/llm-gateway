@@ -16,11 +16,11 @@ The gateway encapsulates upstream LLM providers: clients interact with virtual l
 
 ---
 
-## Native ACP and Web Executors
+## Native External Subprocess Executors (ACP & Web/Driver)
 
-In addition to standard API providers, the gateway executes ACP agents directly via `agentrun` and connects to browser drivers without an intermediate HTTP service. A unified runtime manages conversations, history checkpoints, session resume, and pending tool calls. Tools provided in OpenAI `tools` are executed by the client (e.g., Pi); the gateway returns `tool_calls` and forwards the received tool results to the waiting engine. For ACP, this operates through a session-scoped MCP bridge.
+In addition to standard API providers, the gateway executes external subprocesses directly (such as ACP agents via `agentrun` or browser automation drivers) without an intermediate HTTP service. A unified runtime manages conversations, history checkpoints, session resume, and pending tool calls. Tools provided in OpenAI `tools` are executed by the client (e.g., Pi); the gateway returns `tool_calls` and forwards the received tool results to the waiting engine. For ACP and drivers configured with MCP, this operates through a session-scoped MCP bridge.
 
-Existing providers use `executor: "bifrost"` by default. Native executors are selected via `executor: "acp"` or `"web"` with `command` and `session`. They support the text Chat Completions API; stateful routes require a single target, `race count: 1`, and disabled retry/fallback/hedge/continue/repetition.
+Existing providers use `executor: "bifrost"` by default. Native external executors are configured via `executor: "external"` (or `"subprocess"`, with legacy aliases `"acp"` and `"web"`), `command`, `protocol` (`"acp"` or `"driver"`), and optional `tool_strategy` (`"auto"`, `"mcp"`, `"prompt"`, `"wire"`, `"both"`). They support the text Chat Completions API; stateful routes require a single target, `race count: 1`, and disabled retry/fallback/hedge/continue/repetition.
 
 - [Session Configuration Example](configs/config.sessions.example.json)
 - [Sessions, Tools, and Browser Driver Protocol Documentation](docs/session-executors.md)

@@ -7,10 +7,9 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/mytecor/llm-gateway/internal/executor/acp"
 	"github.com/mytecor/llm-gateway/internal/executor/bifrost"
+	"github.com/mytecor/llm-gateway/internal/executor/external"
 	sessionexecutor "github.com/mytecor/llm-gateway/internal/executor/session"
-	"github.com/mytecor/llm-gateway/internal/executor/web"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/session"
@@ -71,9 +70,11 @@ func New(ctx context.Context, cfg *policy.CompiledConfig) (*Registry, error) {
 		var err error
 		switch p.Executor {
 		case "acp":
-			engine, err = acp.New(p.Command, p.Session.DefaultCWD)
+			engine, err = external.New(external.Config{Protocol: external.ProtocolACP, Command: p.Command, DefaultCWD: p.Session.DefaultCWD, ToolStrategy: p.ToolStrategy})
 		case "web":
-			engine, err = web.New(p.Command)
+			engine, err = external.New(external.Config{Protocol: external.ProtocolDriver, Command: p.Command, DefaultCWD: p.Session.DefaultCWD, ToolStrategy: p.ToolStrategy})
+		case "external", "subprocess":
+			engine, err = external.New(external.Config{Protocol: p.Protocol, Command: p.Command, DefaultCWD: p.Session.DefaultCWD, ToolStrategy: p.ToolStrategy})
 		default:
 			err = fmt.Errorf("unknown executor %q", p.Executor)
 		}

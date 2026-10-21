@@ -1,10 +1,17 @@
 # Session executors and client tools
 
 The gateway accepts OpenAI Chat Completions and executes providers in-process.
-`executor` selects `bifrost` (the default), `acp`, or `web`. Existing HTTP
-providers, including a separately running agentrun-openai, continue to use the
-ordinary Bifrost/OpenAI configuration. There is no special HTTP connection to
-agentrun-openai in the native executor path.
+`executor` selects `bifrost` (the default), `external` (or alias `subprocess`), or
+legacy aliases `acp` and `web`. Existing HTTP providers continue to use the ordinary
+Bifrost/OpenAI configuration.
+
+When using `executor: "external"` (or `"subprocess"`), configure:
+- `protocol`: `"acp"` or `"driver"` (aliases: `"web"`, `"ndjson"`, default is `"driver"`).
+- `tool_strategy`: `"auto"` (default), `"mcp"` (session-scoped MCP bridge), `"prompt"` (text prompt injection + JSON response codec), `"wire"` (structured `tool_call` and `tool_result` events without prompt injection), or `"both"` (prompt + wire).
+
+ACP supports only `"auto"` and `"mcp"`; both deliver tools through MCP.
+The driver protocol supports all listed strategies; `"auto"` selects `"both"`.
+This also applies to the legacy `acp` and `web` executor aliases.
 
 Start with [config.sessions.example.json](../configs/config.sessions.example.json).
 Replace the example commands and absolute paths before serving. `check` validates
@@ -17,9 +24,11 @@ argument arrays passed directly to exec; no shell interpretation is performed.
 - `internal/session`: engine-independent conversations, history checkpoints,
   native-session restore, pending tool calls, cancellation and turn deadlines.
 - `internal/executor/session`: OpenAI request/result and SSE adaptation.
-- `internal/executor/acp`: agentrun engine and session-scoped MCP facade.
-- `internal/executor/web`: direct browser-driver adapter and text tool codec.
-- `internal/mcpbridge`: private stdio MCP subprocess mode of llm-gateway.
+- `internal/executor/external`: unified external/subprocess executor engine, supporting
+  both ACP and driver protocols with configurable tool delivery strategies (MCP, prompt codec, wire).
+- `internal/executor/acp`: agentrun ACP engine adapter.
+- `internal/executor/web`: legacy browser-driver adapter alias delegating to external driver.
+- `internal/mcpbridge`: private stdio MCP subprocess mode and in-gateway session facade.
 
 Both native engines implement `session.Engine` / `session.Session`. A web engine
 does not implement ACP or depend on agentrun. Bifrost retains native API function

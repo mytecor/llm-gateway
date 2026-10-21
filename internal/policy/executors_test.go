@@ -16,7 +16,7 @@ func sessionConfig(t *testing.T, kind string) Config {
 	return cfg
 }
 func TestSessionExecutorsCompileWithoutHTTPSettings(t *testing.T) {
-	for _, kind := range []string{"acp", "web"} {
+	for _, kind := range []string{"acp", "web", "external", "subprocess"} {
 		cfg := sessionConfig(t, kind)
 		compiled, err := CompileConfig(cfg)
 		if err != nil {
@@ -27,6 +27,82 @@ func TestSessionExecutorsCompileWithoutHTTPSettings(t *testing.T) {
 		}
 	}
 }
+
+func TestExternalExecutorProtocolsAndToolStrategies(t *testing.T) {
+	// ACP protocol via external
+	cfg := sessionConfig(t, "external")
+	cfg.Providers[0].Protocol = "acp"
+	cfg.Providers[0].ToolStrategy = "mcp"
+	compiled, err := CompileConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.Providers["p"].Capabilities().Resume {
+		t.Fatal("expected ACP protocol to support resume")
+	}
+
+	// Driver protocol with prompt tool strategy
+	cfg = sessionConfig(t, "external")
+	cfg.Providers[0].Protocol = "driver"
+	cfg.Providers[0].ToolStrategy = "prompt"
+	if _, err = CompileConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// Subprocess alias with wire strategy
+	cfg = sessionConfig(t, "subprocess")
+	cfg.Providers[0].Protocol = "ndjson"
+	cfg.Providers[0].ToolStrategy = "wire"
+	if _, err = CompileConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reject unknown protocol
+	cfg = sessionConfig(t, "external")
+	cfg.Providers[0].Protocol = "unknown"
+	if _, err = CompileConfig(cfg); err == nil {
+		t.Fatal("expected error on unknown protocol")
+	}
+
+	// Reject unknown tool strategy
+	cfg = sessionConfig(t, "external")
+	cfg.Providers[0].ToolStrategy = "magic"
+	if _, err = CompileConfig(cfg); err == nil {
+		t.Fatal("expected error on unknown tool strategy")
+	}
+
+	// Reject protocol on bifrost provider
+	bifrostCfg := sessionConfig(t, "bifrost")
+	bifrostCfg.Providers[0].Protocol = "acp"
+	if _, err = CompileConfig(bifrostCfg); err == nil {
+		t.Fatal("expected error on protocol with bifrost")
+	}
+}
+func TestACPToolStrategies(t *testing.T) {
+	for _, kind := range []string{"acp", "external", "subprocess"} {
+		for _, strategy := range []string{"", "auto", "mcp", " AUTO ", " MCP ", "prompt", "wire", "both", " Prompt "} {
+			t.Run(kind+"/"+strategy, func(t *testing.T) {
+				cfg := sessionConfig(t, kind)
+				if kind != "acp" {
+					cfg.Providers[0].Protocol = " ACP "
+				}
+				cfg.Providers[0].ToolStrategy = strategy
+				_, err := CompileConfig(cfg)
+				switch strings.ToLower(strings.TrimSpace(strategy)) {
+				case "", "auto", "mcp":
+					if err != nil {
+						t.Fatal(err)
+					}
+				default:
+					if err == nil || !strings.Contains(err.Error(), "ACP protocol supports only auto or mcp tool_strategy") {
+						t.Fatalf("expected unsupported ACP tool strategy error, got %v", err)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestSessionExecutorRejectsInvalidSettings(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

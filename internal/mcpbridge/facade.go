@@ -1,4 +1,4 @@
-package acp
+package mcpbridge
 
 import (
 	"context"
@@ -10,23 +10,26 @@ import (
 	"net/http"
 	"os"
 	"time"
-
-	"github.com/dmora/agentrun"
-	"github.com/mytecor/llm-gateway/internal/mcpbridge"
-	"github.com/mytecor/llm-gateway/internal/session"
 )
 
-type mcpFacade struct {
+type ServerDescriptor struct {
+	Name    string            `json:"name"`
+	Command string            `json:"command"`
+	Args    []string          `json:"args"`
+	Env     map[string]string `json:"env,omitempty"`
+}
+
+type Facade struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	server     *http.Server
-	descriptor agentrun.MCPServer
+	descriptor ServerDescriptor
 	token      string
-	tools      []mcpbridge.Tool
+	tools      []Tool
 	call       func(context.Context, string, json.RawMessage) (string, error)
 }
 
-func newMCPFacade(parent context.Context, tools []session.FunctionTool, call func(context.Context, string, json.RawMessage) (string, error)) (*mcpFacade, error) {
+func NewFacade(parent context.Context, tools []Tool, call func(context.Context, string, json.RawMessage) (string, error)) (*Facade, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, err
@@ -40,20 +43,23 @@ func newMCPFacade(parent context.Context, tools []session.FunctionTool, call fun
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(parent)
-	f := &mcpFacade{ctx: ctx, cancel: cancel, token: hex.EncodeToString(secret), call: call}
-	for _, tool := range tools {
-		f.tools = append(f.tools, mcpbridge.Tool{Name: tool.Function.Name, Description: tool.Function.Description, InputSchema: tool.Function.Parameters})
-	}
-	f.descriptor = agentrun.MCPServer{Name: "openai-functions", Command: exe, Args: []string{"__mcp-bridge", listener.Addr().String(), f.token}}
+	f := &Facade{ctx: ctx, cancel: cancel, token: hex.EncodeToString(secret), tools: append([]Tool(nil), tools...), call: call}
+	f.descriptor = ServerDescriptor{Name: "openai-functions", Command: exe, Args: []string{"__mcp-bridge", listener.Addr().String(), f.token}}
 	f.server = &http.Server{Handler: f, ReadHeaderTimeout: 5 * time.Second, BaseContext: func(net.Listener) context.Context { return ctx }}
 	go func() { _ = f.server.Serve(listener) }()
 	return f, nil
 }
-func (f *mcpFacade) close() {
+
+func (f *Facade) Close() {
 	f.cancel()
 	_ = f.server.Close()
 }
-func (f *mcpFacade) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+
+func (f *Facade) Descriptor() ServerDescriptor {
+	return f.descriptor
+}
+
+func (f *Facade) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost || subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+f.token)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -67,11 +73,10 @@ func (f *mcpFacade) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-f.ctx.Done():
 		case <-r.Context().Done():
-
 			f.cancel()
 		}
 	case "/call":
-		var call mcpbridge.Call
+		var call Call
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&call); err != nil {
 			http.Error(w, "invalid tool call", 400)
 			return
@@ -94,10 +99,10 @@ func (f *mcpFacade) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.(http.Flusher).Flush()
 		result, err := f.call(r.Context(), call.Name, call.Arguments)
 		if err != nil {
-			_ = json.NewEncoder(w).Encode(mcpbridge.Result{Error: err.Error()})
+			_ = json.NewEncoder(w).Encode(Result{Error: err.Error()})
 			return
 		}
-		_ = json.NewEncoder(w).Encode(mcpbridge.Result{Content: result})
+		_ = json.NewEncoder(w).Encode(Result{Content: result})
 	default:
 		http.NotFound(w, r)
 	}
