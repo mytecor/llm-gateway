@@ -17,3 +17,9 @@ bin/
 .DS_Store
 .idea/
 .vscode/
+
+# Node / Drivers
+node_modules/
+dist/
+*.tsbuildinfo
+

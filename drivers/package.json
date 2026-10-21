@@ -1,0 +1,9 @@
+{
+  "name": "llm-gateway-drivers",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "pnpm -r run build",
+    "check": "pnpm -r run check"
+  }
+}

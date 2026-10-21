@@ -1,0 +1,52 @@
+{
+  "host": "127.0.0.1",
+  "port": 9208,
+  "metrics_host": "127.0.0.1",
+  "metrics_port": 9209,
+  "log_level": "info",
+  "providers": [
+    {
+      "id": "muse-provider",
+      "executor": "external",
+      "protocol": "driver",
+      "tool_strategy": "prompt",
+      "command": [
+        "node",
+        "/Users/mytecor/Desktop/projects/llm-gateway/drivers/muse/dist/index.js",
+        "--cdp-host",
+        "127.0.0.1",
+        "--cdp-port",
+        "9222"
+      ],
+      "session": {
+        "default_cwd": "/Users/mytecor/Desktop/projects/llm-gateway",
+        "allowed_roots": ["/Users/mytecor/Desktop/projects/llm-gateway"],
+        "store_path": "/Users/mytecor/Desktop/projects/llm-gateway/state/muse-sessions.json",
+        "ttl": "30m",
+        "turn_timeout": "15m"
+      }
+    }
+  ],
+  "rules": [
+    {
+      "route": "muse",
+      "action": "filter",
+      "where": {
+        "model": {
+          "eq": "muse"
+        }
+      }
+    },
+    {
+      "route": "muse",
+      "action": "map",
+      "providers": ["muse-provider"],
+      "native": "default"
+    },
+    {
+      "route": "muse",
+      "action": "race",
+      "count": 1
+    }
+  ]
+}
