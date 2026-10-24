@@ -181,9 +181,9 @@ func TestConfig() Config {
 	cfg.Port = 9208
 	cfg.LogLevel = "error"
 	cfg.Providers = []Provider{
-		{ID: "a", BaseProvider: "openai", InferenceURL: "https://a.invalid", Priority: 20},
-		{ID: "b", BaseProvider: "openai", InferenceURL: "https://b.invalid", Priority: 10},
-		{ID: "c", BaseProvider: "openai", InferenceURL: "https://c.invalid", Priority: 5},
+		{ID: "a", Priority: 20, Config: map[string]any{"inference_url": "https://a.invalid"}},
+		{ID: "b", Priority: 10, Config: map[string]any{"inference_url": "https://b.invalid"}},
+		{ID: "c", Priority: 5, Config: map[string]any{"inference_url": "https://c.invalid"}},
 	}
 	cfg.Rules = Rules{
 		FilterModel("standard", "standard"),
@@ -223,10 +223,9 @@ func RulesConfig(t testing.TB, n int, rules []Rule) *CompiledConfig {
 	for i := 0; i < n; i++ {
 		letter := rune('a' + i)
 		providers = append(providers, Provider{
-			ID:           string(letter),
-			BaseProvider: "openai",
-			InferenceURL: fmt.Sprintf("https://%c.invalid", letter),
-			Priority:     100 - i,
+			ID:       string(letter),
+			Priority: 100 - i,
+			Config:   map[string]any{"inference_url": fmt.Sprintf("https://%c.invalid", letter)},
 		})
 	}
 	cfg.Providers = providers

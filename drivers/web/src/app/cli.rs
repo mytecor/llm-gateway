@@ -4,7 +4,7 @@ use std::path::PathBuf;
 #[command(version, about = "YAML-driven CDP adapter for llm-gateway")]
 pub(super) struct Args {
     #[command(subcommand)]
-    pub(super) command: Command,
+    pub(super) command: Option<Command>,
 }
 #[derive(Subcommand)]
 pub(super) enum Command {
@@ -36,7 +36,7 @@ pub(super) struct Options {
     #[arg(long)]
     pub(super) heal: bool,
 }
-fn header(value: &str) -> std::result::Result<(String, String), String> {
+pub(super) fn header(value: &str) -> std::result::Result<(String, String), String> {
     let (name, variable) = value
         .split_once('=')
         .ok_or("expected Header=ENV_VARIABLE")?;

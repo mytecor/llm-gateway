@@ -395,10 +395,14 @@ func TestCompileConfigModifiersRequireRace(t *testing.T) {
 
 func TestCompileConfigDerivesCatalogURLFromInferenceBase(t *testing.T) {
 	cfg := testConfig()
-	cfg.Providers[0].InferenceURL = "https://provider.invalid/v1/"
-	cfg.Providers[0].APIKey = "provider-a-key"
-	cfg.Providers[1].InferenceURL = "https://edge.invalid/functions/v1/gonka"
-	cfg.Providers[1].APIKey = "provider-b-key"
+	cfg.Providers[0].Config = map[string]any{
+		"inference_url": "https://provider.invalid/v1/",
+		"api_key":       "provider-a-key",
+	}
+	cfg.Providers[1].Config = map[string]any{
+		"inference_url": "https://edge.invalid/functions/v1/gonka",
+		"api_key":       "provider-b-key",
+	}
 	compiled, err := compileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -422,7 +426,7 @@ func TestCompileConfigDerivesCatalogURLFromInferenceBase(t *testing.T) {
 func TestCompileConfigPreservesExplicitCatalogURLAndCredential(t *testing.T) {
 	cfg := testConfig()
 	cfg.Providers[0].ModelsURL = "https://catalog.invalid/custom/models"
-	cfg.Providers[0].APIKey = "provider-key"
+	cfg.Providers[0].Config["api_key"] = "provider-key"
 	compiled, err := compileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -440,13 +444,13 @@ func TestCompileConfigPreservesExplicitCatalogURLAndCredential(t *testing.T) {
 
 func TestCompileConfigDoesNotInferCatalogForNonOpenAIAdapter(t *testing.T) {
 	cfg := testConfig()
-	cfg.Providers[0].BaseProvider = "anthropic"
+	cfg.Providers[0].Config["base_provider"] = "anthropic"
 	compiled, err := compileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, source := range compiled.CatalogSources["a"] {
-		if source.URL == cfg.Providers[0].InferenceURL+"/models" {
+		if source.URL == "https://a.invalid/models" {
 			t.Fatalf("OpenAI catalog path was inferred for Anthropic adapter: %#v", source)
 		}
 	}
@@ -457,46 +461,37 @@ func TestCompileConfigDoesNotInferCatalogForNonOpenAIAdapter(t *testing.T) {
 
 func TestCompileConfigRequiresVertexProjectAndRegion(t *testing.T) {
 	cfg := testConfig()
-	cfg.Providers[0].BaseProvider = "vertex"
+	cfg.Providers[0].Config["base_provider"] = "vertex"
 	if _, err := compileConfig(cfg); err == nil || !strings.Contains(err.Error(), "vertex_project_id and vertex_region") {
 		t.Fatalf("expected missing Vertex resource configuration error, got %v", err)
 	}
-	cfg.Providers[0].VertexProjectID = "mytecor"
-	cfg.Providers[0].VertexRegion = "global"
+	cfg.Providers[0].Config["vertex_project_id"] = "mytecor"
+	cfg.Providers[0].Config["vertex_region"] = "global"
 	if _, err := compileConfig(cfg); err != nil {
 		t.Fatalf("valid Vertex provider was rejected: %v", err)
 	}
 }
 
-func TestCompileConfigRejectsUnsupportedBifrostBaseProvider(t *testing.T) {
+func TestCompileConfigRejectsUnsupportedBaseProvider(t *testing.T) {
 	cfg := testConfig()
-	cfg.Providers[0].BaseProvider = "azure"
-	if _, err := compileConfig(cfg); err == nil || !strings.Contains(err.Error(), "unsupported Bifrost base_provider") {
-		t.Fatalf("expected unsupported Bifrost base provider error, got %v", err)
+	cfg.Providers[0].Config["base_provider"] = "azure"
+	if _, err := compileConfig(cfg); err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("expected unsupported base provider error, got %v", err)
 	}
 }
 
-func TestCompileConfigRejectsDuplicateStandardProvider(t *testing.T) {
-	cfg := testConfig()
-	cfg.Providers = []Provider{
-		{ID: "vertex-a", BaseProvider: "vertex", InferenceURL: "https://aiplatform.googleapis.com", VertexProjectID: "a", VertexRegion: "global"},
-		{ID: "vertex-b", BaseProvider: "vertex", InferenceURL: "https://aiplatform.googleapis.com", VertexProjectID: "b", VertexRegion: "global"},
-	}
-	if _, err := compileConfig(cfg); err == nil || !strings.Contains(err.Error(), "same Bifrost provider key") {
-		t.Fatalf("expected duplicate standard provider error, got %v", err)
-	}
-}
-
-func TestResolveConfigSecretsResolvesVertexCredentials(t *testing.T) {
+func TestResolveConfigSecretsResolvesNestedConfigAndEnv(t *testing.T) {
 	t.Setenv("VERTEX_TEST_CREDENTIALS", `{"type":"service_account"}`)
 	cfg := Config{Providers: []Provider{{
-		ID:                    "google-vertex",
-		VertexAuthCredentials: "env.VERTEX_TEST_CREDENTIALS",
+		ID: "google-vertex",
+		Config: map[string]any{
+			"vertex_auth_credentials": "env.VERTEX_TEST_CREDENTIALS",
+		},
 	}}}
 	if err := resolveConfigSecrets(&cfg); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Providers[0].VertexAuthCredentials != `{"type":"service_account"}` {
+	if cfg.Providers[0].Config["vertex_auth_credentials"] != `{"type":"service_account"}` {
 		t.Fatal("Vertex credentials env reference was not resolved")
 	}
 }
@@ -558,11 +553,11 @@ func TestCheckConfigDoesNotResolveRuntimeSecrets(t *testing.T) {
 
 func TestCheckConfigRejectsLiteralSecrets(t *testing.T) {
 	cfg := testConfig()
-	cfg.Providers[0].APIKey = "plaintext"
+	cfg.Providers[0].Config["api_key"] = "plaintext"
 	if err := validateEnvSecretReferences(cfg, nil); err == nil || !strings.Contains(err.Error(), "literal secret") {
 		t.Fatalf("expected literal secret rejection, got %v", err)
 	}
-	cfg.Providers[0].APIKey = "env.INVALID-NAME"
+	cfg.Providers[0].Config["api_key"] = "env.INVALID-NAME"
 	if err := validateEnvSecretReferences(cfg, nil); err == nil || !strings.Contains(err.Error(), "invalid environment") {
 		t.Fatalf("expected invalid environment reference rejection, got %v", err)
 	}
@@ -570,7 +565,7 @@ func TestCheckConfigRejectsLiteralSecrets(t *testing.T) {
 
 func TestCheckConfigMatchesDeclaredEnvironment(t *testing.T) {
 	cfg := testConfig()
-	cfg.Providers[0].APIKey = "env.PROVIDER_A_KEY"
+	cfg.Providers[0].Config["api_key"] = "env.PROVIDER_A_KEY"
 	if err := validateEnvSecretReferences(cfg, map[string]bool{"PROVIDER_A_KEY": true}); err != nil {
 		t.Fatalf("matching declaration was rejected: %v", err)
 	}
@@ -581,7 +576,7 @@ func TestCheckConfigMatchesDeclaredEnvironment(t *testing.T) {
 
 func TestCompileConfigRejectsCredentialsInURL(t *testing.T) {
 	cfg := testConfig()
-	cfg.Providers[0].InferenceURL = "https://secret@example.invalid"
+	cfg.Providers[0].Config["inference_url"] = "https://secret@example.invalid"
 	if _, err := compileConfig(cfg); err == nil || !strings.Contains(err.Error(), "credentials") {
 		t.Fatalf("expected credential URL rejection, got %v", err)
 	}

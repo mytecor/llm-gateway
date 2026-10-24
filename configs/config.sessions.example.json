@@ -18,9 +18,9 @@
     },
     {
       "id": "browser-model",
-      "driver": "custom",
+      "driver": "web",
       "tool_strategy": "prompt",
-      "command": ["python3", "/absolute/path/to/browser_driver.py"],
+      "profile": "./drivers/web/sites/muse.yaml",
       "session": {
         "default_cwd": "/absolute/path/to/project",
         "allowed_roots": ["/absolute/path/to/project"],

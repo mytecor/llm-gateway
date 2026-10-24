@@ -44,48 +44,48 @@ func NewRegistry(bindings map[string]Binding, middleware ...Middleware) *Registr
 func New(ctx context.Context, cfg *policy.CompiledConfig) (*Registry, error) {
 	registry := NewRegistry(nil)
 	fail := func(err error) (*Registry, error) { _ = registry.Close(); return nil, err }
-	apiCfg := *cfg
-	apiCfg.Providers = map[string]policy.Provider{}
 	for id, p := range cfg.Providers {
-		if p.Driver == "" || p.Driver == external.DriverHTTP {
-			apiCfg.Providers[id] = p
+		var defaultCWD string
+		if p.Session != nil {
+			defaultCWD = p.Session.DefaultCWD
 		}
-	}
-	if len(apiCfg.Providers) > 0 {
-		api, err := external.NewHTTP(ctx, &apiCfg)
-		if err != nil {
-			return fail(err)
-		}
-		registry.owned = append(registry.owned, api)
-		for id, p := range apiCfg.Providers {
-			registry.bindings[id] = Binding{Executor: api, Capabilities: p.Capabilities()}
-		}
-	}
-	for id, p := range cfg.Providers {
-		if p.Driver == "" || p.Driver == external.DriverHTTP {
-			continue
-		}
-		engine, err := external.New(external.Config{
-			Driver:       p.Driver,
-			Command:      p.Command,
-			DefaultCWD:   p.Session.DefaultCWD,
-			ToolStrategy: p.ToolStrategy,
-			Profile:      p.Profile,
-			CDPURL:       p.CDPURL,
-			Account:      p.Account,
-			StateDir:     p.StateDir,
-			Heal:         p.Heal,
+		drv, err := external.New(ctx, external.Config{
+			ID:             p.ID,
+			Driver:         p.Driver,
+			Command:        p.Command,
+			Env:            p.Env,
+			DefaultCWD:     defaultCWD,
+			ToolStrategy:   p.ToolStrategy,
+			ModelsURL:      p.ModelsURL,
+			HasSession:     p.Session != nil,
+			RequestTimeout: p.RequestTimeout.Duration,
+			DriverConfig:   p.Config,
+			Logger:         cfg.Logger,
 		})
 		if err != nil {
 			return fail(fmt.Errorf("provider %q: %w", id, err))
 		}
-		s := p.Session
-		exec, err := sessionexecutor.New(engine, session.Config{DefaultCWD: s.DefaultCWD, AllowedRoots: s.AllowedRoots, SessionTTL: s.TTL.Duration, TurnTimeout: s.TurnTimeout.Duration, StorePath: s.StorePath, HeartbeatInterval: s.Heartbeat.Duration})
-		if err != nil {
-			return fail(fmt.Errorf("provider %q: %w", id, err))
+		caps := drv.Capabilities()
+		if caps.Stateful {
+			s := p.Session
+			exec, err := sessionexecutor.New(drv, session.Config{
+				DefaultCWD:        s.DefaultCWD,
+				AllowedRoots:      s.AllowedRoots,
+				SessionTTL:        s.TTL.Duration,
+				TurnTimeout:       s.TurnTimeout.Duration,
+				StorePath:         s.StorePath,
+				HeartbeatInterval: s.Heartbeat.Duration,
+			})
+			if err != nil {
+				_ = drv.Close()
+				return fail(fmt.Errorf("provider %q: %w", id, err))
+			}
+			registry.owned = append(registry.owned, exec)
+			registry.bindings[id] = Binding{Executor: exec, Capabilities: caps}
+		} else {
+			registry.owned = append(registry.owned, drv)
+			registry.bindings[id] = Binding{Executor: drv, Capabilities: caps}
 		}
-		registry.owned = append(registry.owned, exec)
-		registry.bindings[id] = Binding{Executor: exec, Capabilities: p.Capabilities()}
 	}
 	return registry, nil
 }

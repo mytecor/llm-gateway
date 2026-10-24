@@ -428,3 +428,14 @@ func TestSanitizeStreamChunkBackfillsReasoningFromDetails(t *testing.T) {
 		t.Fatalf("expected reasoning and reasoning_content to be backfilled to %q, got %+v", thought, decoded.Choices)
 	}
 }
+
+func TestBifrostExecutorRejectsDuplicateStandardProvider(t *testing.T) {
+	providers := []ProviderConfig{
+		{ID: "vertex-a", BaseProvider: "vertex", InferenceURL: "https://aiplatform.googleapis.com", VertexProjectID: "a", VertexRegion: "global"},
+		{ID: "vertex-b", BaseProvider: "vertex", InferenceURL: "https://aiplatform.googleapis.com", VertexProjectID: "b", VertexRegion: "global"},
+	}
+	if _, err := NewExecutor(context.Background(), providers); err == nil || !strings.Contains(err.Error(), "same Bifrost provider key") {
+		t.Fatalf("expected duplicate standard provider error, got %v", err)
+	}
+}
+

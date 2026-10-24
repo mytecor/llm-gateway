@@ -24,7 +24,7 @@ make build-acp
 go test -race -C drivers/acp ./...
 ```
 
-When `llm-gateway` resolves a provider with `"driver": "acp"`, [`external.ResolveDriverBinary`](../../internal/executor/external/resolve.go) locates `acp-driver` next to the gateway executable, in `./bin/acp-driver`, on `$PATH`, or builds `./drivers/acp` on demand in a source checkout, and passes the configured ACP agent `command` to `acp-driver -- <command...>`.
+When `llm-gateway` resolves a provider with `"driver": "acp"`, [`external.ResolveDriverBinary`](../../internal/executor/external/resolve.go) locates `acp-driver` next to the gateway executable, in `./bin/acp-driver`, on `$PATH`, or builds `./drivers/acp` on demand in a source checkout, and passes the configured `command` inside the NDJSON `init`/`start`/`models` `config` payload.
 
 ## Gateway configuration
 
@@ -78,4 +78,5 @@ When `llm-gateway` resolves a provider with `"driver": "acp"`, [`external.Resolv
 
 ## NDJSON wire protocol
 
-See the shared [Session NDJSON Driver Protocol](../../docs/session-executors.md#session-ndjson-driver-protocol) for the full message reference (`start`, `prompt`, `models`, `ready`, `session_not_found`, `session_updated`, `text`, `reasoning`, `usage`, `done`, `error`).
+- **`init` / `describe`**: Validates `tool_strategy` (`"auto"` or `"mcp"`) and `config.command`, returning `{"type":"ready","tool_strategy":"mcp","capabilities":{"chat":true,"streaming":true,"tools":true,"stateful":true,"resume":true}}`.
+- **`models` / `start` / `prompt`**: See the shared [Unified NDJSON Driver Protocol](../../docs/session-executors.md#session-ndjson-driver-protocol) for the full message reference (`init`, `start`, `prompt`, `models`, `ready`, `session_not_found`, `session_updated`, `text`, `reasoning`, `usage`, `done`, `error`).

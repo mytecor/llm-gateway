@@ -1,15 +1,14 @@
 package external
 
 import (
-	"github.com/mytecor/llm-gateway/internal/session"
+	"context"
+	"log/slog"
+	"time"
+
+	"github.com/mytecor/llm-gateway/internal/model"
 )
 
 const (
-	DriverHTTP   = "http"
-	DriverACP    = "acp"
-	DriverWeb    = "web"
-	DriverCustom = "custom"
-
 	ToolStrategyAuto   = "auto"
 	ToolStrategyMCP    = "mcp"
 	ToolStrategyPrompt = "prompt"
@@ -17,18 +16,37 @@ const (
 	ToolStrategyBoth   = "both"
 )
 
-type Config struct {
-	Driver       string
-	Command      []string
-	DefaultCWD   string
-	ToolStrategy string
-	Profile      string
-	CDPURL       string
-	Account      string
-	StateDir     string
-	Heal         bool
+type CatalogSource struct {
+	URL      string `json:"url"`
+	APIKey   string `json:"api_key,omitempty"`
+	Explicit bool   `json:"explicit,omitempty"`
 }
 
-func New(cfg Config) (session.Engine, error) {
-	return NewDriver(cfg)
+type Description struct {
+	Capabilities model.Capabilities `json:"capabilities"`
+	ToolStrategy string             `json:"tool_strategy,omitempty"`
+	Catalog      *CatalogSource     `json:"catalog,omitempty"`
+	Config       map[string]any     `json:"config,omitempty"`
+}
+
+type Config struct {
+	ID             string
+	Driver         string
+	Command        []string
+	Env            map[string]string
+	DefaultCWD     string
+	ToolStrategy   string
+	ModelsURL      string
+	HasSession     bool
+	RequestTimeout time.Duration
+	DriverConfig   map[string]any
+	Logger         *slog.Logger
+}
+
+func New(ctx context.Context, cfg Config) (*Driver, error) {
+	return newDriver(ctx, cfg)
+}
+
+func NewDriver(cfg Config) (*Driver, error) {
+	return newDriver(context.Background(), cfg)
 }

@@ -11,10 +11,18 @@ use anyhow::Result;
 use clap::Parser;
 use cli::{Args, Command};
 use serde_json::json;
-use serve::serve;
+use serve::{serve, serve_stdio};
 use state::{account_dir, lock_account};
 use std::collections::BTreeMap;
-async fn execute(command: Command) -> Result<()> {
+async fn execute(command: Option<Command>) -> Result<()> {
+    let Some(command) = command else {
+        let work = serve_stdio();
+        tokio::pin!(work);
+        return tokio::select! {
+            result = &mut work => result,
+            _ = tokio::signal::ctrl_c() => Ok(()),
+        };
+    };
     if let Command::Check { profile } = command {
         let p = Profile::load(&profile)?;
         p.parser(None, false).await?;
@@ -54,7 +62,7 @@ async fn execute(command: Command) -> Result<()> {
 }
 pub async fn run() {
     let args = Args::parse();
-    let wire = matches!(args.command, Command::Run(_));
+    let wire = args.command.is_none() || matches!(args.command, Some(Command::Run(_)));
     if let Err(error) = execute(args.command).await {
         if wire {
             let _ = emit(json!({"type":"error","error":error.to_string()}));

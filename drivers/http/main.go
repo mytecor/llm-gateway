@@ -12,9 +12,30 @@ import (
 	"time"
 )
 
+type Capabilities struct {
+	Chat       bool `json:"chat,omitempty"`
+	Responses  bool `json:"responses,omitempty"`
+	Streaming  bool `json:"streaming,omitempty"`
+	Tools      bool `json:"tools,omitempty"`
+	Stateful   bool `json:"stateful,omitempty"`
+	Resume     bool `json:"resume,omitempty"`
+	SafeReplay bool `json:"safe_replay,omitempty"`
+}
+
+type CatalogSource struct {
+	URL      string `json:"url"`
+	APIKey   string `json:"api_key,omitempty"`
+	Explicit bool   `json:"explicit,omitempty"`
+}
+
 type inboundMessage struct {
 	Type                string           `json:"type"`
 	ID                  string           `json:"id,omitempty"`
+	ToolStrategy        string           `json:"tool_strategy,omitempty"`
+	ModelsURL           string           `json:"models_url,omitempty"`
+	HasSession          bool             `json:"has_session,omitempty"`
+	RequestTimeoutMs    int64            `json:"request_timeout_ms,omitempty"`
+	Config              json.RawMessage  `json:"config,omitempty"`
 	Providers           []ProviderConfig `json:"providers,omitempty"`
 	Provider            string           `json:"provider,omitempty"`
 	Model               string           `json:"model,omitempty"`
@@ -25,13 +46,18 @@ type inboundMessage struct {
 }
 
 type outboundMessage struct {
-	Type       string          `json:"type"`
-	ID         string          `json:"id,omitempty"`
-	Data       json.RawMessage `json:"data,omitempty"`
-	Event      string          `json:"event,omitempty"`
-	Meaningful bool            `json:"meaningful,omitempty"`
-	Error      string          `json:"error,omitempty"`
-	CallError  *CallError      `json:"call_error,omitempty"`
+	Type         string          `json:"type"`
+	ID           string          `json:"id,omitempty"`
+	ToolStrategy string          `json:"tool_strategy,omitempty"`
+	Capabilities *Capabilities   `json:"capabilities,omitempty"`
+	Catalog      *CatalogSource  `json:"catalog,omitempty"`
+	Config       map[string]any  `json:"config,omitempty"`
+	Models       []string        `json:"models,omitempty"`
+	Data         json.RawMessage `json:"data,omitempty"`
+	Event        string          `json:"event,omitempty"`
+	Meaningful   bool            `json:"meaningful,omitempty"`
+	Error        string          `json:"error,omitempty"`
+	CallError    *CallError      `json:"call_error,omitempty"`
 }
 
 func main() {
@@ -119,18 +145,54 @@ func serve(ctx context.Context, r io.Reader, w io.Writer) error {
 		}
 
 		switch msg.Type {
+		case "init", "describe":
+			_, catalog, normalizedCfg, err := ValidateProviderConfig(msg)
+			if err != nil {
+				_ = emit(outboundMessage{Type: "error", Error: err.Error()})
+				return nil
+			}
+			_ = emit(outboundMessage{
+				Type:         "ready",
+				Capabilities: defaultCapabilities(),
+				Catalog:      catalog,
+				Config:       normalizedCfg,
+			})
+			return nil
+
+		case "models":
+			_ = emit(outboundMessage{Type: "models", Models: []string{}})
+			return nil
+
 		case "start":
 			if exec != nil {
 				_ = emit(outboundMessage{Type: "error", Error: "HTTP driver already started"})
 				continue
 			}
+			providers := msg.Providers
+			var catalog *CatalogSource
+			var normalizedCfg map[string]any
+			if len(providers) == 0 {
+				var single ProviderConfig
+				var err error
+				single, catalog, normalizedCfg, err = ValidateProviderConfig(msg)
+				if err != nil {
+					_ = emit(outboundMessage{Type: "error", Error: err.Error()})
+					return nil
+				}
+				providers = []ProviderConfig{single}
+			}
 			var err error
-			exec, err = NewExecutor(ctx, msg.Providers)
+			exec, err = NewExecutor(ctx, providers)
 			if err != nil {
 				_ = emit(outboundMessage{Type: "error", Error: err.Error()})
 				return nil
 			}
-			_ = emit(outboundMessage{Type: "ready"})
+			_ = emit(outboundMessage{
+				Type:         "ready",
+				Capabilities: defaultCapabilities(),
+				Catalog:      catalog,
+				Config:       normalizedCfg,
+			})
 
 		case "cancel":
 			if msg.ID != "" {

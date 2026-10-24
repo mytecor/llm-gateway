@@ -2,16 +2,15 @@ package policy
 
 import (
 	"fmt"
+
 	"github.com/mytecor/llm-gateway/internal/model"
 )
 
 func (p Provider) Capabilities() model.Capabilities {
-	switch p.Driver {
-	case "acp", "web", "custom":
-		return model.Capabilities{Chat: true, Streaming: true, Tools: true, Stateful: true, Resume: true}
-	default:
-		return model.Capabilities{Chat: true, Responses: true, Streaming: true, Tools: true, SafeReplay: true}
+	if p.capabilities != (model.Capabilities{}) {
+		return p.capabilities
 	}
+	return model.Capabilities{Chat: true, Responses: true, Streaming: true, Tools: true, SafeReplay: true}
 }
 
 // Stateful work cannot be speculated or migrated without executor guarantees.

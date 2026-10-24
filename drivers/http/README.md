@@ -67,18 +67,23 @@ Unlike stateful session drivers (which run one process per conversation session)
 
 ### Inbound commands (`stdin`)
 
-1. **Handshake (`start`):**
+1. **Initialization & capability check (`init` / `describe`):**
    ```json
-   {"type":"start","config":{...}}
+   {"type":"init","id":"openai-primary","models_url":"","request_timeout_ms":60000,"config":{"base_provider":"openai","inference_url":"https://api.openai.com/v1","api_key":"..."}}
    ```
-   Replies with `{"type":"ready"}` once the Bifrost client and provider configuration are initialized.
-2. **Execute request (`request`):**
+   Validates the provider configuration and replies with `ready`, reporting `capabilities` (`chat`, `responses`, `streaming`, `tools`, `safe_replay`, `stateful: false`), normalized `config`, and optional model discovery `catalog`.
+2. **Start multiplexed worker (`start`):**
    ```json
-   {"type":"request","id":"1","endpoint":"/v1/chat/completions","model":"gpt-4o","stream":true,"body":"<base64>","headers":{"X-Request-Id":"..."}}
+   {"type":"start","id":"openai-primary","config":{...}}
    ```
-3. **Cancel in-flight request (`cancel`):**
+   Replies with `{"type":"ready","capabilities":{...}}` once the Bifrost client and provider configuration are initialized.
+3. **Execute request (`request`):**
    ```json
-   {"type":"cancel","id":"1"}
+   {"type":"request","id":"req-1","provider":"openai-primary","model":"gpt-4o","kind":"chat","stream":true,"stream_idle_timeout_ms":300000,"body":{...}}
+   ```
+4. **Cancel in-flight request (`cancel`):**
+   ```json
+   {"type":"cancel","id":"req-1"}
    ```
    Cancels the context associated with request `id` immediately without affecting other concurrent requests on the same driver process.
 
@@ -86,9 +91,9 @@ Unlike stateful session drivers (which run one process per conversation session)
 
 | Type | Fields | Meaning |
 | --- | --- | --- |
-| `ready` | — | Handshake succeeded |
-| `response` | `id`, `status_code`, `body` | Non-streaming response completed |
+| `ready` | `capabilities`, `catalog`, `config` | `init` validation or `start` handshake succeeded |
+| `response` | `id`, `data` | Non-streaming JSON response completed |
 | `stream_opened` | `id` | Upstream streaming connection established |
-| `chunk` | `id`, `data` | Raw SSE frame (`data: ...\n\n`) |
+| `chunk` | `id`, `data`, `event`, `meaningful` | Sanitized stream chunk |
 | `done` | `id` | Stream finished cleanly |
-| `error` | `id`, `class`, `status_code`, `message`, `retry_after_ms` | Classified upstream error (`429`, `5xx`, `timeout`, `connection_error`, `4xx`, `cancelled`) |
+| `error` | `id`, `error`, `call_error` | Config validation error or classified upstream `CallError` |

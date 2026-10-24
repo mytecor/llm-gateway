@@ -29,13 +29,9 @@ flowchart TD
         end
 
         subgraph Executors["Execution Layer (Registry)"]
-            HTTPClient["Multiplexed HTTP Driver Client<br/>(internal/executor/external)"]
             SessionExec["Session Runtime Adapter<br/>(History, Turn Lifecycle, Checkpoints)"]
-            
-            subgraph NativeEngines["Session Driver Client"]
-                ExternalEngine["Unified Session Driver Engine<br/>(NDJSON over stdio)"]
-                MCPSystem["Stdio MCP Bridge & Tool Codecs"]
-            end
+            ExternalDriver["Unified External Driver Client<br/>(internal/executor/external — NDJSON over stdio)"]
+            MCPSystem["Stdio MCP Bridge & Tool Codecs"]
         end
         
         Telemetry["Telemetry & Observability<br/>(Prometheus on Loopback :9209, slog JSON)"]
@@ -49,14 +45,14 @@ flowchart TD
     Server --> Auth
     Auth --> Scheduler
     Scheduler <--> Subsystems
-    Scheduler --> HTTPClient
+    Scheduler --> ExternalDriver
     Scheduler --> SessionExec
     
-    HTTPClient --> HTTPDriver
-    SessionExec --> ExternalEngine
-    ExternalEngine <--> MCPSystem
-    ExternalEngine --> ACPDriver
-    ExternalEngine --> WebDriver
+    SessionExec --> ExternalDriver
+    ExternalDriver <--> MCPSystem
+    ExternalDriver --> HTTPDriver
+    ExternalDriver --> ACPDriver
+    ExternalDriver --> WebDriver
     
     Server -.-> Telemetry
     Scheduler -.-> Telemetry
@@ -225,9 +221,9 @@ sequenceDiagram
   - Manages turn lifecycle, idle eviction (`session.ttl`), and turn timeouts (`session.turn_timeout`).
   - Implements atomic checkpointing (`session.store_path`) to persist resume IDs and session metadata across restarts.
 - **`internal/executor/external`**:
-  - Unified NDJSON over stdio driver client for both stateless multiplexed HTTP drivers (`HTTPDriver`) and stateful session drivers (`DriverEngine`).
-  - Supports `"driver": "http"`, `"driver": "acp"`, `"driver": "web"`, and `"driver": "custom"`.
-  - Pluggable tool strategies (`tool_strategy`) for session drivers:
+  - Unified, driver-agnostic NDJSON-over-stdio client (`external.Driver` and `external.Describe`) serving both stateless multiplexed drivers (`stateful: false`, such as `http-driver`) and stateful session drivers (`stateful: true`, such as `acp-driver`, `web-driver`, or custom drivers).
+  - Resolves `<driver>-driver` binaries dynamically via `ResolveDriverBinary` (or runs an explicit `command`), delegates driver-specific config validation and `Capabilities` discovery via the `{"type":"init",...}` handshake, and wraps stateful drivers in `sessionexecutor.New(...)`.
+  - Pluggable tool strategies (`tool_strategy`) for stateful session drivers:
     - `mcp`: Bridges client tools into a private, session-scoped stdio MCP server (`internal/mcpbridge`).
     - `prompt`: Injects tool schemas into the system prompt and parses JSON responses (`DecodeToolResponse`) for text-only models.
     - `wire`: Uses direct line protocol events (`tool_call`, `tool_result`).

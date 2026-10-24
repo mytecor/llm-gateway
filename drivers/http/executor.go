@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/url"
 	"strings"
 	"time"
 
@@ -91,8 +93,184 @@ func (silentLogger) LogHTTPRequest(schemas.LogLevel, string) schemas.LogEventBui
 
 type Executor struct {
 	client           *bifrost.Bifrost
+	defaultProvider  string
 	providers        map[string]ProviderConfig
 	bifrostProviders map[string]schemas.ModelProvider
+}
+
+type rawProviderConfig struct {
+	BaseProvider          string                     `json:"base_provider,omitempty"`
+	InferenceURL          string                     `json:"inference_url,omitempty"`
+	VertexProjectID       string                     `json:"vertex_project_id,omitempty"`
+	VertexProjectNumber   string                     `json:"vertex_project_number,omitempty"`
+	VertexRegion          string                     `json:"vertex_region,omitempty"`
+	VertexAuthCredentials string                     `json:"vertex_auth_credentials,omitempty"`
+	APIKey                string                     `json:"api_key,omitempty"`
+	RequestTimeoutSeconds int                        `json:"request_timeout_seconds,omitempty"`
+	BifrostMaxRetries     int                        `json:"bifrost_max_retries,omitempty"`
+	AllowPrivateNetwork   bool                       `json:"allow_private_network,omitempty"`
+	Headers               map[string]string          `json:"headers,omitempty"`
+	StripParams           []string                   `json:"strip_params,omitempty"`
+	SetParams             map[string]json.RawMessage `json:"set_params,omitempty"`
+}
+
+func defaultCapabilities() *Capabilities {
+	return &Capabilities{
+		Chat:       true,
+		Responses:  true,
+		Streaming:  true,
+		Tools:      true,
+		SafeReplay: true,
+	}
+}
+
+func ValidateProviderConfig(msg inboundMessage) (ProviderConfig, *CatalogSource, map[string]any, error) {
+	id := strings.TrimSpace(msg.ID)
+	if msg.HasSession {
+		return ProviderConfig{}, nil, nil, fmt.Errorf("provider %q: command/session/profile require a session driver", id)
+	}
+	if strings.TrimSpace(msg.ToolStrategy) != "" {
+		return ProviderConfig{}, nil, nil, fmt.Errorf("provider %q: tool_strategy is not supported by http driver", id)
+	}
+	var raw rawProviderConfig
+	trimmedCfg := bytes.TrimSpace(msg.Config)
+	if len(trimmedCfg) > 0 && !bytes.Equal(trimmedCfg, []byte("null")) {
+		var probe map[string]any
+		if err := json.Unmarshal(trimmedCfg, &probe); err == nil {
+			if _, hasCmd := probe["command"]; hasCmd {
+				return ProviderConfig{}, nil, nil, fmt.Errorf("provider %q: command/session/profile require a session driver", id)
+			}
+			if _, hasProfile := probe["profile"]; hasProfile {
+				return ProviderConfig{}, nil, nil, fmt.Errorf("provider %q: command/session/profile require a session driver", id)
+			}
+		}
+		dec := json.NewDecoder(bytes.NewReader(trimmedCfg))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&raw); err != nil {
+			return ProviderConfig{}, nil, nil, fmt.Errorf("provider %q: %w", id, err)
+		}
+		if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			return ProviderConfig{}, nil, nil, fmt.Errorf("provider %q: trailing JSON in config", id)
+		}
+	}
+
+	raw.BaseProvider = strings.TrimSpace(raw.BaseProvider)
+	raw.InferenceURL = strings.TrimRight(strings.TrimSpace(raw.InferenceURL), "/")
+	modelsURL := strings.TrimSpace(msg.ModelsURL)
+	raw.VertexProjectID = strings.TrimSpace(raw.VertexProjectID)
+	raw.VertexProjectNumber = strings.TrimSpace(raw.VertexProjectNumber)
+	raw.VertexRegion = strings.TrimSpace(raw.VertexRegion)
+	raw.VertexAuthCredentials = strings.TrimSpace(raw.VertexAuthCredentials)
+	raw.StripParams = trimNonEmpty(raw.StripParams)
+
+	if id == "" || raw.InferenceURL == "" {
+		return ProviderConfig{}, nil, nil, errors.New("every provider requires id and inference_url")
+	}
+	if err := validateEndpoint(raw.InferenceURL); err != nil {
+		return ProviderConfig{}, nil, nil, fmt.Errorf("provider %q inference_url: %w", id, err)
+	}
+	if modelsURL != "" {
+		if err := validateEndpoint(modelsURL); err != nil {
+			return ProviderConfig{}, nil, nil, fmt.Errorf("provider %q models_url: %w", id, err)
+		}
+	}
+	if raw.BaseProvider == "" {
+		raw.BaseProvider = "openai"
+	}
+	if raw.BaseProvider == "vertex" && (raw.VertexProjectID == "" || raw.VertexRegion == "") {
+		return ProviderConfig{}, nil, nil, fmt.Errorf("provider %q: vertex base_provider requires vertex_project_id and vertex_region", id)
+	}
+
+	timeoutSeconds := raw.RequestTimeoutSeconds
+	if timeoutSeconds <= 0 && msg.RequestTimeoutMs > 0 {
+		timeoutSeconds = max(1, int((time.Duration(msg.RequestTimeoutMs)*time.Millisecond)/time.Second))
+	}
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 60
+	}
+
+	providerCfg := ProviderConfig{
+		ID:                    id,
+		BaseProvider:          raw.BaseProvider,
+		InferenceURL:          raw.InferenceURL,
+		VertexProjectID:       raw.VertexProjectID,
+		VertexProjectNumber:   raw.VertexProjectNumber,
+		VertexRegion:          raw.VertexRegion,
+		VertexAuthCredentials: raw.VertexAuthCredentials,
+		APIKey:                raw.APIKey,
+		RequestTimeoutSeconds: timeoutSeconds,
+		BifrostMaxRetries:     raw.BifrostMaxRetries,
+		AllowPrivateNetwork:   raw.AllowPrivateNetwork,
+		Headers:               raw.Headers,
+		StripParams:           raw.StripParams,
+		SetParams:             raw.SetParams,
+	}
+
+	if _, _, err := BifrostProviderKey(providerCfg); err != nil {
+		return ProviderConfig{}, nil, nil, err
+	}
+
+	var catalog *CatalogSource
+	if modelsURL != "" {
+		catalog = &CatalogSource{URL: modelsURL, APIKey: raw.APIKey, Explicit: true}
+	} else if raw.BaseProvider == "openai" {
+		catalog = &CatalogSource{URL: raw.InferenceURL + "/models", APIKey: raw.APIKey}
+	}
+
+	normalizedRaw := rawProviderConfig{
+		BaseProvider:          raw.BaseProvider,
+		InferenceURL:          raw.InferenceURL,
+		VertexProjectID:       raw.VertexProjectID,
+		VertexProjectNumber:   raw.VertexProjectNumber,
+		VertexRegion:          raw.VertexRegion,
+		VertexAuthCredentials: raw.VertexAuthCredentials,
+		APIKey:                raw.APIKey,
+		RequestTimeoutSeconds: timeoutSeconds,
+		BifrostMaxRetries:     raw.BifrostMaxRetries,
+		AllowPrivateNetwork:   raw.AllowPrivateNetwork,
+		Headers:               raw.Headers,
+		StripParams:           raw.StripParams,
+		SetParams:             raw.SetParams,
+	}
+	normalizedBytes, err := json.Marshal(normalizedRaw)
+	if err != nil {
+		return ProviderConfig{}, nil, nil, err
+	}
+	var normalizedMap map[string]any
+	if err := json.Unmarshal(normalizedBytes, &normalizedMap); err != nil {
+		return ProviderConfig{}, nil, nil, err
+	}
+	return providerCfg, catalog, normalizedMap, nil
+}
+
+func validateEndpoint(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return errors.New("scheme must be http or https")
+	}
+	if parsed.Host == "" {
+		return errors.New("host is required")
+	}
+	if parsed.User != nil {
+		return errors.New("URL credentials are forbidden; use api_key")
+	}
+	return nil
+}
+
+func trimNonEmpty(items []string) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if trimmed := strings.TrimSpace(item); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func BifrostProviderKey(provider ProviderConfig) (schemas.ModelProvider, bool, error) {
@@ -108,6 +286,10 @@ func BifrostProviderKey(provider ProviderConfig) (schemas.ModelProvider, bool, e
 
 func NewExecutor(ctx context.Context, list []ProviderConfig) (*Executor, error) {
 	providers := make(map[string]ProviderConfig, len(list))
+	var defaultProvider string
+	if len(list) == 1 {
+		defaultProvider = list[0].ID
+	}
 	for _, p := range list {
 		providers[p.ID] = p
 	}
@@ -116,6 +298,7 @@ func NewExecutor(ctx context.Context, list []ProviderConfig) (*Executor, error) 
 		keys:    make(map[schemas.ModelProvider][]schemas.Key, len(providers)),
 	}
 	bifrostProviders := make(map[string]schemas.ModelProvider, len(providers))
+	seenKeys := make(map[schemas.ModelProvider]string, len(providers))
 	for _, id := range sortedProviderIDs(providers) {
 		provider := providers[id]
 		baseProvider := schemas.ModelProvider(provider.BaseProvider)
@@ -123,6 +306,10 @@ func NewExecutor(ctx context.Context, list []ProviderConfig) (*Executor, error) 
 		if err != nil {
 			return nil, err
 		}
+		if existingID, exists := seenKeys[providerKey]; exists {
+			return nil, fmt.Errorf("providers %q and %q resolve to the same Bifrost provider key %q", existingID, provider.ID, providerKey)
+		}
+		seenKeys[providerKey] = provider.ID
 		bifrostProviders[provider.ID] = providerKey
 		account.providers = append(account.providers, providerKey)
 		var customConfig *schemas.CustomProviderConfig
@@ -173,6 +360,7 @@ func NewExecutor(ctx context.Context, list []ProviderConfig) (*Executor, error) 
 	}
 	return &Executor{
 		client:           client,
+		defaultProvider:  defaultProvider,
 		providers:        providers,
 		bifrostProviders: bifrostProviders,
 	}, nil
@@ -214,6 +402,9 @@ func sortedProviderIDs(providers map[string]ProviderConfig) []string {
 }
 
 func (e *Executor) Do(ctx context.Context, providerID, nativeModel, kind string, body []byte) ([]byte, *CallError) {
+	if providerID == "" {
+		providerID = e.defaultProvider
+	}
 	bfContext := schemas.NewBifrostContext(ctx, schemas.NoDeadline)
 	switch kind {
 	case "chat":
@@ -251,6 +442,9 @@ func (e *Executor) Do(ctx context.Context, providerID, nativeModel, kind string,
 }
 
 func (e *Executor) Stream(ctx context.Context, providerID, nativeModel, kind string, body []byte, streamIdleTimeout time.Duration) (<-chan StreamChunk, *CallError) {
+	if providerID == "" {
+		providerID = e.defaultProvider
+	}
 	bfContext := schemas.NewBifrostContext(ctx, schemas.NoDeadline)
 	if streamIdleTimeout > 0 {
 		bfContext.SetValue(schemas.BifrostContextKeyStreamIdleTimeout, streamIdleTimeout)

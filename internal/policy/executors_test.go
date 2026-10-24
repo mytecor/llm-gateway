@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -8,9 +9,49 @@ import (
 	"testing"
 )
 
+func init() {
+	if len(os.Args) > 1 && os.Args[1] == "--test-custom-driver" {
+		var msg struct {
+			Type   string          `json:"type"`
+			Config json.RawMessage `json:"config"`
+		}
+		if err := json.NewDecoder(os.Stdin).Decode(&msg); err != nil {
+			os.Exit(2)
+		}
+		trimmed := bytes.TrimSpace(msg.Config)
+		if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) && !bytes.Equal(trimmed, []byte("{}")) {
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
+				"type":  "error",
+				"error": "unexpected driver config fields",
+			})
+			os.Exit(0)
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
+			"type": "ready",
+			"capabilities": map[string]any{
+				"chat":      true,
+				"streaming": true,
+				"tools":     true,
+				"stateful":  true,
+				"resume":    true,
+			},
+		})
+		os.Exit(0)
+	}
+}
+
 func sessionConfig(t *testing.T, driver string) Config {
 	t.Helper()
-	raw := `{"providers":[{"id":"p","driver":"` + driver + `","command":["driver"],"session":{"default_cwd":"` + t.TempDir() + `"}}],"rules":[{"route":"main","action":"filter","where":{"model":{"eq":"agent"}}},{"route":"main","action":"map","providers":["p"],"native":"default"},{"route":"main","action":"race","count":1}]}`
+	cmdJSON := `["driver"]`
+	if driver == "" {
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := json.Marshal([]string{exe, "--test-custom-driver"})
+		cmdJSON = string(data)
+	}
+	raw := `{"providers":[{"id":"p","driver":"` + driver + `","command":` + cmdJSON + `,"session":{"default_cwd":"` + t.TempDir() + `"}}],"rules":[{"route":"main","action":"filter","where":{"model":{"eq":"agent"}}},{"route":"main","action":"map","providers":["p"],"native":"default"},{"route":"main","action":"race","count":1}]}`
 	var cfg Config
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		t.Fatal(err)
@@ -19,7 +60,7 @@ func sessionConfig(t *testing.T, driver string) Config {
 }
 
 func TestSessionDriversCompileWithoutHTTPSettings(t *testing.T) {
-	for _, driver := range []string{"acp", "web", "custom"} {
+	for _, driver := range []string{"acp", "web", ""} {
 		cfg := sessionConfig(t, driver)
 		compiled, err := CompileConfig(cfg)
 		if err != nil {
@@ -37,15 +78,18 @@ func TestSessionDriversCompileWithoutHTTPSettings(t *testing.T) {
 func TestWebDriverAcceptsDeclarativeProfileWithoutCommand(t *testing.T) {
 	cfg := sessionConfig(t, "web")
 	cfg.Providers[0].Command = nil
-	cfg.Providers[0].Profile = "./drivers/web/sites/muse.yaml"
-	cfg.Providers[0].CDPURL = "http://127.0.0.1:19222"
-	cfg.Providers[0].Account = "main"
+	cfg.Providers[0].Config = map[string]any{
+		"profile": "./drivers/web/sites/muse.yaml",
+		"cdp_url": "http://127.0.0.1:19222",
+		"account": "main",
+	}
 	compiled, err := CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !filepath.IsAbs(compiled.Providers["p"].Profile) {
-		t.Fatalf("expected profile path to be resolved to absolute, got %q", compiled.Providers["p"].Profile)
+	resolvedProfile, _ := compiled.Providers["p"].Config["profile"].(string)
+	if !filepath.IsAbs(resolvedProfile) {
+		t.Fatalf("expected profile path to be resolved to absolute, got %q", resolvedProfile)
 	}
 }
 
@@ -57,8 +101,8 @@ func TestDriverToolStrategies(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Custom driver with prompt tool strategy
-	cfg = sessionConfig(t, "custom")
+	// Custom command driver with prompt tool strategy
+	cfg = sessionConfig(t, "")
 	cfg.Providers[0].ToolStrategy = "prompt"
 	if _, err := CompileConfig(cfg); err != nil {
 		t.Fatal(err)
@@ -78,7 +122,7 @@ func TestDriverToolStrategies(t *testing.T) {
 	}
 
 	// Reject unknown tool strategy
-	cfg = sessionConfig(t, "custom")
+	cfg = sessionConfig(t, "")
 	cfg.Providers[0].ToolStrategy = "magic"
 	if _, err := CompileConfig(cfg); err == nil {
 		t.Fatal("expected error on unknown tool strategy")
@@ -88,7 +132,7 @@ func TestDriverToolStrategies(t *testing.T) {
 	httpCfg := sessionConfig(t, "http")
 	httpCfg.Providers[0].Command = nil
 	httpCfg.Providers[0].Session = nil
-	httpCfg.Providers[0].InferenceURL = "https://api.openai.com/v1"
+	httpCfg.Providers[0].Config = map[string]any{"inference_url": "https://api.openai.com/v1"}
 	httpCfg.Providers[0].ToolStrategy = "mcp"
 	if _, err := CompileConfig(httpCfg); err == nil {
 		t.Fatal("expected error on tool_strategy with http driver")
@@ -122,8 +166,8 @@ func TestSessionDriverRejectsInvalidSettings(t *testing.T) {
 	}{
 		{"unknown", func(p *Provider) { p.Driver = "missing" }},
 		{"command", func(p *Provider) { p.Command = nil }},
-		{"url", func(p *Provider) { p.InferenceURL = "https://example.com" }},
-		{"key", func(p *Provider) { p.APIKey = "secret" }},
+		{"url", func(p *Provider) { p.Config = map[string]any{"inference_url": "https://example.com"} }},
+		{"key", func(p *Provider) { p.Config = map[string]any{"api_key": "secret"} }},
 		{"root", func(p *Provider) { p.Session.AllowedRoots = []string{""} }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -178,7 +222,7 @@ func TestSessionPathsResolveFromWorkingDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := sessionConfig(t, "custom")
+	cfg := sessionConfig(t, "")
 	cfg.Providers[0].Session.DefaultCWD = "."
 	cfg.Providers[0].Session.AllowedRoots = []string{".", "../other"}
 	cfg.Providers[0].Session.StorePath = "state/sessions.json"

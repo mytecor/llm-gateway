@@ -197,8 +197,10 @@ func TestCatalogFetchesDerivedProviderPaths(t *testing.T) {
 
 			cfg := policy.TestConfig()
 			cfg.Providers = []policy.Provider{cfg.Providers[0]}
-			cfg.Providers[0].InferenceURL = server.URL + test.basePath
-			cfg.Providers[0].APIKey = "provider-key"
+			cfg.Providers[0].Config = map[string]any{
+				"inference_url": server.URL + test.basePath,
+				"api_key":       "provider-key",
+			}
 			cfg.Rules = []policy.Rule{
 				policy.FilterModel("standard", "standard"),
 				policy.FilterProvider("standard", "a"),

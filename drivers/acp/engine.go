@@ -38,14 +38,27 @@ type Spec struct {
 	MCPServers []MCPServer
 }
 
+type Capabilities struct {
+	Chat       bool `json:"chat,omitempty"`
+	Responses  bool `json:"responses,omitempty"`
+	Streaming  bool `json:"streaming,omitempty"`
+	Tools      bool `json:"tools,omitempty"`
+	Stateful   bool `json:"stateful,omitempty"`
+	Resume     bool `json:"resume,omitempty"`
+	SafeReplay bool `json:"safe_replay,omitempty"`
+}
+
 type Event struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	ResumeID string `json:"resume_id,omitempty"`
-	Input    int64  `json:"input_tokens,omitempty"`
-	Output   int64  `json:"output_tokens,omitempty"`
-	Error    string `json:"error,omitempty"`
-	Models   []ModelInfo `json:"models,omitempty"`
+	Type         string        `json:"type"`
+	Text         string        `json:"text,omitempty"`
+	ResumeID     string        `json:"resume_id,omitempty"`
+	Input        int64         `json:"input_tokens,omitempty"`
+	Output       int64         `json:"output_tokens,omitempty"`
+	Error        string        `json:"error,omitempty"`
+	Models       []ModelInfo   `json:"models,omitempty"`
+	ToolStrategy string        `json:"tool_strategy,omitempty"`
+	Capabilities *Capabilities `json:"capabilities,omitempty"`
+	Config       map[string]any `json:"config,omitempty"`
 }
 
 type Engine struct {

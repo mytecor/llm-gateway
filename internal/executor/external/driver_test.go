@@ -8,31 +8,36 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/session"
 )
 
+func testCustomCommand(t *testing.T) []string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []string{exe, "-test.run=^TestDriverSessionUpdateProcess$"}
+}
+
 func TestExternalDriverConfigValidation(t *testing.T) {
-	if _, err := New(Config{}); err == nil {
+	if _, err := NewDriver(Config{}); err == nil {
 		t.Fatal("expected error on empty command")
 	}
-	if _, err := New(Config{Driver: DriverCustom, Command: []string{"nonexistent-binary-12345"}}); err == nil {
+	if _, err := NewDriver(Config{Command: []string{"nonexistent-binary-12345"}}); err == nil {
 		t.Fatal("expected error on nonexistent binary")
 	}
-	if _, err := New(Config{Driver: "unknown", Command: []string{"go"}}); err == nil {
+	if _, err := NewDriver(Config{Driver: "unknown", Command: []string{"go"}}); err == nil {
 		t.Fatal("expected error on unknown driver")
 	}
 }
 
 // Exercise the actual subprocess wire, including IDs assigned after the first prompt.
 func TestDriverSessionUpdateWire(t *testing.T) {
-	t.Setenv("WEB_DRIVER_TEST_PROCESS", "1")
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Setenv("CUSTOM_DRIVER_TEST_PROCESS", "1")
 	engine, err := NewDriver(Config{
-		Driver:       DriverCustom,
-		Command:      []string{executable, "-test.run=^TestDriverSessionUpdateProcess$"},
+		Command:      testCustomCommand(t),
 		ToolStrategy: ToolStrategyPrompt,
 	})
 	if err != nil {
@@ -61,7 +66,7 @@ func TestDriverSessionUpdateWire(t *testing.T) {
 }
 
 func TestDriverSessionUpdateProcess(t *testing.T) {
-	if os.Getenv("WEB_DRIVER_TEST_PROCESS") != "1" {
+	if os.Getenv("CUSTOM_DRIVER_TEST_PROCESS") != "1" {
 		return
 	}
 	decoder := json.NewDecoder(os.Stdin)
@@ -72,7 +77,7 @@ func TestDriverSessionUpdateProcess(t *testing.T) {
 	encoder := json.NewEncoder(os.Stdout)
 	_ = encoder.Encode(wireEvent{Type: "ready"})
 	if decoder.Decode(&input) != nil {
-		os.Exit(2)
+		os.Exit(0)
 	}
 	_ = encoder.Encode(wireEvent{Type: "session_updated", ResumeID: "https://example.test/thread/created"})
 	_ = encoder.Encode(wireEvent{Type: "text", Text: "hello"})
@@ -83,7 +88,7 @@ func TestDriverSessionUpdateProcess(t *testing.T) {
 func TestExternalACPRejectsUnsupportedToolStrategies(t *testing.T) {
 	for _, strategy := range []string{"prompt", "wire", "both", " Prompt ", "unknown"} {
 		t.Run(strategy, func(t *testing.T) {
-			_, err := New(Config{Driver: " ACP ", Command: []string{"go"}, ToolStrategy: strategy})
+			_, err := NewDriver(Config{Driver: " ACP ", Command: []string{"go"}, ToolStrategy: strategy})
 			if err == nil || !strings.Contains(err.Error(), "ACP driver supports only auto or mcp tool_strategy") {
 				t.Fatalf("expected unsupported ACP tool strategy error, got %v", err)
 			}
@@ -92,7 +97,8 @@ func TestExternalACPRejectsUnsupportedToolStrategies(t *testing.T) {
 }
 
 func TestExternalDriverToolStrategyNormalization(t *testing.T) {
-	d, err := NewDriver(Config{Driver: DriverCustom, Command: []string{"go"}, ToolStrategy: "AUTO"})
+	t.Setenv("CUSTOM_DRIVER_TEST_PROCESS", "1")
+	d, err := NewDriver(Config{Command: testCustomCommand(t), ToolStrategy: "AUTO"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +106,7 @@ func TestExternalDriverToolStrategyNormalization(t *testing.T) {
 		t.Fatalf("expected auto strategy to normalize to %q, got %q", ToolStrategyBoth, d.toolStrategy)
 	}
 
-	d, err = NewDriver(Config{Driver: DriverCustom, Command: []string{"go"}, ToolStrategy: "Prompt"})
+	d, err = NewDriver(Config{Command: testCustomCommand(t), ToolStrategy: "Prompt"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,28 +116,21 @@ func TestExternalDriverToolStrategyNormalization(t *testing.T) {
 }
 
 func TestExternalNewDispatchesDriver(t *testing.T) {
-	e, err := New(Config{Driver: DriverCustom, Command: []string{"go"}})
+	t.Setenv("CUSTOM_DRIVER_TEST_PROCESS", "1")
+	e, err := NewDriver(Config{Command: testCustomCommand(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := e.(*DriverEngine); !ok {
-		t.Fatalf("expected *DriverEngine, got %T", e)
+	if !e.Capabilities().Stateful {
+		t.Fatalf("expected stateful capabilities, got %+v", e.Capabilities())
 	}
 
-	e, err = New(Config{Driver: DriverWeb, Command: []string{"go"}})
+	e, err = NewDriver(Config{Driver: "acp", Command: []string{"go"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := e.(*DriverEngine); !ok {
-		t.Fatalf("expected *DriverEngine, got %T", e)
-	}
-
-	e, err = New(Config{Driver: DriverACP, Command: []string{"go"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := e.(*DriverEngine); !ok {
-		t.Fatalf("expected *DriverEngine, got %T", e)
+	if !e.Capabilities().Stateful || e.toolStrategy != ToolStrategyMCP {
+		t.Fatalf("unexpected ACP driver state: %+v, toolStrategy=%q", e.Capabilities(), e.toolStrategy)
 	}
 }
 
@@ -141,8 +140,7 @@ func TestDriverModelsAndEffortResolution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine := &DriverEngine{
-		driver:  DriverACP,
+	engine := &Driver{
 		command: []string{executable, "-test.run=^TestDriverModelsProcess$"},
 	}
 	models, err := engine.Models(context.Background())
@@ -186,3 +184,69 @@ func TestDriverModelsProcess(t *testing.T) {
 	os.Exit(0)
 }
 
+func TestStatelessDriverDoAndStream(t *testing.T) {
+	t.Setenv("STATELESS_DRIVER_TEST_PROCESS", "1")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := New(context.Background(), Config{
+		ID:      "p1",
+		Command: []string{executable, "-test.run=^TestStatelessDriverProcess$"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	if d.Capabilities().Stateful || !d.Capabilities().SafeReplay {
+		t.Fatalf("unexpected stateless capabilities: %+v", d.Capabilities())
+	}
+
+	out, callErr := d.Do(context.Background(), model.Target{Provider: "p1", Model: "m1"}, model.ExecuteRequest{
+		Kind: model.RequestChat,
+		Body: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+	})
+	if callErr != nil {
+		t.Fatal(callErr)
+	}
+	if string(out) != `{"ok":true}` {
+		t.Fatalf("unexpected response: %s", string(out))
+	}
+}
+
+func TestStatelessDriverProcess(t *testing.T) {
+	if os.Getenv("STATELESS_DRIVER_TEST_PROCESS") != "1" {
+		return
+	}
+	decoder := json.NewDecoder(os.Stdin)
+	encoder := json.NewEncoder(os.Stdout)
+	for {
+		var msg wireInbound
+		if err := decoder.Decode(&msg); err != nil {
+			os.Exit(0)
+		}
+		switch msg.Type {
+		case "init", "start":
+			_ = encoder.Encode(wireEvent{
+				Type: "ready",
+				Capabilities: &wireCapabilities{
+					Chat:       true,
+					Responses:  true,
+					Streaming:  true,
+					Tools:      true,
+					SafeReplay: true,
+				},
+			})
+			if msg.Type == "init" {
+				os.Exit(0)
+			}
+		case "request":
+			_ = encoder.Encode(wireEvent{
+				Type: "response",
+				ID:   msg.ID,
+				Data: json.RawMessage(`{"ok":true}`),
+			})
+		}
+	}
+}

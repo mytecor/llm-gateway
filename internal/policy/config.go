@@ -2,6 +2,7 @@ package policy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mytecor/llm-gateway/internal/executor/external"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/telemetry"
 )
@@ -25,31 +27,6 @@ const defaultCatalogRefresh = 10 * time.Minute
 // deliberately conservative because reasoning models may pause mid-stream
 // without emitting events for a long time.
 const defaultStreamIdleTimeout = 5 * time.Minute
-
-var supportedHTTPBaseProviders = map[string]bool{
-	"anthropic":   true,
-	"bedrock":     true,
-	"cohere":      true,
-	"gemini":      true,
-	"openai":      true,
-	"huggingface": true,
-	"replicate":   true,
-}
-
-// HTTPProviderKey translates the stable provider ID into the key the HTTP driver expects.
-func HTTPProviderKey(provider Provider) (string, bool, error) {
-	if supportedHTTPBaseProviders[provider.BaseProvider] {
-		return provider.ID, true, nil
-	}
-	if provider.BaseProvider == "vertex" {
-		return "vertex", false, nil
-	}
-	return "", false, fmt.Errorf("provider %q has unsupported Bifrost base_provider %q", provider.ID, provider.BaseProvider)
-}
-
-func bifrostProviderKey(provider Provider) (string, bool, error) {
-	return HTTPProviderKey(provider)
-}
 
 // CheckConfig validates a configuration file as requested by the "check" CLI command.
 func CheckConfig(path string, requireEnvSecrets bool, allowedEnv string) error {
@@ -127,58 +104,119 @@ type SessionSettings struct {
 }
 
 type Provider struct {
-	// Driver selects the external provider integration driver:
-	// "http" (default), "acp", "web", or "custom".
-	Driver       string           `json:"driver,omitempty"`
-	ToolStrategy string           `json:"tool_strategy,omitempty"`
-	Command      []string         `json:"command,omitempty"`
-	Profile      string           `json:"profile,omitempty"`
-	CDPURL       string           `json:"cdp_url,omitempty"`
-	Account      string           `json:"account,omitempty"`
-	StateDir     string           `json:"state_dir,omitempty"`
-	Heal         bool             `json:"heal,omitempty"`
-	Session      *SessionSettings `json:"session,omitempty"`
-	ID           string           `json:"id"`
-	BaseProvider string           `json:"base_provider"`
-	InferenceURL string           `json:"inference_url"`
-	ModelsURL    string           `json:"models_url,omitempty"`
-	// VertexProjectID and VertexRegion configure Vertex's resource path.
-	// VertexAuthCredentials carries service-account JSON independently from an
-	// optional Vertex API key; production uses OAuth because the standard
-	// project endpoint requires a principal.
-	VertexProjectID       string `json:"vertex_project_id,omitempty"`
-	VertexProjectNumber   string `json:"vertex_project_number,omitempty"`
-	VertexRegion          string `json:"vertex_region,omitempty"`
-	VertexAuthCredentials string `json:"vertex_auth_credentials,omitempty"`
-	// APIKey is the provider's single credential, used for inference and for
-	// any model-catalog discovery (explicit or inferred). There is no separate
-	// models key: one common key covers the whole provider. Value is a secret
-	// literal or an "env.VARNAME" reference resolved at load time.
-	APIKey              string            `json:"api_key,omitempty"`
-	Priority            int               `json:"priority,omitempty"`
-	MaxConcurrent       int               `json:"max_concurrent,omitempty"`
-	MaxConcurrentCamel  int               `json:"maxConcurrent,omitempty"`
-	Cooldown            Duration          `json:"cooldown,omitempty"`
-	RequestTimeout      Duration          `json:"request_timeout,omitempty"`
-	BifrostMaxRetries   int               `json:"bifrost_max_retries,omitempty"`
-	AllowPrivateNetwork bool              `json:"allow_private_network,omitempty"`
-	Headers             map[string]string `json:"headers,omitempty"`
-	// StripParams removes the listed top-level request-body keys before the
-	// request reaches this provider. The gateway serves clients that encode a
-	// provider-specific reasoning control (zai's `thinking`) that generic
-	// OpenAI-compatible upstreams (hyperfusion/litellm) reject with 400; the
-	// gateway strips it so a provider that simply doesn't support the control
-	// can carry the same logical model. Other providers keep their native
-	// control untouched.
-	StripParams []string `json:"strip_params,omitempty"`
-	// SetParams force top-level request-body keys to fixed JSON values before
-	// the request reaches this provider. Applied after strip_params, so a key
-	// listed in both ends up as its forced value, never the client's. The
-	// gateway uses this to hard-disable reasoning upstream (e.g.
-	// thinking:{"type":"disabled"}) on providers that accept the control,
-	// while strip_params covers the providers that reject it. Values are raw
-	// JSON so nested structures (maps, arrays) pass through verbatim.
-	SetParams map[string]json.RawMessage `json:"set_params,omitempty"`
+	ID                 string            `json:"id"`
+	Driver             string            `json:"driver,omitempty"`
+	Command            []string          `json:"command,omitempty"`
+	Env                map[string]string `json:"env,omitempty"`
+	Priority           int               `json:"priority,omitempty"`
+	Weight             int               `json:"weight,omitempty"`
+	MaxConcurrent      int               `json:"max_concurrent,omitempty"`
+	MaxConcurrentCamel int               `json:"maxConcurrent,omitempty"`
+	Cooldown           Duration          `json:"cooldown,omitempty"`
+	RequestTimeout     Duration          `json:"request_timeout,omitempty"`
+	ModelsURL          string            `json:"models_url,omitempty"`
+	ToolStrategy       string            `json:"tool_strategy,omitempty"`
+	Session            *SessionSettings  `json:"session,omitempty"`
+	Config             map[string]any    `json:"config,omitempty"`
+
+	capabilities model.Capabilities
+}
+
+var providerCoreKeys = map[string]bool{
+	"id":              true,
+	"driver":          true,
+	"command":         true,
+	"env":             true,
+	"priority":        true,
+	"weight":          true,
+	"max_concurrent":  true,
+	"maxConcurrent":   true,
+	"cooldown":        true,
+	"request_timeout": true,
+	"models_url":      true,
+	"tool_strategy":   true,
+	"session":         true,
+	"config":          true,
+}
+
+type providerCoreAlias struct {
+	ID                 string            `json:"id"`
+	Driver             string            `json:"driver,omitempty"`
+	Command            []string          `json:"command,omitempty"`
+	Env                map[string]string `json:"env,omitempty"`
+	Priority           int               `json:"priority,omitempty"`
+	Weight             int               `json:"weight,omitempty"`
+	MaxConcurrent      int               `json:"max_concurrent,omitempty"`
+	MaxConcurrentCamel int               `json:"maxConcurrent,omitempty"`
+	Cooldown           Duration          `json:"cooldown,omitempty"`
+	RequestTimeout     Duration          `json:"request_timeout,omitempty"`
+	ModelsURL          string            `json:"models_url,omitempty"`
+	ToolStrategy       string            `json:"tool_strategy,omitempty"`
+	Session            *SessionSettings  `json:"session,omitempty"`
+}
+
+func (p *Provider) UnmarshalJSON(data []byte) error {
+	var rawMap map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawMap); err != nil {
+		return err
+	}
+	coreMap := make(map[string]json.RawMessage, len(rawMap))
+	for k, v := range rawMap {
+		if providerCoreKeys[k] && k != "config" {
+			coreMap[k] = v
+		}
+	}
+	coreBytes, err := json.Marshal(coreMap)
+	if err != nil {
+		return err
+	}
+	var core providerCoreAlias
+	dec := json.NewDecoder(bytes.NewReader(coreBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&core); err != nil {
+		return err
+	}
+
+	cfgMap := make(map[string]any)
+	if rawCfg, ok := rawMap["config"]; ok {
+		trimmed := bytes.TrimSpace(rawCfg)
+		if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) {
+			if err := json.Unmarshal(trimmed, &cfgMap); err != nil {
+				return fmt.Errorf("provider config must be a JSON object: %w", err)
+			}
+		}
+	}
+	for k, v := range rawMap {
+		if providerCoreKeys[k] {
+			continue
+		}
+		var val any
+		if err := json.Unmarshal(v, &val); err != nil {
+			return err
+		}
+		cfgMap[k] = val
+	}
+	if len(cfgMap) == 0 {
+		cfgMap = nil
+	}
+
+	*p = Provider{
+		ID:                 core.ID,
+		Driver:             core.Driver,
+		Command:            core.Command,
+		Env:                core.Env,
+		Priority:           core.Priority,
+		Weight:             core.Weight,
+		MaxConcurrent:      core.MaxConcurrent,
+		MaxConcurrentCamel: core.MaxConcurrentCamel,
+		Cooldown:           core.Cooldown,
+		RequestTimeout:     core.RequestTimeout,
+		ModelsURL:          core.ModelsURL,
+		ToolStrategy:       core.ToolStrategy,
+		Session:            core.Session,
+		Config:             cfgMap,
+	}
+	return nil
 }
 
 type BackoffConfig struct {
@@ -517,18 +555,75 @@ func resolveConfigSecrets(cfg *Config) error {
 		cfg.ClientAPIKeys[i].Key = key
 	}
 	for i := range cfg.Providers {
-		key, err := resolveSecret(cfg.Providers[i].APIKey)
-		if err != nil {
-			return fmt.Errorf("provider %q api_key: %w", cfg.Providers[i].ID, err)
+		for k, v := range cfg.Providers[i].Env {
+			resolved, err := resolveSecret(v)
+			if err != nil {
+				return fmt.Errorf("provider %q env[%s]: %w", cfg.Providers[i].ID, k, err)
+			}
+			cfg.Providers[i].Env[k] = resolved
 		}
-		cfg.Providers[i].APIKey = key
-		credentials, err := resolveSecret(cfg.Providers[i].VertexAuthCredentials)
-		if err != nil {
-			return fmt.Errorf("provider %q vertex_auth_credentials: %w", cfg.Providers[i].ID, err)
+		if len(cfg.Providers[i].Config) > 0 {
+			resolved, err := resolveValueSecrets(cfg.Providers[i].ID, "", cfg.Providers[i].Config)
+			if err != nil {
+				return err
+			}
+			cfg.Providers[i].Config = resolved.(map[string]any)
 		}
-		cfg.Providers[i].VertexAuthCredentials = credentials
 	}
 	return nil
+}
+
+func resolveValueSecrets(providerID, key string, val any) (any, error) {
+	switch v := val.(type) {
+	case string:
+		res, err := resolveSecret(v)
+		if err != nil {
+			return nil, fmt.Errorf("provider %q %s: %w", providerID, key, err)
+		}
+		return res, nil
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for k, item := range v {
+			res, err := resolveValueSecrets(providerID, k, item)
+			if err != nil {
+				return nil, err
+			}
+			out[k] = res
+		}
+		return out, nil
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			res, err := resolveValueSecrets(providerID, key, item)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = res
+		}
+		return out, nil
+	case []string:
+		out := make([]string, len(v))
+		for i, item := range v {
+			res, err := resolveSecret(item)
+			if err != nil {
+				return nil, fmt.Errorf("provider %q %s: %w", providerID, key, err)
+			}
+			out[i] = res
+		}
+		return out, nil
+	default:
+		return val, nil
+	}
+}
+
+func isSecretKey(key string) bool {
+	k := strings.ToLower(strings.TrimSpace(key))
+	return k == "key" ||
+		strings.HasSuffix(k, "_key") ||
+		strings.HasSuffix(k, "_secret") ||
+		strings.HasSuffix(k, "_token") ||
+		strings.HasSuffix(k, "_password") ||
+		strings.HasSuffix(k, "_credentials")
 }
 
 // validateEnvSecretReferences enforces the NixOS public-config boundary:
@@ -551,19 +646,19 @@ func ValidateEnvSecretReferences(cfg Config, allowed map[string]bool) error {
 		}
 	}
 	for _, provider := range cfg.Providers {
-		name, err := validateEnvSecretReference(provider.APIKey)
-		if err != nil {
-			return fmt.Errorf("provider %q api_key: %w", provider.ID, err)
+		for k, v := range provider.Env {
+			if isSecretKey(k) || strings.HasPrefix(v, "env.") {
+				name, err := validateEnvSecretReference(v)
+				if err != nil {
+					return fmt.Errorf("provider %q env[%s]: %w", provider.ID, k, err)
+				}
+				if name != "" {
+					referenced[name] = true
+				}
+			}
 		}
-		if name != "" {
-			referenced[name] = true
-		}
-		name, err = validateEnvSecretReference(provider.VertexAuthCredentials)
-		if err != nil {
-			return fmt.Errorf("provider %q vertex_auth_credentials: %w", provider.ID, err)
-		}
-		if name != "" {
-			referenced[name] = true
+		if err := validateValueEnvSecrets(provider.ID, "", provider.Config, referenced); err != nil {
+			return err
 		}
 	}
 	for name := range referenced {
@@ -577,6 +672,51 @@ func ValidateEnvSecretReferences(cfg Config, allowed map[string]bool) error {
 		}
 	}
 	return nil
+}
+
+func validateValueEnvSecrets(providerID, key string, val any, referenced map[string]bool) error {
+	switch v := val.(type) {
+	case string:
+		if isSecretKey(key) || strings.HasPrefix(v, "env.") {
+			name, err := validateEnvSecretReference(v)
+			if err != nil {
+				return fmt.Errorf("provider %q %s: %w", providerID, key, err)
+			}
+			if name != "" {
+				referenced[name] = true
+			}
+		}
+		return nil
+	case map[string]any:
+		for k, item := range v {
+			if err := validateValueEnvSecrets(providerID, k, item, referenced); err != nil {
+				return err
+			}
+		}
+		return nil
+	case []any:
+		for _, item := range v {
+			if err := validateValueEnvSecrets(providerID, key, item, referenced); err != nil {
+				return err
+			}
+		}
+		return nil
+	case []string:
+		for _, item := range v {
+			if isSecretKey(key) || strings.HasPrefix(item, "env.") {
+				name, err := validateEnvSecretReference(item)
+				if err != nil {
+					return fmt.Errorf("provider %q %s: %w", providerID, key, err)
+				}
+				if name != "" {
+					referenced[name] = true
+				}
+			}
+		}
+		return nil
+	default:
+		return nil
+	}
 }
 
 func validateEnvSecretReference(value string) (string, error) {
@@ -671,7 +811,6 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 		CatalogSources: make(map[string][]CatalogSource),
 		ClientKeys:     make(map[string]string, len(cfg.ClientAPIKeys)),
 	}
-	bifrostProviderKeys := make(map[string]string, len(cfg.Providers))
 	sessionStorePaths := map[string]string{}
 	for _, clientKey := range cfg.ClientAPIKeys {
 		id := strings.TrimSpace(clientKey.ID)
@@ -688,59 +827,54 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 	}
 	for _, provider := range cfg.Providers {
 		provider.ID = strings.TrimSpace(provider.ID)
-		provider.BaseProvider = strings.TrimSpace(provider.BaseProvider)
-		provider.InferenceURL = strings.TrimRight(strings.TrimSpace(provider.InferenceURL), "/")
 		provider.ModelsURL = strings.TrimSpace(provider.ModelsURL)
-		provider.VertexProjectID = strings.TrimSpace(provider.VertexProjectID)
-		provider.VertexProjectNumber = strings.TrimSpace(provider.VertexProjectNumber)
-		provider.VertexRegion = strings.TrimSpace(provider.VertexRegion)
-		provider.VertexAuthCredentials = strings.TrimSpace(provider.VertexAuthCredentials)
-		provider.StripParams = trimNonEmpty(provider.StripParams)
 		provider.Driver = strings.ToLower(strings.TrimSpace(provider.Driver))
-		if provider.Driver == "" {
+		if provider.Driver == "" && len(provider.Command) == 0 {
 			provider.Driver = "http"
 		}
-		if provider.Driver != "http" && provider.Driver != "acp" && provider.Driver != "web" && provider.Driver != "custom" {
-			return nil, fmt.Errorf("provider %q: unknown driver %q", provider.ID, provider.Driver)
+		if provider.ID == "" {
+			return nil, errors.New("every provider requires id")
 		}
 		if _, exists := compiled.Providers[provider.ID]; exists {
 			return nil, fmt.Errorf("duplicate provider id %q", provider.ID)
 		}
-		if provider.Driver == "http" && provider.ToolStrategy != "" {
-			return nil, fmt.Errorf("provider %q: tool_strategy is not supported by http driver", provider.ID)
+		if provider.RequestTimeout.Duration < 0 || provider.Cooldown.Duration < 0 {
+			return nil, fmt.Errorf("provider %q: durations must not be negative", provider.ID)
 		}
-		if provider.Driver != "http" {
-			if provider.ID == "" {
-				return nil, errors.New("session providers require id")
+		if provider.ModelsURL != "" {
+			if err := validateEndpoint(provider.ModelsURL); err != nil {
+				return nil, fmt.Errorf("provider %q models_url: %w", provider.ID, err)
 			}
-			hasCommand := len(provider.Command) > 0 && strings.TrimSpace(provider.Command[0]) != ""
-			provider.Profile = strings.TrimSpace(provider.Profile)
-			if provider.Driver == "web" {
-				if !hasCommand && provider.Profile == "" {
-					return nil, errors.New("web driver requires profile or command")
-				}
-			} else if !hasCommand {
-				return nil, errors.New("session providers require id and command")
-			}
-			if provider.InferenceURL != "" || provider.BaseProvider != "" || provider.ModelsURL != "" || provider.APIKey != "" || provider.VertexAuthCredentials != "" || len(provider.Headers) > 0 || len(provider.StripParams) > 0 || len(provider.SetParams) > 0 || provider.BifrostMaxRetries != 0 {
-				return nil, fmt.Errorf("provider %q: HTTP settings are not supported by %s driver", provider.ID, provider.Driver)
-			}
-			provider.ToolStrategy = strings.TrimSpace(strings.ToLower(provider.ToolStrategy))
-			if provider.ToolStrategy != "" && provider.ToolStrategy != "auto" && provider.ToolStrategy != "mcp" && provider.ToolStrategy != "prompt" && provider.ToolStrategy != "wire" && provider.ToolStrategy != "both" {
-				return nil, fmt.Errorf("provider %q: unknown tool strategy %q", provider.ID, provider.ToolStrategy)
-			}
-			if provider.Driver == "acp" && provider.ToolStrategy != "" && provider.ToolStrategy != "auto" && provider.ToolStrategy != "mcp" {
-				return nil, fmt.Errorf("provider %q: ACP driver supports only auto or mcp tool_strategy, got %q", provider.ID, provider.ToolStrategy)
-			}
+		}
+
+		desc, err := external.Describe(context.Background(), external.Config{
+			ID:             provider.ID,
+			Driver:         provider.Driver,
+			Command:        provider.Command,
+			Env:            provider.Env,
+			ToolStrategy:   provider.ToolStrategy,
+			ModelsURL:      provider.ModelsURL,
+			HasSession:     provider.Session != nil,
+			RequestTimeout: provider.RequestTimeout.Duration,
+			DriverConfig:   provider.Config,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("provider %q: %w", provider.ID, err)
+		}
+		provider.capabilities = desc.Capabilities
+		provider.ToolStrategy = desc.ToolStrategy
+		provider.Config = desc.Config
+
+		if provider.Capabilities().Stateful {
 			if provider.Session == nil {
 				provider.Session = &SessionSettings{}
 			}
 			settings := *provider.Session
 			if settings.DefaultCWD == "" {
-				var err error
-				settings.DefaultCWD, err = os.Getwd()
-				if err != nil {
-					return nil, err
+				var cwdErr error
+				settings.DefaultCWD, cwdErr = os.Getwd()
+				if cwdErr != nil {
+					return nil, cwdErr
 				}
 			}
 			var pathErr error
@@ -779,72 +913,18 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 				settings.StorePath = path
 			}
 			provider.Session = &settings
-			if provider.Profile != "" {
-				pPath, err := filepath.Abs(provider.Profile)
-				if err != nil {
-					return nil, err
-				}
-				provider.Profile = pPath
-			}
-			if provider.StateDir != "" {
-				sPath, err := filepath.Abs(provider.StateDir)
-				if err != nil {
-					return nil, err
-				}
-				provider.StateDir = sPath
-			}
-			if provider.RequestTimeout.Duration < 0 || provider.Cooldown.Duration < 0 {
-				return nil, fmt.Errorf("provider %q: durations must not be negative", provider.ID)
-			}
 			if provider.RequestTimeout.Duration == 0 {
 				provider.RequestTimeout.Duration = settings.TurnTimeout.Duration
 			}
-			if provider.Cooldown.Duration == 0 {
-				provider.Cooldown.Duration = 15 * time.Second
+		} else {
+			if provider.Session != nil {
+				return nil, fmt.Errorf("provider %q: session requires a stateful driver", provider.ID)
 			}
-			if provider.MaxConcurrent == 0 {
-				provider.MaxConcurrent = provider.MaxConcurrentCamel
-			}
-			if provider.MaxConcurrent <= 0 {
-				provider.MaxConcurrent = 16
-			}
-			compiled.Providers[provider.ID] = provider
-			continue
-		}
-		if len(provider.Command) > 0 || provider.Session != nil || provider.Profile != "" {
-			return nil, fmt.Errorf("provider %q: command/session/profile require a session driver", provider.ID)
-		}
-		if provider.ID == "" || provider.InferenceURL == "" {
-			return nil, errors.New("every provider requires id and inference_url")
-		}
-		if err := validateEndpoint(provider.InferenceURL); err != nil {
-			return nil, fmt.Errorf("provider %q inference_url: %w", provider.ID, err)
-		}
-		if provider.ModelsURL != "" {
-			if err := validateEndpoint(provider.ModelsURL); err != nil {
-				return nil, fmt.Errorf("provider %q models_url: %w", provider.ID, err)
+			if provider.RequestTimeout.Duration == 0 {
+				provider.RequestTimeout.Duration = 60 * time.Second
 			}
 		}
-		if provider.BaseProvider == "" {
-			provider.BaseProvider = "openai"
-		}
-		if provider.BaseProvider == "vertex" && (provider.VertexProjectID == "" || provider.VertexRegion == "") {
-			return nil, fmt.Errorf("provider %q: vertex base_provider requires vertex_project_id and vertex_region", provider.ID)
-		}
-		if _, exists := compiled.Providers[provider.ID]; exists {
-			return nil, fmt.Errorf("duplicate provider id %q", provider.ID)
-		}
-		providerKey, _, err := bifrostProviderKey(provider)
-		if err != nil {
-			return nil, err
-		}
-		if existingID, exists := bifrostProviderKeys[providerKey]; exists {
-			return nil, fmt.Errorf("providers %q and %q resolve to the same Bifrost provider key %q", existingID, provider.ID, providerKey)
-		}
-		bifrostProviderKeys[providerKey] = provider.ID
-		if provider.RequestTimeout.Duration == 0 {
-			provider.RequestTimeout.Duration = 60 * time.Second
-		}
+
 		if provider.Cooldown.Duration == 0 {
 			provider.Cooldown.Duration = 15 * time.Second
 		}
@@ -855,22 +935,10 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 			provider.MaxConcurrent = 16
 		}
 		compiled.Providers[provider.ID] = provider
-		// Discovery is provider-scoped: each provider contributes exactly one
-		// catalog source (explicit models_url or the inferred
-		// openai-convention <inference_url>/models), and snapshots are indexed
-		// by provider ID.
-		if provider.ModelsURL != "" {
+		if desc.Catalog != nil && desc.Catalog.URL != "" {
 			compiled.CatalogSources[provider.ID] = appendCatalogSource(
 				compiled.CatalogSources[provider.ID],
-				CatalogSource{URL: provider.ModelsURL, APIKey: provider.APIKey, Explicit: true},
-			)
-		} else if provider.BaseProvider == "openai" {
-			// inference_url is the complete OpenAI-compatible base path. Appending
-			// only /models therefore produces /v1/models for a conventional base
-			// and preserves arbitrary routed prefixes without duplicating /v1.
-			compiled.CatalogSources[provider.ID] = appendCatalogSource(
-				compiled.CatalogSources[provider.ID],
-				CatalogSource{URL: provider.InferenceURL + "/models", APIKey: provider.APIKey},
+				CatalogSource{URL: desc.Catalog.URL, APIKey: desc.Catalog.APIKey, Explicit: desc.Catalog.Explicit},
 			)
 		}
 	}

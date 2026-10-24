@@ -7,113 +7,59 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mytecor/llm-gateway/internal/mcpbridge"
+	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/session"
+	"github.com/mytecor/llm-gateway/internal/telemetry"
 )
 
 const catalogTTL = time.Minute
 
-type DriverEngine struct {
-	driver       string
-	command      []string
-	defaultCWD   string
-	toolStrategy string
-	mu           sync.Mutex
-	catalog      []session.ModelInfo
-	discoveryMu  sync.Mutex
-	catalogAt    time.Time
+var (
+	describeCacheMu sync.Mutex
+	describeCache   = make(map[string]Description)
+)
+
+type wireCapabilities struct {
+	Chat       bool `json:"chat,omitempty"`
+	Responses  bool `json:"responses,omitempty"`
+	Streaming  bool `json:"streaming,omitempty"`
+	Tools      bool `json:"tools,omitempty"`
+	Stateful   bool `json:"stateful,omitempty"`
+	Resume     bool `json:"resume,omitempty"`
+	SafeReplay bool `json:"safe_replay,omitempty"`
 }
 
-func NewDriver(cfg Config) (*DriverEngine, error) {
-	driver := strings.ToLower(strings.TrimSpace(cfg.Driver))
-	if driver == "" {
-		driver = DriverCustom
+func (c wireCapabilities) toModel() model.Capabilities {
+	return model.Capabilities{
+		Chat:       c.Chat,
+		Responses:  c.Responses,
+		Streaming:  c.Streaming,
+		Tools:      c.Tools,
+		Stateful:   c.Stateful,
+		Resume:     c.Resume,
+		SafeReplay: c.SafeReplay,
 	}
-	strategy := strings.ToLower(strings.TrimSpace(cfg.ToolStrategy))
+}
 
-	var command []string
-	switch driver {
-	case DriverACP:
-		if len(cfg.Command) == 0 || strings.TrimSpace(cfg.Command[0]) == "" {
-			return nil, errors.New("ACP driver requires an agent command")
-		}
-		if _, err := exec.LookPath(cfg.Command[0]); err != nil {
-			return nil, err
-		}
-		if strategy != "" && strategy != ToolStrategyAuto && strategy != ToolStrategyMCP {
-			return nil, fmt.Errorf("ACP driver supports only auto or mcp tool_strategy, got %q", cfg.ToolStrategy)
-		}
-		strategy = ToolStrategyMCP
-		acpBin, err := ResolveDriverBinary(DriverACP)
-		if err != nil {
-			return nil, err
-		}
-		command = append([]string{acpBin, "--"}, cfg.Command...)
-
-	case DriverWeb:
-		if len(cfg.Command) > 0 {
-			if _, err := exec.LookPath(cfg.Command[0]); err != nil {
-				return nil, err
-			}
-			command = append([]string(nil), cfg.Command...)
-		} else if strings.TrimSpace(cfg.Profile) != "" {
-			webBin, err := ResolveDriverBinary(DriverWeb)
-			if err != nil {
-				return nil, err
-			}
-			command = []string{webBin, "run", "--profile", cfg.Profile}
-			if cfg.CDPURL != "" {
-				command = append(command, "--cdp-url", cfg.CDPURL)
-			}
-			if cfg.Account != "" {
-				command = append(command, "--account", cfg.Account)
-			}
-			if cfg.StateDir != "" {
-				command = append(command, "--state-dir", cfg.StateDir)
-			}
-			if cfg.Heal {
-				command = append(command, "--heal")
-			}
-		} else {
-			return nil, errors.New("web driver requires profile or command")
-		}
-		if strategy == "" || strategy == ToolStrategyAuto {
-			strategy = ToolStrategyBoth
-		}
-
-	case DriverCustom:
-		if len(cfg.Command) == 0 || strings.TrimSpace(cfg.Command[0]) == "" {
-			return nil, errors.New("custom driver command is required")
-		}
-		if _, err := exec.LookPath(cfg.Command[0]); err != nil {
-			return nil, err
-		}
-		command = append([]string(nil), cfg.Command...)
-		if strategy == "" || strategy == ToolStrategyAuto {
-			strategy = ToolStrategyBoth
-		}
-
-	default:
-		return nil, fmt.Errorf("unknown session driver %q", cfg.Driver)
-	}
-
-	if strategy != ToolStrategyMCP && strategy != ToolStrategyPrompt && strategy != ToolStrategyWire && strategy != ToolStrategyBoth {
-		return nil, fmt.Errorf("unknown tool strategy %q", cfg.ToolStrategy)
-	}
-
-	return &DriverEngine{
-		driver:       driver,
-		command:      command,
-		defaultCWD:   cfg.DefaultCWD,
-		toolStrategy: strategy,
-	}, nil
+type wireCallError struct {
+	Code   string `json:"code,omitempty"`
+	Class  string `json:"class"`
+	Status int    `json:"status"`
+	Scope  string `json:"scope,omitempty"`
+	Replay string `json:"replay,omitempty"`
+	Detail string `json:"detail,omitempty"`
+	Log    string `json:"log,omitempty"`
 }
 
 type wireModelInfo struct {
@@ -122,53 +68,718 @@ type wireModelInfo struct {
 	ReasoningEfforts []string `json:"reasoning_efforts,omitempty"`
 }
 
-type wireEvent struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Arguments json.RawMessage `json:"arguments,omitempty"`
-	ResumeID  string          `json:"resume_id,omitempty"`
-	Input     int64           `json:"input_tokens,omitempty"`
-	Output    int64           `json:"output_tokens,omitempty"`
-	Error     string          `json:"error,omitempty"`
-	Models    []wireModelInfo `json:"models,omitempty"`
+type wireInbound struct {
+	Type                string                       `json:"type"`
+	ID                  string                       `json:"id,omitempty"`
+	ToolStrategy        string                       `json:"tool_strategy,omitempty"`
+	ModelsURL           string                       `json:"models_url,omitempty"`
+	HasSession          bool                         `json:"has_session,omitempty"`
+	RequestTimeoutMs    int64                        `json:"request_timeout_ms,omitempty"`
+	Config              map[string]any               `json:"config,omitempty"`
+	CWD                 string                       `json:"cwd,omitempty"`
+	Provider            string                       `json:"provider,omitempty"`
+	Model               string                       `json:"model,omitempty"`
+	ReasoningEffort     string                       `json:"reasoning_effort,omitempty"`
+	System              string                       `json:"system,omitempty"`
+	ResumeID            string                       `json:"resume_id,omitempty"`
+	Tools               []session.FunctionTool       `json:"tools,omitempty"`
+	MCPServers          []mcpbridge.ServerDescriptor `json:"mcp_servers,omitempty"`
+	Text                string                       `json:"text,omitempty"`
+	Content             string                       `json:"content,omitempty"`
+	Kind                string                       `json:"kind,omitempty"`
+	Stream              bool                         `json:"stream,omitempty"`
+	StreamIdleTimeoutMs int64                        `json:"stream_idle_timeout_ms,omitempty"`
+	Body                json.RawMessage              `json:"body,omitempty"`
 }
 
-func (e *DriverEngine) Models(ctx context.Context) ([]session.ModelInfo, error) {
-	if e.driver != DriverACP {
-		return nil, nil
+type wireEvent struct {
+	Type         string            `json:"type"`
+	ID           string            `json:"id,omitempty"`
+	Text         string            `json:"text,omitempty"`
+	Name         string            `json:"name,omitempty"`
+	Arguments    json.RawMessage   `json:"arguments,omitempty"`
+	ResumeID     string            `json:"resume_id,omitempty"`
+	Input        int64             `json:"input_tokens,omitempty"`
+	Output       int64             `json:"output_tokens,omitempty"`
+	Error        string            `json:"error,omitempty"`
+	Models       []wireModelInfo   `json:"models,omitempty"`
+	ToolStrategy string            `json:"tool_strategy,omitempty"`
+	Capabilities *wireCapabilities `json:"capabilities,omitempty"`
+	Catalog      *CatalogSource    `json:"catalog,omitempty"`
+	Config       map[string]any    `json:"config,omitempty"`
+	Data         json.RawMessage   `json:"data,omitempty"`
+	Event        string            `json:"event,omitempty"`
+	Meaningful   bool              `json:"meaningful,omitempty"`
+	CallError    *wireCallError    `json:"call_error,omitempty"`
+}
+
+func effectiveDriverConfig(cfg Config) map[string]any {
+	out := make(map[string]any, len(cfg.DriverConfig)+1)
+	for k, v := range cfg.DriverConfig {
+		out[k] = v
 	}
-	e.discoveryMu.Lock()
-	defer e.discoveryMu.Unlock()
-	e.mu.Lock()
-	cached := append([]session.ModelInfo(nil), e.catalog...)
-	fresh := !e.catalogAt.IsZero() && time.Since(e.catalogAt) < catalogTTL
-	e.mu.Unlock()
+	if strings.TrimSpace(cfg.Driver) != "" && len(cfg.Command) > 0 {
+		if _, exists := out["command"]; !exists {
+			out["command"] = append([]string(nil), cfg.Command...)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func appendEnv(base []string, extra map[string]string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	keys := make([]string, 0, len(extra))
+	for k := range extra {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := append([]string(nil), base...)
+	for _, k := range keys {
+		out = append(out, k+"="+extra[k])
+	}
+	return out
+}
+
+// Describe spawns a short-lived driver process with {"type":"init",...} to
+// validate driver-specific configuration and discover its capabilities.
+func Describe(ctx context.Context, cfg Config) (Description, error) {
+	execCmd, err := ResolveDriverCommand(cfg.Driver, cfg.Command)
+	if err != nil {
+		return Description{}, err
+	}
+	driverCfg := effectiveDriverConfig(cfg)
+	id := strings.TrimSpace(cfg.ID)
+	if id == "" {
+		id = "default"
+	}
+	initMsg := wireInbound{
+		Type:             "init",
+		ID:               id,
+		ToolStrategy:     cfg.ToolStrategy,
+		ModelsURL:        cfg.ModelsURL,
+		HasSession:       cfg.HasSession,
+		RequestTimeoutMs: cfg.RequestTimeout.Milliseconds(),
+		Config:           driverCfg,
+	}
+	initData, err := json.Marshal(initMsg)
+	if err != nil {
+		return Description{}, err
+	}
+	cwd, _ := os.Getwd()
+	cacheKey := strings.Join(execCmd, "\x00") + "\x00" + cwd + "\x00" + string(initData)
+
+	describeCacheMu.Lock()
+	if cached, ok := describeCache[cacheKey]; ok {
+		describeCacheMu.Unlock()
+		return cloneDescription(cached), nil
+	}
+	describeCacheMu.Unlock()
+
+	initCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(initCtx, execCmd[0], execCmd[1:]...)
+	if len(cfg.Env) > 0 {
+		cmd.Env = appendEnv(os.Environ(), cfg.Env)
+	}
+	cmd.Stderr = io.Discard
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return Description{}, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		return Description{}, err
+	}
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		return Description{}, err
+	}
+	defer func() {
+		_ = stdin.Close()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}()
+
+	if _, err := stdin.Write(append(initData, '\n')); err != nil {
+		return Description{}, err
+	}
+	_ = stdin.Close()
+
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 4096), 16<<20)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return Description{}, err
+		}
+		return Description{}, errors.New("external driver closed during initialization")
+	}
+
+	var ev wireEvent
+	if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+		return Description{}, fmt.Errorf("invalid driver initialization event: %w", err)
+	}
+	if ev.Type == "error" {
+		return Description{}, errors.New(ev.Error)
+	}
+	if ev.Type != "ready" {
+		return Description{}, fmt.Errorf("unexpected driver initialization event %q", ev.Type)
+	}
+
+	var caps model.Capabilities
+	if ev.Capabilities != nil {
+		caps = ev.Capabilities.toModel()
+	} else {
+		caps = model.Capabilities{
+			Chat:      true,
+			Streaming: true,
+			Tools:     true,
+			Stateful:  true,
+			Resume:    true,
+		}
+	}
+
+	strategy := strings.ToLower(strings.TrimSpace(ev.ToolStrategy))
+	if caps.Stateful {
+		if strategy == "" {
+			strategy = strings.ToLower(strings.TrimSpace(cfg.ToolStrategy))
+			if strategy == "" || strategy == ToolStrategyAuto {
+				strategy = ToolStrategyBoth
+			}
+		}
+		if strategy != ToolStrategyMCP && strategy != ToolStrategyPrompt && strategy != ToolStrategyWire && strategy != ToolStrategyBoth {
+			return Description{}, fmt.Errorf("unknown tool strategy %q", cfg.ToolStrategy)
+		}
+	}
+
+	normalizedCfg := ev.Config
+	if normalizedCfg == nil {
+		normalizedCfg = driverCfg
+	}
+
+	desc := Description{
+		Capabilities: caps,
+		ToolStrategy: strategy,
+		Catalog:      ev.Catalog,
+		Config:       normalizedCfg,
+	}
+
+	describeCacheMu.Lock()
+	describeCache[cacheKey] = cloneDescription(desc)
+	describeCacheMu.Unlock()
+
+	return desc, nil
+}
+
+func cloneDescription(d Description) Description {
+	out := d
+	if d.Catalog != nil {
+		cat := *d.Catalog
+		out.Catalog = &cat
+	}
+	if d.Config != nil {
+		cfgCopy := make(map[string]any, len(d.Config))
+		for k, v := range d.Config {
+			cfgCopy[k] = v
+		}
+		out.Config = cfgCopy
+	}
+	return out
+}
+
+// Driver is the unified external driver client over the gateway NDJSON wire
+// protocol. It implements model.Executor for stateless (multiplexed) drivers
+// and session.Engine for stateful (per-session) drivers.
+type Driver struct {
+	id             string
+	command        []string
+	env            map[string]string
+	defaultCWD     string
+	toolStrategy   string
+	modelsURL      string
+	requestTimeout time.Duration
+	driverConfig   map[string]any
+	capabilities   model.Capabilities
+	description    Description
+	logger         *slog.Logger
+
+	// Stateful catalog cache
+	mu          sync.Mutex
+	catalog     []session.ModelInfo
+	discoveryMu sync.Mutex
+	catalogAt   time.Time
+
+	// Stateless multiplexed worker state
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	bw       *bufio.Writer
+	writeMu  sync.Mutex
+	closed   chan struct{}
+	readDone chan struct{}
+	waitDone chan struct{}
+	once     sync.Once
+	nextID   atomic.Uint64
+	pendMu   sync.Mutex
+	pending  map[string]chan wireEvent
+}
+
+type DriverEngine = Driver
+
+func newDriver(ctx context.Context, cfg Config) (*Driver, error) {
+	if strings.TrimSpace(cfg.Driver) == "" && len(cfg.Command) == 0 {
+		return nil, errors.New("driver or command is required")
+	}
+	execCmd, err := ResolveDriverCommand(cfg.Driver, cfg.Command)
+	if err != nil {
+		return nil, err
+	}
+	desc, err := Describe(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	d := &Driver{
+		id:             strings.TrimSpace(cfg.ID),
+		command:        execCmd,
+		env:            cfg.Env,
+		defaultCWD:     cfg.DefaultCWD,
+		toolStrategy:   desc.ToolStrategy,
+		modelsURL:      cfg.ModelsURL,
+		requestTimeout: cfg.RequestTimeout,
+		driverConfig:   desc.Config,
+		capabilities:   desc.Capabilities,
+		description:    desc,
+		logger:         cfg.Logger,
+	}
+	if !desc.Capabilities.Stateful {
+		if err := d.startMultiplexed(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return d, nil
+}
+
+func (d *Driver) Capabilities() model.Capabilities {
+	return d.capabilities
+}
+
+func (d *Driver) Description() Description {
+	return cloneDescription(d.description)
+}
+
+func (d *Driver) startMultiplexed(ctx context.Context) error {
+	cmd := exec.Command(d.command[0], d.command[1:]...)
+	if len(d.env) > 0 {
+		cmd.Env = appendEnv(os.Environ(), d.env)
+	}
+	cmd.Stderr = io.Discard
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		return err
+	}
+
+	d.cmd = cmd
+	d.stdin = stdin
+	d.bw = bufio.NewWriter(stdin)
+	d.closed = make(chan struct{})
+	d.readDone = make(chan struct{})
+	d.waitDone = make(chan struct{})
+	d.pending = make(map[string]chan wireEvent)
+
+	initCh := make(chan wireEvent, 1)
+	go func() {
+		defer close(d.readDone)
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 4096), 16<<20)
+		initialized := false
+		for scanner.Scan() {
+			var msg wireEvent
+			if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
+				msg = wireEvent{Type: "error", Error: "invalid external driver event"}
+			}
+			if !initialized && msg.ID == "" && (msg.Type == "ready" || msg.Type == "error") {
+				initialized = true
+				initCh <- msg
+				continue
+			}
+			if msg.ID != "" {
+				d.pendMu.Lock()
+				ch, ok := d.pending[msg.ID]
+				d.pendMu.Unlock()
+				if ok {
+					select {
+					case ch <- msg:
+					case <-d.closed:
+						return
+					}
+				}
+			}
+		}
+	}()
+
+	go func() {
+		<-d.readDone
+		_ = cmd.Wait()
+		close(d.waitDone)
+	}()
+
+	id := d.id
+	if id == "" {
+		id = "default"
+	}
+	if err := d.writeMultiplexed(wireInbound{
+		Type:             "start",
+		ID:               id,
+		ModelsURL:        d.modelsURL,
+		RequestTimeoutMs: d.requestTimeout.Milliseconds(),
+		Config:           d.driverConfig,
+	}); err != nil {
+		_ = d.Close()
+		return err
+	}
+
+	select {
+	case <-ctx.Done():
+		_ = d.Close()
+		return ctx.Err()
+	case msg := <-initCh:
+		if msg.Type == "error" {
+			_ = d.Close()
+			return errors.New(msg.Error)
+		}
+		if msg.Type != "ready" {
+			_ = d.Close()
+			return errors.New("external driver did not become ready")
+		}
+		return nil
+	case <-d.readDone:
+		_ = d.Close()
+		return errors.New("external driver closed during startup")
+	}
+}
+
+func (d *Driver) writeMultiplexed(msg wireInbound) error {
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
+	select {
+	case <-d.closed:
+		return errors.New("external driver closed")
+	default:
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	if _, err := d.bw.Write(append(data, '\n')); err != nil {
+		return err
+	}
+	return d.bw.Flush()
+}
+
+func (d *Driver) register(id string, buf int) chan wireEvent {
+	ch := make(chan wireEvent, buf)
+	d.pendMu.Lock()
+	d.pending[id] = ch
+	d.pendMu.Unlock()
+	return ch
+}
+
+func (d *Driver) unregister(id string) {
+	d.pendMu.Lock()
+	delete(d.pending, id)
+	d.pendMu.Unlock()
+}
+
+func (d *Driver) Do(ctx context.Context, target model.Target, request model.ExecuteRequest) ([]byte, *model.CallError) {
+	if request.Kind != model.RequestChat && request.Kind != model.RequestResponses {
+		return nil, &model.CallError{Class: model.ErrorInvalid, Status: 400}
+	}
+	started := time.Now()
+	id := fmt.Sprintf("req-%d", d.nextID.Add(1))
+	ch := d.register(id, 4)
+	defer d.unregister(id)
+
+	err := d.writeMultiplexed(wireInbound{
+		Type:     "request",
+		ID:       id,
+		Provider: target.Provider,
+		Model:    target.Model,
+		Kind:     string(request.Kind),
+		Stream:   false,
+		Body:     json.RawMessage(request.Body),
+	})
+	if err != nil {
+		return nil, &model.CallError{Class: model.ErrorUpstream, Status: 502, Cause: err, Scope: model.FailureScopeProvider}
+	}
+
+	select {
+	case <-ctx.Done():
+		_ = d.writeMultiplexed(wireInbound{Type: "cancel", ID: id})
+		callErr := classifyContextError(ctx)
+		d.logResult(ctx, target, request.Kind, started, nil, callErr)
+		return nil, callErr
+	case msg := <-ch:
+		if msg.Type == "error" {
+			callErr := fromWireCallError(ctx, msg.CallError, msg.Error)
+			d.logResult(ctx, target, request.Kind, started, msg.CallError, callErr)
+			return nil, callErr
+		}
+		d.logUpstreamSuccess(ctx, target, request.Kind, started)
+		return []byte(msg.Data), nil
+	case <-d.readDone:
+		callErr := &model.CallError{Class: model.ErrorUpstream, Status: 502, Cause: errors.New("external driver closed"), Scope: model.FailureScopeProvider}
+		d.logResult(ctx, target, request.Kind, started, nil, callErr)
+		return nil, callErr
+	}
+}
+
+func (d *Driver) Stream(ctx context.Context, target model.Target, request model.ExecuteRequest) (<-chan model.StreamEvent, *model.CallError) {
+	if request.Kind != model.RequestChat && request.Kind != model.RequestResponses {
+		return nil, &model.CallError{Class: model.ErrorInvalid, Status: 400}
+	}
+	started := time.Now()
+	id := fmt.Sprintf("req-%d", d.nextID.Add(1))
+	ch := d.register(id, 32)
+
+	err := d.writeMultiplexed(wireInbound{
+		Type:                "request",
+		ID:                  id,
+		Provider:            target.Provider,
+		Model:               target.Model,
+		Kind:                string(request.Kind),
+		Stream:              true,
+		StreamIdleTimeoutMs: request.StreamIdleTimeout.Milliseconds(),
+		Body:                json.RawMessage(request.Body),
+	})
+	if err != nil {
+		d.unregister(id)
+		return nil, &model.CallError{Class: model.ErrorUpstream, Status: 502, Cause: err, Scope: model.FailureScopeProvider}
+	}
+
+	select {
+	case <-ctx.Done():
+		_ = d.writeMultiplexed(wireInbound{Type: "cancel", ID: id})
+		d.unregister(id)
+		callErr := classifyContextError(ctx)
+		d.logResult(ctx, target, request.Kind, started, nil, callErr)
+		return nil, callErr
+	case msg := <-ch:
+		if msg.Type == "error" {
+			d.unregister(id)
+			callErr := fromWireCallError(ctx, msg.CallError, msg.Error)
+			d.logResult(ctx, target, request.Kind, started, msg.CallError, callErr)
+			return nil, callErr
+		}
+		if msg.Type != "stream_opened" {
+			d.unregister(id)
+			return nil, &model.CallError{Class: model.ErrorUpstream, Status: 502, Cause: errors.New("unexpected external driver stream event"), Scope: model.FailureScopeProvider}
+		}
+	case <-d.readDone:
+		d.unregister(id)
+		return nil, &model.CallError{Class: model.ErrorUpstream, Status: 502, Cause: errors.New("external driver closed"), Scope: model.FailureScopeProvider}
+	}
+
+	d.logUpstreamSuccess(ctx, target, request.Kind, started)
+	output := make(chan model.StreamEvent, 8)
+	go func() {
+		defer close(output)
+		defer d.unregister(id)
+		for {
+			select {
+			case <-ctx.Done():
+				_ = d.writeMultiplexed(wireInbound{Type: "cancel", ID: id})
+				return
+			case msg := <-ch:
+				switch msg.Type {
+				case "chunk":
+					select {
+					case output <- model.StreamEvent{Data: []byte(msg.Data), Event: msg.Event, Meaningful: msg.Meaningful}:
+					case <-ctx.Done():
+						_ = d.writeMultiplexed(wireInbound{Type: "cancel", ID: id})
+						return
+					}
+				case "error":
+					callErr := fromWireCallError(ctx, msg.CallError, msg.Error)
+					d.logResult(ctx, target, request.Kind, started, msg.CallError, callErr)
+					select {
+					case output <- model.StreamEvent{Err: callErr}:
+					case <-ctx.Done():
+					}
+					return
+				case "done":
+					return
+				}
+			case <-d.readDone:
+				select {
+				case output <- model.StreamEvent{Err: &model.CallError{Class: model.ErrorUpstream, Status: 502, Cause: errors.New("external driver stream closed"), Scope: model.FailureScopeProvider}}:
+				case <-ctx.Done():
+				}
+				return
+			}
+		}
+	}()
+	return output, nil
+}
+
+func (d *Driver) Close() error {
+	if d.cmd == nil {
+		return nil
+	}
+	d.once.Do(func() {
+		close(d.closed)
+		_ = d.stdin.Close()
+		_ = d.cmd.Process.Signal(os.Interrupt)
+		select {
+		case <-d.waitDone:
+			return
+		case <-time.After(500 * time.Millisecond):
+			_ = d.cmd.Process.Kill()
+		}
+	})
+	select {
+	case <-d.waitDone:
+		return nil
+	case <-time.After(5 * time.Second):
+		return errors.New("external driver did not stop")
+	}
+}
+
+func classifyContextError(ctx context.Context) *model.CallError {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return &model.CallError{Class: model.ErrorTimeout, Status: 504, Cause: ctx.Err()}
+	}
+	return &model.CallError{Class: model.ErrorCancelled, Status: 499, Cause: ctx.Err()}
+}
+
+func fromWireCallError(ctx context.Context, w *wireCallError, fallbackErr string) *model.CallError {
+	if ctx.Err() != nil {
+		return classifyContextError(ctx)
+	}
+	if w == nil {
+		var cause error
+		if fallbackErr != "" {
+			cause = errors.New(fallbackErr)
+		}
+		return &model.CallError{Class: model.ErrorUpstream, Status: 502, Cause: cause, Scope: model.FailureScopeProvider}
+	}
+	var cause error
+	if w.Detail != "" {
+		cause = errors.New(w.Detail)
+	}
+	return &model.CallError{
+		Code:   w.Code,
+		Class:  model.ErrorClass(w.Class),
+		Status: w.Status,
+		Cause:  cause,
+		Scope:  model.FailureScope(w.Scope),
+		Replay: model.ReplaySafety(w.Replay),
+	}
+}
+
+func (d *Driver) logResult(ctx context.Context, target model.Target, kind model.RequestKind, started time.Time, wireErr *wireCallError, callErr *model.CallError) {
+	if d.logger == nil {
+		return
+	}
+	if wireErr != nil && wireErr.Log == "provider_request_rejected" {
+		attrs := []any{
+			"provider", target.Provider,
+			"native_model", target.Model,
+			"kind", kind,
+			"status_code", callErr.Status,
+			"error_type", string(callErr.Class),
+		}
+		if callErr.Cause != nil {
+			attrs = append(attrs, "detail", telemetry.SafeLogDetail(callErr.Cause.Error()))
+		}
+		telemetry.LogEvent(ctx, d.logger, slog.LevelWarn, "provider_request_rejected", attrs...)
+		return
+	}
+	attrs := []any{
+		"provider", target.Provider,
+		"native_model", target.Model,
+		"kind", kind,
+		"status_code", callErr.Status,
+		"error_type", string(callErr.Class),
+		"duration_ms", time.Since(started).Milliseconds(),
+	}
+	if wireErr != nil && wireErr.Detail != "" {
+		if detail := telemetry.SafeLogDetail(wireErr.Detail); detail != "" {
+			attrs = append(attrs, "detail", detail)
+		}
+	}
+	if callErr.Class == model.ErrorCancelled {
+		telemetry.LogEvent(ctx, d.logger, slog.LevelDebug, "upstream_request_cancelled", attrs...)
+		return
+	}
+	telemetry.LogEvent(ctx, d.logger, slog.LevelWarn, "upstream_request_failed", attrs...)
+}
+
+func (d *Driver) logUpstreamSuccess(ctx context.Context, target model.Target, kind model.RequestKind, started time.Time) {
+	if d.logger == nil {
+		return
+	}
+	telemetry.LogEvent(ctx, d.logger, slog.LevelDebug, "upstream_request_accepted",
+		"provider", target.Provider,
+		"native_model", target.Model,
+		"kind", kind,
+		"status_code", 200,
+		"duration_ms", time.Since(started).Milliseconds(),
+	)
+}
+
+func (d *Driver) Models(ctx context.Context) ([]session.ModelInfo, error) {
+	d.discoveryMu.Lock()
+	defer d.discoveryMu.Unlock()
+	d.mu.Lock()
+	cached := append([]session.ModelInfo(nil), d.catalog...)
+	fresh := !d.catalogAt.IsZero() && time.Since(d.catalogAt) < catalogTTL
+	d.mu.Unlock()
 	if fresh {
 		return cached, nil
 	}
 
 	discoveryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	discovered, err := e.queryModels(discoveryCtx)
+	discovered, err := d.queryModels(discoveryCtx)
 	if err != nil {
 		if len(cached) > 0 {
 			return cached, nil
 		}
 		return nil, err
 	}
-	e.mu.Lock()
-	e.catalog = append([]session.ModelInfo(nil), discovered...)
-	e.catalogAt = time.Now()
-	e.mu.Unlock()
+	d.mu.Lock()
+	d.catalog = append([]session.ModelInfo(nil), discovered...)
+	d.catalogAt = time.Now()
+	d.mu.Unlock()
 	return discovered, nil
 }
 
-func (e *DriverEngine) queryModels(ctx context.Context) ([]session.ModelInfo, error) {
-	cmd := exec.CommandContext(ctx, e.command[0], e.command[1:]...)
-	if e.defaultCWD != "" {
-		cmd.Dir = e.defaultCWD
+func (d *Driver) queryModels(ctx context.Context) ([]session.ModelInfo, error) {
+	cmd := exec.CommandContext(ctx, d.command[0], d.command[1:]...)
+	if d.defaultCWD != "" {
+		cmd.Dir = d.defaultCWD
+	}
+	if len(d.env) > 0 {
+		cmd.Env = appendEnv(os.Environ(), d.env)
 	}
 	cmd.Stderr = io.Discard
 	stdin, err := cmd.StdinPipe()
@@ -191,9 +802,10 @@ func (e *DriverEngine) queryModels(ctx context.Context) ([]session.ModelInfo, er
 		_ = cmd.Wait()
 	}()
 
-	reqData, _ := json.Marshal(map[string]any{
-		"type": "models",
-		"cwd":  e.defaultCWD,
+	reqData, _ := json.Marshal(wireInbound{
+		Type:   "models",
+		CWD:    d.defaultCWD,
+		Config: d.driverConfig,
 	})
 	if _, err := stdin.Write(append(reqData, '\n')); err != nil {
 		return nil, err
@@ -229,45 +841,39 @@ func (e *DriverEngine) queryModels(ctx context.Context) ([]session.ModelInfo, er
 	return result, nil
 }
 
-func (e *DriverEngine) Resolve(ctx context.Context, model, effort string) (string, error) {
-	if model == "default" {
-		model = ""
+func (d *Driver) Resolve(ctx context.Context, modelName, effort string) (string, error) {
+	if modelName == "default" {
+		modelName = ""
 	}
-	if model == "" {
+	if modelName == "" {
 		if effort != "" {
 			return "", errors.New("select a concrete model to choose effort")
 		}
 		return "", nil
 	}
-	if e.driver != DriverACP {
-		if effort != "" {
-			return "", errors.New("reasoning effort unsupported by this engine")
-		}
-		return model, nil
-	}
 
-	e.mu.Lock()
-	models := append([]session.ModelInfo(nil), e.catalog...)
-	e.mu.Unlock()
+	d.mu.Lock()
+	models := append([]session.ModelInfo(nil), d.catalog...)
+	d.mu.Unlock()
 	if len(models) == 0 {
 		discoveryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		discovered, err := e.Models(discoveryCtx)
+		discovered, err := d.Models(discoveryCtx)
 		cancel()
 		if err != nil {
 			if effort != "" {
 				return "", fmt.Errorf("reasoning effort discovery: %w", err)
 			}
-			return model, nil
+			return modelName, nil
 		}
 		models = discovered
 	}
 	for _, m := range models {
-		if m.ID == model && len(m.ReasoningEfforts) > 0 {
+		if m.ID == modelName && len(m.ReasoningEfforts) > 0 {
 			if effort == "" {
-				return fmt.Sprintf("%s[%s]", model, m.ReasoningEfforts[0]), nil
+				return fmt.Sprintf("%s[%s]", modelName, m.ReasoningEfforts[0]), nil
 			}
 			if slices.Contains(m.ReasoningEfforts, effort) {
-				return fmt.Sprintf("%s[%s]", model, effort), nil
+				return fmt.Sprintf("%s[%s]", modelName, effort), nil
 			}
 			return "", fmt.Errorf("reasoning effort %q is not available for model", effort)
 		}
@@ -275,7 +881,7 @@ func (e *DriverEngine) Resolve(ctx context.Context, model, effort string) (strin
 	if effort != "" {
 		return "", fmt.Errorf("reasoning effort %q is not available for model", effort)
 	}
-	return model, nil
+	return modelName, nil
 }
 
 type nativeSession struct {
@@ -294,15 +900,20 @@ type nativeSession struct {
 	toolStrategy string
 }
 
-func (e *DriverEngine) Start(ctx context.Context, spec session.Spec) (session.Session, error) {
-	cmd := exec.Command(e.command[0], e.command[1:]...)
+func (d *Driver) Start(ctx context.Context, spec session.Spec) (session.Session, error) {
+	cmd := exec.Command(d.command[0], d.command[1:]...)
 	cmd.Dir = spec.CWD
 	// Drivers own browser/external credentials; stderr is deliberately excluded from logs.
 	cmd.Stderr = io.Discard
 
+	env := os.Environ()
+	if len(d.env) > 0 {
+		env = appendEnv(env, d.env)
+	}
+
 	var facade *mcpbridge.Facade
 	var mcpServers []mcpbridge.ServerDescriptor
-	if e.toolStrategy == ToolStrategyMCP && len(spec.Tools) > 0 {
+	if d.toolStrategy == ToolStrategyMCP && len(spec.Tools) > 0 {
 		var bridgeTools []mcpbridge.Tool
 		for _, tool := range spec.Tools {
 			bridgeTools = append(bridgeTools, mcpbridge.Tool{Name: tool.Function.Name, Description: tool.Function.Description, InputSchema: tool.Function.Parameters})
@@ -315,11 +926,14 @@ func (e *DriverEngine) Start(ctx context.Context, spec session.Spec) (session.Se
 		desc := facade.Descriptor()
 		mcpServers = []mcpbridge.ServerDescriptor{desc}
 		descJSON, _ := json.Marshal(mcpServers)
-		cmd.Env = append(os.Environ(),
+		env = append(env,
 			"MCP_SERVERS="+string(descJSON),
 			"MCP_SERVER_COMMAND="+desc.Command,
 			"MCP_SERVER_ARGS="+strings.Join(desc.Args, " "),
 		)
+	}
+	if len(d.env) > 0 || len(mcpServers) > 0 {
+		cmd.Env = env
 	}
 
 	stdin, err := cmd.StdinPipe()
@@ -356,7 +970,7 @@ func (e *DriverEngine) Start(ctx context.Context, spec session.Spec) (session.Se
 		waitDone:     make(chan struct{}),
 		spec:         spec,
 		facade:       facade,
-		toolStrategy: e.toolStrategy,
+		toolStrategy: d.toolStrategy,
 	}
 
 	go func() {
@@ -386,20 +1000,19 @@ func (e *DriverEngine) Start(ctx context.Context, spec session.Spec) (session.Se
 	go func() { <-s.readDone; _ = cmd.Wait(); close(s.waitDone) }()
 
 	system := spec.System
-	if (e.toolStrategy == ToolStrategyPrompt || e.toolStrategy == ToolStrategyBoth) && len(spec.Tools) > 0 {
+	if (d.toolStrategy == ToolStrategyPrompt || d.toolStrategy == ToolStrategyBoth) && len(spec.Tools) > 0 {
 		system += "\n\n" + ToolInstructions(spec.Tools)
 	}
 
-	startPayload := map[string]any{
-		"type":      "start",
-		"cwd":       spec.CWD,
-		"model":     spec.Model,
-		"system":    system,
-		"resume_id": spec.ResumeID,
-		"tools":     spec.Tools,
-	}
-	if len(mcpServers) > 0 {
-		startPayload["mcp_servers"] = mcpServers
+	startPayload := wireInbound{
+		Type:       "start",
+		Config:     d.driverConfig,
+		CWD:        spec.CWD,
+		Model:      spec.Model,
+		System:     system,
+		ResumeID:   spec.ResumeID,
+		Tools:      spec.Tools,
+		MCPServers: mcpServers,
 	}
 
 	if err = s.write(ctx, startPayload); err != nil {
@@ -476,7 +1089,7 @@ func (s *nativeSession) Run(ctx context.Context, prompt string, emit func(sessio
 		}
 		s.init = wireEvent{}
 	}
-	if err := s.write(ctx, map[string]string{"type": "prompt", "text": prompt}); err != nil {
+	if err := s.write(ctx, wireInbound{Type: "prompt", Text: prompt}); err != nil {
 		return err
 	}
 	for {
@@ -557,7 +1170,7 @@ func (s *nativeSession) call(ctx context.Context, id, name string, args json.Raw
 	if err != nil {
 		return err
 	}
-	return s.write(ctx, map[string]string{"type": "tool_result", "id": id, "content": result})
+	return s.write(ctx, wireInbound{Type: "tool_result", ID: id, Content: result})
 }
 
 func (s *nativeSession) Close() error {

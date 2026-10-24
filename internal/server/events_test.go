@@ -420,7 +420,7 @@ func TestEventsNeverContainSecrets(t *testing.T) {
 	secret := "sk-test-super-secret-123"
 	cfg := policy.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
-	cfg.Providers[0].APIKey = secret
+	cfg.Providers[0].Config["api_key"] = secret
 	cfg.ClientAPIKeys = []policy.ClientKey{{ID: "primary", Key: secret}}
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),

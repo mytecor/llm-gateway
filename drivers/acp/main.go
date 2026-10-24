@@ -2,26 +2,76 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 )
 
 type inboundMessage struct {
-	Type            string      `json:"type"`
-	Command         []string    `json:"command,omitempty"`
-	CWD             string      `json:"cwd,omitempty"`
-	Model           string      `json:"model,omitempty"`
-	ReasoningEffort string      `json:"reasoning_effort,omitempty"`
-	System          string      `json:"system,omitempty"`
-	ResumeID        string      `json:"resume_id,omitempty"`
-	Text            string      `json:"text,omitempty"`
-	MCPServers      []MCPServer `json:"mcp_servers,omitempty"`
+	Type             string          `json:"type"`
+	ID               string          `json:"id,omitempty"`
+	ToolStrategy     string          `json:"tool_strategy,omitempty"`
+	ModelsURL        string          `json:"models_url,omitempty"`
+	HasSession       bool            `json:"has_session,omitempty"`
+	RequestTimeoutMs int64           `json:"request_timeout_ms,omitempty"`
+	Config           json.RawMessage `json:"config,omitempty"`
+	Command          []string        `json:"command,omitempty"`
+	CWD              string          `json:"cwd,omitempty"`
+	Model            string          `json:"model,omitempty"`
+	ReasoningEffort  string          `json:"reasoning_effort,omitempty"`
+	System           string          `json:"system,omitempty"`
+	ResumeID         string          `json:"resume_id,omitempty"`
+	Text             string          `json:"text,omitempty"`
+	MCPServers       []MCPServer     `json:"mcp_servers,omitempty"`
+}
+
+type rawACPConfig struct {
+	Command []string `json:"command,omitempty"`
+}
+
+func validateACPConfig(msg inboundMessage, defaultCommand []string, requireID bool) ([]string, string, map[string]any, error) {
+	id := strings.TrimSpace(msg.ID)
+	if requireID && id == "" {
+		return nil, "", nil, errors.New("session providers require id")
+	}
+	if strings.TrimSpace(msg.ModelsURL) != "" {
+		return nil, "", nil, fmt.Errorf("provider %q: HTTP settings are not supported by acp driver", id)
+	}
+	var raw rawACPConfig
+	trimmedCfg := bytes.TrimSpace(msg.Config)
+	if len(trimmedCfg) > 0 && !bytes.Equal(trimmedCfg, []byte("null")) {
+		dec := json.NewDecoder(bytes.NewReader(trimmedCfg))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&raw); err != nil {
+			return nil, "", nil, fmt.Errorf("provider %q: HTTP settings are not supported by acp driver (%w)", id, err)
+		}
+		if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			return nil, "", nil, fmt.Errorf("provider %q: trailing JSON in config", id)
+		}
+	}
+	cmd := raw.Command
+	if len(cmd) == 0 {
+		cmd = msg.Command
+	}
+	if len(cmd) == 0 {
+		cmd = defaultCommand
+	}
+	if len(cmd) == 0 || strings.TrimSpace(cmd[0]) == "" {
+		return nil, "", nil, errors.New("session providers require id and command")
+	}
+	ts := strings.ToLower(strings.TrimSpace(msg.ToolStrategy))
+	if ts != "" && ts != "auto" && ts != "mcp" {
+		return nil, "", nil, fmt.Errorf("provider %q: ACP driver supports only auto or mcp tool_strategy, got %q", id, strings.TrimSpace(msg.ToolStrategy))
+	}
+	return cmd, "mcp", map[string]any{"command": cmd}, nil
 }
 
 func main() {
@@ -119,8 +169,33 @@ func serve(ctx context.Context, defaultCommand []string, r io.Reader, w io.Write
 			return err
 		}
 		switch msg.Type {
+		case "init", "describe":
+			_, ts, normalizedCfg, err := validateACPConfig(msg, defaultCommand, true)
+			if err != nil {
+				_ = emit(Event{Type: "error", Error: err.Error()})
+				return nil
+			}
+			_ = emit(Event{
+				Type:         "ready",
+				ToolStrategy: ts,
+				Capabilities: &Capabilities{
+					Chat:      true,
+					Streaming: true,
+					Tools:     true,
+					Stateful:  true,
+					Resume:    true,
+				},
+				Config: normalizedCfg,
+			})
+			return nil
 		case "models":
-			eng, err := ensureEngine(msg.Command, msg.CWD)
+			cmd := msg.Command
+			if len(cmd) == 0 {
+				var raw rawACPConfig
+				_ = json.Unmarshal(msg.Config, &raw)
+				cmd = raw.Command
+			}
+			eng, err := ensureEngine(cmd, msg.CWD)
 			if err != nil {
 				_ = emit(Event{Type: "error", Error: err.Error()})
 				continue
@@ -136,7 +211,13 @@ func serve(ctx context.Context, defaultCommand []string, r io.Reader, w io.Write
 				_ = emit(Event{Type: "error", Error: "ACP session already started"})
 				continue
 			}
-			eng, err := ensureEngine(msg.Command, msg.CWD)
+			cmd := msg.Command
+			if len(cmd) == 0 {
+				var raw rawACPConfig
+				_ = json.Unmarshal(msg.Config, &raw)
+				cmd = raw.Command
+			}
+			eng, err := ensureEngine(cmd, msg.CWD)
 			if err != nil {
 				_ = emit(Event{Type: "error", Error: err.Error()})
 				return nil

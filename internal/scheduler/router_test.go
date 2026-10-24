@@ -1717,11 +1717,6 @@ func catalogServer(t *testing.T, ids ...string) *httptest.Server {
 func compiledWithCatalogs(t *testing.T, rules []policy.Rule, catalogs map[string][]string) (*policy.CompiledConfig, *subsystem.Catalog) {
 	t.Helper()
 	cfg := policy.TestConfig()
-	cfg.Providers = []policy.Provider{
-		{ID: "a", BaseProvider: "openai", InferenceURL: "https://a.invalid", Priority: 20},
-		{ID: "b", BaseProvider: "openai", InferenceURL: "https://b.invalid", Priority: 10},
-		{ID: "c", BaseProvider: "openai", InferenceURL: "https://c.invalid", Priority: 5},
-	}
 	cfg.Rules = rules
 	compiled, err := policy.CompileConfig(cfg)
 	if err != nil {

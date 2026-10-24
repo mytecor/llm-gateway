@@ -15,10 +15,10 @@ var (
 	builtPaths = make(map[string]string)
 )
 
-// ResolveDriverBinary locates the executable for a named built-in driver
-// ("http", "acp", "web") across environment overrides, adjacent directories,
-// standard build outputs, and $PATH. When running from a source checkout where
-// drivers/<name>/go.mod is present, it builds the Go driver binary into bin/ on demand.
+// ResolveDriverBinary locates the executable for a named driver (<name>-driver)
+// across environment overrides, adjacent directories, standard build outputs,
+// and $PATH. When running from a source checkout where drivers/<name>/ is
+// present, it builds the driver binary on demand.
 func ResolveDriverBinary(name string) (string, error) {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if name == "" {
@@ -87,9 +87,35 @@ func ResolveDriverBinary(name string) (string, error) {
 		if info, err := os.Stat(filepath.Join(driverModDir, "go.mod")); err == nil && !info.IsDir() {
 			return buildGoDriverOnDemand(repoRoot, name, driverModDir)
 		}
+		if info, err := os.Stat(filepath.Join(driverModDir, "Cargo.toml")); err == nil && !info.IsDir() {
+			return buildCargoDriverOnDemand(repoRoot, name, driverModDir)
+		}
 	}
 
 	return "", fmt.Errorf("driver binary %q not found in PATH or bin/", name+"-driver")
+}
+
+// ResolveDriverCommand resolves the executable command for a provider given its
+// driver name and optional command slice.
+func ResolveDriverCommand(driver string, command []string) ([]string, error) {
+	driver = strings.ToLower(strings.TrimSpace(driver))
+	if driver == "" && len(command) == 0 {
+		driver = "http"
+	}
+	if driver != "" {
+		bin, err := ResolveDriverBinary(driver)
+		if err != nil {
+			return nil, fmt.Errorf("unknown driver %q: %w", driver, err)
+		}
+		return []string{bin}, nil
+	}
+	if len(command) == 0 || strings.TrimSpace(command[0]) == "" {
+		return nil, fmt.Errorf("driver command is required")
+	}
+	if _, err := exec.LookPath(command[0]); err != nil {
+		return nil, err
+	}
+	return append([]string(nil), command...), nil
 }
 
 func findRepoRoot() string {
@@ -134,4 +160,27 @@ func buildGoDriverOnDemand(repoRoot, name, driverModDir string) (string, error) 
 	}
 	builtPaths[name] = outPath
 	return outPath, nil
+}
+
+func buildCargoDriverOnDemand(repoRoot, name, driverModDir string) (string, error) {
+	buildMu.Lock()
+	defer buildMu.Unlock()
+
+	if cached, ok := builtPaths[name]; ok {
+		if info, err := os.Stat(cached); err == nil && !info.IsDir() {
+			return cached, nil
+		}
+	}
+
+	cmd := exec.Command("cargo", "build", "--locked", "--manifest-path", filepath.Join(driverModDir, "Cargo.toml"))
+	cmd.Dir = repoRoot
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("build %s-driver: %w (%s)", name, err, strings.TrimSpace(string(out)))
+	}
+	candidate := filepath.Join(driverModDir, "target", "debug", name+"-driver")
+	if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+		builtPaths[name] = candidate
+		return candidate, nil
+	}
+	return "", fmt.Errorf("built %s-driver binary not found at %s", name, candidate)
 }

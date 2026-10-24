@@ -1,15 +1,17 @@
 # Session drivers and client tools
 
-The gateway accepts OpenAI Chat Completions and dispatches providers to isolated external driver binaries over stdio (`drivers/http`, `drivers/acp`, `drivers/web`, or custom NDJSON drivers).
-`driver` selects `"http"` (the default), `"acp"`, `"web"`, or `"custom"`.
+The gateway is completely driver-agnostic: it dispatches all providers to isolated external driver binaries over stdio (`drivers/http`, `drivers/acp`, `drivers/web`, or any custom `<name>-driver` / `command` executable) using a single unified NDJSON wire protocol and client engine in `internal/executor/external`.
+`driver` specifies the driver binary name (defaults to `"http"` when both `driver` and `command` are omitted, resolved to `<driver>-driver` via `external.ResolveDriverBinary`), or can be omitted when an explicit `command` executable is provided.
 
 Concrete driver documentation lives alongside each driver's source code:
 - [HTTP Provider Driver (`drivers/http/README.md`)](../drivers/http/README.md) — stateless multiplexed HTTP/API driver (`http-driver`) powered by Bifrost Core.
 - [ACP Agent Driver (`drivers/acp/README.md`)](../drivers/acp/README.md) — stateful ACP agent session driver (`acp-driver`) powered by `agentrun`.
 - [Web CDP Driver (`drivers/web/README.md`)](../drivers/web/README.md) — stateful Rust CDP browser automation driver (`web-driver`) with YAML site profiles.
 
-When using a session driver (`"acp"`, `"web"`, or `"custom"`), configure:
-- `driver`: `"acp"`, `"web"`, or `"custom"`.
+Driver-specific settings (such as `base_provider`, `inference_url`, `api_key`, `strip_params`, `set_params`, `profile`, `cdp_url`, `account`, `state_dir`, `heal`, etc.) are stored opaquely by the gateway in `Provider.Config` (with recursive `env.VAR` secret expansion) and validated by the driver itself during the `{"type":"init",...}` handshake, which also returns the provider's `Capabilities` (`chat`, `responses`, `streaming`, `tools`, `stateful`, `resume`, `safe_replay`).
+
+When using a stateful session driver (`capabilities.stateful == true`), configure:
+- `driver`: driver name (e.g. `"acp"`, `"web"`) or explicit `command`.
 - `tool_strategy`: `"auto"` (default), `"mcp"` (session-scoped MCP bridge), `"prompt"` (text prompt injection + JSON response codec), `"wire"` (structured `tool_call` and `tool_result` events without prompt injection), or `"both"` (prompt + wire).
 
 The `"acp"` driver supports only `"auto"` and `"mcp"`; both deliver tools through MCP.

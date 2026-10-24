@@ -6,6 +6,7 @@ BIN_DIR := bin
 BINARY := $(BIN_DIR)/$(APP_NAME)
 HTTP_DRIVER := $(BIN_DIR)/http-driver
 ACP_DRIVER := $(BIN_DIR)/acp-driver
+WEB_DRIVER := $(BIN_DIR)/web-driver
 CONFIG ?= configs/config.example.json
 
 all: build
@@ -13,7 +14,7 @@ all: build
 build: build-drivers
 	go build -v -o $(BINARY) $(CMD_DIR)
 
-build-drivers: build-http build-acp
+build-drivers: build-http build-acp build-web
 
 build-http:
 	cd drivers/http && go build -v -o ../../$(HTTP_DRIVER) .
@@ -55,6 +56,8 @@ clean:
 # The Rust parser must be checked out at ../parser.
 build-web:
 	cargo build --release --locked --manifest-path drivers/web/Cargo.toml
+	@mkdir -p $(BIN_DIR)
+	cp drivers/web/target/release/web-driver $(WEB_DRIVER)
 
 test-web:
 	cargo test --locked --manifest-path drivers/web/Cargo.toml
