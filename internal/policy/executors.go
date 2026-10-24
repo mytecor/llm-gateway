@@ -6,14 +6,9 @@ import (
 )
 
 func (p Provider) Capabilities() model.Capabilities {
-	switch p.Executor {
-	case "acp":
+	switch p.Driver {
+	case "acp", "web", "custom":
 		return model.Capabilities{Chat: true, Streaming: true, Tools: true, Stateful: true, Resume: true}
-	case "web":
-		return model.Capabilities{Chat: true, Streaming: true, Tools: true, Stateful: true}
-	case "external", "subprocess":
-		resume := p.Protocol == "acp"
-		return model.Capabilities{Chat: true, Streaming: true, Tools: true, Stateful: true, Resume: resume}
 	default:
 		return model.Capabilities{Chat: true, Responses: true, Streaming: true, Tools: true, SafeReplay: true}
 	}

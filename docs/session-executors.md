@@ -1,17 +1,19 @@
-# Session executors and client tools
+# Session drivers and client tools
 
-The gateway accepts OpenAI Chat Completions and executes providers in-process.
-`executor` selects `bifrost` (the default), `external` (or alias `subprocess`), or
-legacy aliases `acp` and `web`. Existing HTTP providers continue to use the ordinary
-Bifrost/OpenAI configuration.
+The gateway accepts OpenAI Chat Completions and dispatches providers to isolated external driver binaries over stdio (`drivers/http`, `drivers/acp`, `drivers/web`, or custom NDJSON drivers).
+`driver` selects `"http"` (the default), `"acp"`, `"web"`, or `"custom"`.
 
-When using `executor: "external"` (or `"subprocess"`), configure:
-- `protocol`: `"acp"` or `"driver"` (aliases: `"web"`, `"ndjson"`, default is `"driver"`).
+Concrete driver documentation lives alongside each driver's source code:
+- [HTTP Provider Driver (`drivers/http/README.md`)](../drivers/http/README.md) — stateless multiplexed HTTP/API driver (`http-driver`) powered by Bifrost Core.
+- [ACP Agent Driver (`drivers/acp/README.md`)](../drivers/acp/README.md) — stateful ACP agent session driver (`acp-driver`) powered by `agentrun`.
+- [Web CDP Driver (`drivers/web/README.md`)](../drivers/web/README.md) — stateful Rust CDP browser automation driver (`web-driver`) with YAML site profiles.
+
+When using a session driver (`"acp"`, `"web"`, or `"custom"`), configure:
+- `driver`: `"acp"`, `"web"`, or `"custom"`.
 - `tool_strategy`: `"auto"` (default), `"mcp"` (session-scoped MCP bridge), `"prompt"` (text prompt injection + JSON response codec), `"wire"` (structured `tool_call` and `tool_result` events without prompt injection), or `"both"` (prompt + wire).
 
-ACP supports only `"auto"` and `"mcp"`; both deliver tools through MCP.
-The driver protocol supports all listed strategies; `"auto"` selects `"both"`.
-This also applies to the legacy `acp` and `web` executor aliases.
+The `"acp"` driver supports only `"auto"` and `"mcp"`; both deliver tools through MCP.
+The `"web"` and `"custom"` drivers support all listed strategies; `"auto"` selects `"both"`.
 
 Start with [config.sessions.example.json](../configs/config.sessions.example.json).
 Replace the example commands and paths before serving. Relative
@@ -26,15 +28,11 @@ argument arrays passed directly to exec; no shell interpretation is performed.
 - `internal/session`: engine-independent conversations, history checkpoints,
   native-session restore, pending tool calls, cancellation and turn deadlines.
 - `internal/executor/session`: OpenAI request/result and SSE adaptation.
-- `internal/executor/external`: unified external/subprocess executor engine, supporting
-  both ACP and driver protocols with configurable tool delivery strategies (MCP, prompt codec, wire).
-- `internal/executor/acp`: agentrun ACP engine adapter.
-- `internal/executor/web`: legacy browser-driver adapter alias delegating to external driver.
+- `internal/executor/external`: unified NDJSON driver client supporting both stateless multiplexed HTTP drivers (`http-driver`) and stateful session drivers (`acp-driver`, `web-driver`, custom drivers) with configurable tool delivery strategies (MCP, prompt codec, wire).
 - `internal/mcpbridge`: private stdio MCP subprocess mode and in-gateway session facade.
+- `drivers/http`, `drivers/acp`, `drivers/web`: isolated external driver implementations (each with its own dependency tree and README).
 
-Both native engines implement `session.Engine` / `session.Session`. A web engine
-does not implement ACP or depend on agentrun. Bifrost retains native API function
-calling: there is no reason to route API tool calls through MCP internally.
+All session drivers implement `session.Engine` / `session.Session` via `external.DriverEngine`. The core gateway binary contains no provider-specific SDK dependencies (`bifrost` or `agentrun`).
 
 Session and tool lifecycle code is adapted from agentrun-openai. Its second HTTP
 server, authentication and public CLI have not been copied. The source project
@@ -58,8 +56,7 @@ one anonymous principal.
 The exchange is:
 
 1. Client sends `messages` and `tools`.
-2. ACP receives tools through a private MCP server. A browser driver receives
-   definitions and tool-format instructions.
+2. The session driver receives tools according to `tool_strategy` (a session-scoped MCP server, prompt-injected tool definitions, or structured `tools` in `start`).
 3. An executor's function request becomes OpenAI `tool_calls` with gateway call IDs
    and `finish_reason: "tool_calls"`. A streaming exchange ends with `[DONE]`.
 4. The native turn remains alive, waiting for results.
@@ -80,11 +77,6 @@ Forbidden function calls are rejected. A backend completing without a required
 call fails the exchange. The gateway validates the tool envelope and JSON object
 arguments; schema-constrained generation remains the engine's responsibility.
 
-ACP agents may also expose and execute their own tools. Publishing pi's tools
-through MCP does not disable an agent's native tools or its agent loop. The ACP
-adapter preserves agentrun-openai's noninteractive HITL-off behavior. Use a model
-or browser executor when pi must own all tool execution.
-
 ## Lifecycle and routing
 
 The runtime compares canonical history prefixes and sends only new messages to
@@ -104,8 +96,7 @@ results. Use a different store path for every provider. Pending work is never
 persisted. This checkpoint format is version 2; use a new store path when moving
 from agentrun-openai, whose version 1 keys do not include gateway client/model
 identity. Legacy files are rejected rather than silently reusing another scope. Completed sessions can resume after eviction/restart; a missing native
-session falls back once to the supplied conversation history. Browser drivers
-must implement restore to retain their native conversation.
+session falls back once to the supplied conversation history.
 
 Stateful routes currently require exactly one target and explicit `race count: 1`.
 Retry, fallback, hedge, continue and repetition recovery are rejected by config
@@ -115,12 +106,8 @@ its native state. Forking, reconciliation and idempotency guarantees would be
 needed to relax these restrictions. State-uncertain failures are not advertised
 as safely retryable.
 
-ACP and web executors currently accept text Chat Completions, including text-part
-arrays. They reject Responses requests and non-text content. Bifrost's existing
-Chat/Responses behavior is preserved. Use native `default` to leave ACP model
-selection to the agent. Concrete ACP models can map discovered bracketed effort
-variants to `reasoning_effort`; single-target logical models advertise those
-efforts through `/v1/models` when discovery succeeds.
+Session drivers (`acp`, `web`, `custom`) accept text Chat Completions, including text-part
+arrays. They reject Responses requests and non-text content. Stateless HTTP drivers (`http`) preserve full Chat Completions and Responses API support.
 
 Attempt middleware can prepare an isolated request body, observe stream events
 and receive completion callbacks. Completion runs when the upstream stream ends
@@ -129,28 +116,37 @@ Heartbeats remain
 non-meaningful for selection/TTFT and do not enter stored conversation history.
 Existing compiled rules retain their behavior.
 
-## Direct browser-driver protocol
+## Session NDJSON driver protocol
 
-The gateway includes an external driver adapter and a [Rust CDP web driver](../drivers/web/README.md)
-with YAML site profiles. The external process controls the browser,
-authenticates to its site, selects the model and maps these messages to that
-site's conversation UI or native transport. Its lifecycle is owned by the gateway.
+Stateful session drivers (`acp-driver`, `web-driver`, and `"driver": "custom"` executables) communicate with the gateway over `stdin` and `stdout` using one JSON object per line (maximum inbound line size 16 MiB). `stdout` is reserved for protocol messages; `stderr` is discarded so credentials and page contents are not copied into gateway logs.
 
-The executable's stdin and stdout carry one JSON object per line (maximum inbound
-line size 16 MiB). Stdout is reserved for protocol messages. Stderr is discarded
-so credentials and page contents are not copied into gateway logs.
+### Model discovery (`models`)
+
+Before or independent of starting a session, the gateway can probe available native models:
+
+```json
+{"type":"models"}
+```
+
+The driver replies:
+
+```json
+{"type":"models","models":[{"id":"default"}]}
+```
+
+### Session handshake (`start`) and turns (`prompt`)
 
 Gateway starts a process with the resolved working directory and sends:
 
 ```json
-{"type":"start","model":"default","system":"...","resume_id":"","tools":[]}
+{"type":"start","model":"default","effort":"","system":"...","resume_id":"","tools":[],"mcp_servers":[]}
 ```
 
 The driver replies `{"type":"ready","resume_id":"optional-native-id"}`.
 If a requested native session is missing, reply `{"type":"session_not_found"}`.
 The driver should make its restored conversation ready before emitting `ready`.
-If the site assigns its ID only after the first prompt, emit
-`{"type":"session_updated","resume_id":"https://site/thread/123"}` before
+If the backend assigns its ID only after the first prompt, emit
+`{"type":"session_updated","resume_id":"..."}` before
 `message`/`done`. The gateway records it using the existing session checkpoint.
 For strict restore, return an `error` event instead of `session_not_found`;
 `session_not_found` explicitly allows the runtime to create a replacement session.
@@ -166,30 +162,30 @@ Driver output events:
 | `usage` | `input_tokens`, `output_tokens` | Usage snapshot for the current exchange |
 | `tool_call` | `id`, `name`, `arguments` object | Structured function request |
 | `message` | `id`, `text` | Complete text-tool JSON response |
-| `session_updated` | `resume_id` | Update the native session checkpoint after the site assigns a thread ID |
+| `session_updated` | `resume_id` | Update the native session checkpoint after the backend assigns a session/thread ID |
 | `done` | — | Native turn has completed |
 | `error` | `error` | Native failure |
 
-For a text-only model, the gateway appends function definitions and instructions
-to the initial system prompt. A `message.text` must contain exactly this JSON
-shape, without Markdown fences:
+### Prompt-based and wire-based tool calls
+
+When `tool_strategy` includes prompt injection (`"prompt"` or `"both"`), the gateway appends function definitions and instructions to the initial system prompt. A `message.text` must contain exactly this JSON shape, without Markdown fences:
 
 ```json
 {"content":"optional text","tool_calls":[{"name":"lookup","arguments":{"id":42}}]}
 ```
 
-A final answer uses an empty `tool_calls` array. Structured tool requests avoid
-text parsing when the site already offers function calling. Do not emit requested
+A final answer uses an empty `tool_calls` array. Structured `tool_call` events avoid
+text parsing when the driver already offers native function calling (`"wire"` or `"both"`). Do not emit requested
 tool calls as ordinary `text` events: that would display them as answer text.
 
-When pi supplies a result, the driver receives:
+When the client supplies a tool result for a wire or prompt tool call, the driver receives:
 
 ```json
-{"type":"tool_result","id":"native-call-id","content":"result from pi"}
+{"type":"tool_result","id":"native-call-id","content":"result from client"}
 ```
 
 For calls parsed from `message`, IDs are `<message.id>/<zero-based-call-index>`.
-The driver feeds that result back to the website and continues generating events
+The driver feeds that result back to the backend and continues generating events
 for the same turn. Emit `done` after the final answer, not while waiting for a
 tool result. `text`/`reasoning` events are deltas; do not repeat a final snapshot
 of already streamed text. Native processes are terminated on cancellation or

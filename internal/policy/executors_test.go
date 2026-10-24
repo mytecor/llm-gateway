@@ -8,18 +8,19 @@ import (
 	"testing"
 )
 
-func sessionConfig(t *testing.T, kind string) Config {
+func sessionConfig(t *testing.T, driver string) Config {
 	t.Helper()
-	raw := `{"providers":[{"id":"p","executor":"` + kind + `","command":["driver"],"session":{"default_cwd":"` + t.TempDir() + `"}}],"rules":[{"route":"main","action":"filter","where":{"model":{"eq":"agent"}}},{"route":"main","action":"map","providers":["p"],"native":"default"},{"route":"main","action":"race","count":1}]}`
+	raw := `{"providers":[{"id":"p","driver":"` + driver + `","command":["driver"],"session":{"default_cwd":"` + t.TempDir() + `"}}],"rules":[{"route":"main","action":"filter","where":{"model":{"eq":"agent"}}},{"route":"main","action":"map","providers":["p"],"native":"default"},{"route":"main","action":"race","count":1}]}`
 	var cfg Config
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		t.Fatal(err)
 	}
 	return cfg
 }
-func TestSessionExecutorsCompileWithoutHTTPSettings(t *testing.T) {
-	for _, kind := range []string{"acp", "web", "external", "subprocess"} {
-		cfg := sessionConfig(t, kind)
+
+func TestSessionDriversCompileWithoutHTTPSettings(t *testing.T) {
+	for _, driver := range []string{"acp", "web", "custom"} {
+		cfg := sessionConfig(t, driver)
 		compiled, err := CompileConfig(cfg)
 		if err != nil {
 			t.Fatal(err)
@@ -27,90 +28,99 @@ func TestSessionExecutorsCompileWithoutHTTPSettings(t *testing.T) {
 		if !compiled.Models["agent"].Stateful || len(compiled.CatalogSources) != 0 || compiled.Providers["p"].Session.TurnTimeout.Duration <= 0 {
 			t.Fatalf("bad compiled config: %+v", compiled)
 		}
-	}
-}
-
-func TestExternalExecutorProtocolsAndToolStrategies(t *testing.T) {
-	// ACP protocol via external
-	cfg := sessionConfig(t, "external")
-	cfg.Providers[0].Protocol = "acp"
-	cfg.Providers[0].ToolStrategy = "mcp"
-	compiled, err := CompileConfig(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !compiled.Providers["p"].Capabilities().Resume {
-		t.Fatal("expected ACP protocol to support resume")
-	}
-
-	// Driver protocol with prompt tool strategy
-	cfg = sessionConfig(t, "external")
-	cfg.Providers[0].Protocol = "driver"
-	cfg.Providers[0].ToolStrategy = "prompt"
-	if _, err = CompileConfig(cfg); err != nil {
-		t.Fatal(err)
-	}
-
-	// Subprocess alias with wire strategy
-	cfg = sessionConfig(t, "subprocess")
-	cfg.Providers[0].Protocol = "ndjson"
-	cfg.Providers[0].ToolStrategy = "wire"
-	if _, err = CompileConfig(cfg); err != nil {
-		t.Fatal(err)
-	}
-
-	// Reject unknown protocol
-	cfg = sessionConfig(t, "external")
-	cfg.Providers[0].Protocol = "unknown"
-	if _, err = CompileConfig(cfg); err == nil {
-		t.Fatal("expected error on unknown protocol")
-	}
-
-	// Reject unknown tool strategy
-	cfg = sessionConfig(t, "external")
-	cfg.Providers[0].ToolStrategy = "magic"
-	if _, err = CompileConfig(cfg); err == nil {
-		t.Fatal("expected error on unknown tool strategy")
-	}
-
-	// Reject protocol on bifrost provider
-	bifrostCfg := sessionConfig(t, "bifrost")
-	bifrostCfg.Providers[0].Protocol = "acp"
-	if _, err = CompileConfig(bifrostCfg); err == nil {
-		t.Fatal("expected error on protocol with bifrost")
-	}
-}
-func TestACPToolStrategies(t *testing.T) {
-	for _, kind := range []string{"acp", "external", "subprocess"} {
-		for _, strategy := range []string{"", "auto", "mcp", " AUTO ", " MCP ", "prompt", "wire", "both", " Prompt "} {
-			t.Run(kind+"/"+strategy, func(t *testing.T) {
-				cfg := sessionConfig(t, kind)
-				if kind != "acp" {
-					cfg.Providers[0].Protocol = " ACP "
-				}
-				cfg.Providers[0].ToolStrategy = strategy
-				_, err := CompileConfig(cfg)
-				switch strings.ToLower(strings.TrimSpace(strategy)) {
-				case "", "auto", "mcp":
-					if err != nil {
-						t.Fatal(err)
-					}
-				default:
-					if err == nil || !strings.Contains(err.Error(), "ACP protocol supports only auto or mcp tool_strategy") {
-						t.Fatalf("expected unsupported ACP tool strategy error, got %v", err)
-					}
-				}
-			})
+		if !compiled.Providers["p"].Capabilities().Resume {
+			t.Fatalf("expected driver %q to support resume", driver)
 		}
 	}
 }
 
-func TestSessionExecutorRejectsInvalidSettings(t *testing.T) {
+func TestWebDriverAcceptsDeclarativeProfileWithoutCommand(t *testing.T) {
+	cfg := sessionConfig(t, "web")
+	cfg.Providers[0].Command = nil
+	cfg.Providers[0].Profile = "./drivers/web/sites/muse.yaml"
+	cfg.Providers[0].CDPURL = "http://127.0.0.1:19222"
+	cfg.Providers[0].Account = "main"
+	compiled, err := CompileConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(compiled.Providers["p"].Profile) {
+		t.Fatalf("expected profile path to be resolved to absolute, got %q", compiled.Providers["p"].Profile)
+	}
+}
+
+func TestDriverToolStrategies(t *testing.T) {
+	// ACP driver with mcp tool strategy
+	cfg := sessionConfig(t, "acp")
+	cfg.Providers[0].ToolStrategy = "mcp"
+	if _, err := CompileConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// Custom driver with prompt tool strategy
+	cfg = sessionConfig(t, "custom")
+	cfg.Providers[0].ToolStrategy = "prompt"
+	if _, err := CompileConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// Web driver with wire tool strategy
+	cfg = sessionConfig(t, "web")
+	cfg.Providers[0].ToolStrategy = "wire"
+	if _, err := CompileConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reject unknown driver
+	cfg = sessionConfig(t, "unknown")
+	if _, err := CompileConfig(cfg); err == nil {
+		t.Fatal("expected error on unknown driver")
+	}
+
+	// Reject unknown tool strategy
+	cfg = sessionConfig(t, "custom")
+	cfg.Providers[0].ToolStrategy = "magic"
+	if _, err := CompileConfig(cfg); err == nil {
+		t.Fatal("expected error on unknown tool strategy")
+	}
+
+	// Reject tool_strategy on http driver
+	httpCfg := sessionConfig(t, "http")
+	httpCfg.Providers[0].Command = nil
+	httpCfg.Providers[0].Session = nil
+	httpCfg.Providers[0].InferenceURL = "https://api.openai.com/v1"
+	httpCfg.Providers[0].ToolStrategy = "mcp"
+	if _, err := CompileConfig(httpCfg); err == nil {
+		t.Fatal("expected error on tool_strategy with http driver")
+	}
+}
+
+func TestACPToolStrategies(t *testing.T) {
+	for _, strategy := range []string{"", "auto", "mcp", " AUTO ", " MCP ", "prompt", "wire", "both", " Prompt "} {
+		t.Run(strategy, func(t *testing.T) {
+			cfg := sessionConfig(t, "acp")
+			cfg.Providers[0].ToolStrategy = strategy
+			_, err := CompileConfig(cfg)
+			switch strings.ToLower(strings.TrimSpace(strategy)) {
+			case "", "auto", "mcp":
+				if err != nil {
+					t.Fatal(err)
+				}
+			default:
+				if err == nil || !strings.Contains(err.Error(), "ACP driver supports only auto or mcp tool_strategy") {
+					t.Fatalf("expected unsupported ACP tool strategy error, got %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestSessionDriverRejectsInvalidSettings(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		change func(*Provider)
 	}{
-		{"unknown", func(p *Provider) { p.Executor = "missing" }},
+		{"unknown", func(p *Provider) { p.Driver = "missing" }},
 		{"command", func(p *Provider) { p.Command = nil }},
 		{"url", func(p *Provider) { p.InferenceURL = "https://example.com" }},
 		{"key", func(p *Provider) { p.APIKey = "secret" }},
@@ -125,6 +135,7 @@ func TestSessionExecutorRejectsInvalidSettings(t *testing.T) {
 		})
 	}
 }
+
 func TestSessionRoutesRejectSpeculationAndReplay(t *testing.T) {
 	for _, action := range []string{
 		`{"route":"main","action":"retry","attempts":2}`,
@@ -167,7 +178,7 @@ func TestSessionPathsResolveFromWorkingDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := sessionConfig(t, "external")
+	cfg := sessionConfig(t, "custom")
 	cfg.Providers[0].Session.DefaultCWD = "."
 	cfg.Providers[0].Session.AllowedRoots = []string{".", "../other"}
 	cfg.Providers[0].Session.StorePath = "state/sessions.json"

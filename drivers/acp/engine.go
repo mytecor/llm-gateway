@@ -1,5 +1,5 @@
-// Package acp adapts agentrun's ACP implementation to the shared session runtime.
-package acp
+// Package main implements the standalone ACP session driver over the gateway NDJSON wire protocol.
+package main
 
 import (
 	"context"
@@ -12,11 +12,41 @@ import (
 
 	"github.com/dmora/agentrun"
 	agentacp "github.com/dmora/agentrun/engine/acp"
-	"github.com/mytecor/llm-gateway/internal/mcpbridge"
-	"github.com/mytecor/llm-gateway/internal/session"
 )
 
 const catalogTTL = time.Minute
+
+var errSessionNotFound = errors.New("native session not found")
+
+type ModelInfo struct {
+	ID               string   `json:"id"`
+	Name             string   `json:"name,omitempty"`
+	ReasoningEfforts []string `json:"reasoning_efforts,omitempty"`
+}
+
+type MCPServer struct {
+	Name    string   `json:"name"`
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
+}
+
+type Spec struct {
+	CWD        string
+	Model      string
+	System     string
+	ResumeID   string
+	MCPServers []MCPServer
+}
+
+type Event struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	ResumeID string `json:"resume_id,omitempty"`
+	Input    int64  `json:"input_tokens,omitempty"`
+	Output   int64  `json:"output_tokens,omitempty"`
+	Error    string `json:"error,omitempty"`
+	Models   []ModelInfo `json:"models,omitempty"`
+}
 
 type Engine struct {
 	engine      agentrun.Engine
@@ -27,17 +57,22 @@ type Engine struct {
 	catalogAt   time.Time
 }
 
-func New(command []string, cwd string) (*Engine, error) {
+func NewEngine(command []string, cwd string) (*Engine, error) {
 	if len(command) == 0 || strings.TrimSpace(command[0]) == "" {
 		return nil, errors.New("ACP command is required")
 	}
-	e := agentacp.NewEngine(agentacp.WithBinary(command[0]), agentacp.WithArgs(command[1:]...), agentacp.WithStderrWriter(io.Discard))
+	e := agentacp.NewEngine(
+		agentacp.WithBinary(command[0]),
+		agentacp.WithArgs(command[1:]...),
+		agentacp.WithStderrWriter(io.Discard),
+	)
 	if err := e.Validate(); err != nil {
 		return nil, err
 	}
 	return &Engine{engine: e, cwd: cwd}, nil
 }
-func (e *Engine) Models(ctx context.Context) ([]session.ModelInfo, error) {
+
+func (e *Engine) Models(ctx context.Context) ([]ModelInfo, error) {
 	e.discoveryMu.Lock()
 	defer e.discoveryMu.Unlock()
 	e.mu.Lock()
@@ -63,7 +98,7 @@ func (e *Engine) Models(ctx context.Context) ([]session.ModelInfo, error) {
 			e.mu.Unlock()
 		}
 	}
-	result := []session.ModelInfo{}
+	result := []ModelInfo{}
 	indices := map[string]int{}
 	for _, m := range models {
 		id, effort, bracket := splitEffort(m.ID)
@@ -74,7 +109,7 @@ func (e *Engine) Models(ctx context.Context) ([]session.ModelInfo, error) {
 		if !ok {
 			i = len(result)
 			indices[id] = i
-			result = append(result, session.ModelInfo{ID: id, Name: m.Name})
+			result = append(result, ModelInfo{ID: id, Name: m.Name})
 		}
 		if bracket {
 			result[i].ReasoningEfforts = append(result[i].ReasoningEfforts, effort)
@@ -83,7 +118,6 @@ func (e *Engine) Models(ctx context.Context) ([]session.ModelInfo, error) {
 	return result, nil
 }
 
-// Resolve maps the public effort selector to the agent's native model ID.
 func (e *Engine) Resolve(ctx context.Context, model, effort string) (string, error) {
 	if model == "default" {
 		model = ""
@@ -122,6 +156,7 @@ func (e *Engine) Resolve(ctx context.Context, model, effort string) (string, err
 	}
 	return model, nil
 }
+
 func splitEffort(id string) (string, string, bool) {
 	if !strings.HasSuffix(id, "]") {
 		return "", "", false
@@ -136,7 +171,8 @@ func splitEffort(id string) (string, string, bool) {
 	}
 	return base, value, true
 }
-func (e *Engine) Start(ctx context.Context, spec session.Spec) (session.Session, error) {
+
+func (e *Engine) Start(ctx context.Context, spec Spec) (*Session, string, error) {
 	options := map[string]string{agentrun.OptionHITL: string(agentrun.HITLOff)}
 	if spec.ResumeID != "" {
 		options[agentrun.OptionResumeID] = spec.ResumeID
@@ -145,136 +181,113 @@ func (e *Engine) Start(ctx context.Context, spec session.Spec) (session.Session,
 		options[agentrun.OptionSystemPrompt] = spec.System
 	}
 	native := agentrun.Session{CWD: spec.CWD, Model: spec.Model, Options: options}
-	var facade *mcpbridge.Facade
-	if len(spec.Tools) > 0 {
-		var err error
-		var bridgeTools []mcpbridge.Tool
-		for _, tool := range spec.Tools {
-			bridgeTools = append(bridgeTools, mcpbridge.Tool{Name: tool.Function.Name, Description: tool.Function.Description, InputSchema: tool.Function.Parameters})
-		}
-		facade, err = mcpbridge.NewFacade(context.Background(), bridgeTools, spec.CallTool)
-		if err != nil {
-			return nil, err
-		}
-		desc := facade.Descriptor()
-		native.MCPServers = []agentrun.MCPServer{{Name: desc.Name, Command: desc.Command, Args: desc.Args}}
+	for _, srv := range spec.MCPServers {
+		native.MCPServers = append(native.MCPServers, agentrun.MCPServer{
+			Name:    srv.Name,
+			Command: srv.Command,
+			Args:    srv.Args,
+		})
 	}
 	proc, err := e.engine.Start(ctx, native)
 	if err != nil {
-		if facade != nil {
-			facade.Close()
-		}
-		return nil, nativeError(err)
+		return nil, "", classifyNativeError(err)
 	}
-	s := &nativeSession{process: proc, facade: facade}
-	// Drain replayed history before exposing a resumed session. Do this before
-	// Send starts: MCP calls and text must not race the initialization barrier.
+	s := &Session{process: proc}
 	for {
 		select {
 		case <-ctx.Done():
 			_ = s.Close()
-			return nil, ctx.Err()
+			return nil, "", ctx.Err()
 		case m, ok := <-proc.Output():
 			if !ok {
 				_ = s.Close()
-				return nil, nativeError(proc.Err())
+				return nil, "", classifyNativeError(proc.Err())
 			}
 			if m.Type == agentrun.MessageError {
 				_ = s.Close()
-				return nil, nativeError(errors.New(m.Content))
+				return nil, "", classifyNativeError(errors.New(m.Content))
 			}
 			if m.Type == agentrun.MessageInit {
 				if spec.Model != "" && m.Init != nil && m.Init.Model != "" && !e.acceptsModel(spec.Model, m.Init.Model) {
 					_ = s.Close()
-					return nil, errors.New("ACP selected an unexpected model")
+					return nil, "", errors.New("ACP selected an unexpected model")
 				}
-				s.init = session.Event{Kind: session.EventInit, ResumeID: m.ResumeID}
-				return s, nil
+				return s, m.ResumeID, nil
 			}
 		}
 	}
 }
 
-type nativeSession struct {
+type Session struct {
 	process agentrun.Process
-	facade  *mcpbridge.Facade
-	init    session.Event
 	once    sync.Once
 }
 
-func (s *nativeSession) Run(ctx context.Context, prompt string, emit func(session.Event) error) error {
-	if s.init.Kind != "" {
-		if err := emit(s.init); err != nil {
-			return err
-		}
-		s.init = session.Event{}
-	}
+func (s *Session) RunTurn(ctx context.Context, prompt string, emit func(Event) error) error {
 	sawText, sawThinking := false, false
 	err := agentrun.RunTurn(ctx, s.process, prompt, func(m agentrun.Message) error {
-		event := session.Event{}
 		switch m.Type {
 		case agentrun.MessageTextDelta:
 			sawText = true
-			event.Kind = session.EventText
-			event.Text = m.Content
+			return emit(Event{Type: "text", Text: m.Content})
 		case agentrun.MessageText:
 			if sawText {
 				sawText = false
 				return nil
 			}
-			event.Kind = session.EventText
-			event.Text = m.Content
+			return emit(Event{Type: "text", Text: m.Content})
 		case agentrun.MessageThinkingDelta:
 			sawThinking = true
-			event.Kind = session.EventReasoning
-			event.Text = m.Content
+			return emit(Event{Type: "reasoning", Text: m.Content})
 		case agentrun.MessageThinking:
 			if sawThinking {
 				sawThinking = false
 				return nil
 			}
-			event.Kind = session.EventReasoning
-			event.Text = m.Content
+			return emit(Event{Type: "reasoning", Text: m.Content})
 		case agentrun.MessageInit:
-			event.Kind = session.EventInit
-			event.ResumeID = m.ResumeID
+			if m.ResumeID == "" {
+				return nil
+			}
+			return emit(Event{Type: "session_updated", ResumeID: m.ResumeID})
 		case agentrun.MessageResult:
 			if m.Usage == nil {
 				return nil
 			}
-			event.Kind = session.EventUsage
-			event.Usage = &session.Usage{Input: int64(m.Usage.InputTokens), Output: int64(m.Usage.OutputTokens)}
+			return emit(Event{
+				Type:   "usage",
+				Input:  int64(m.Usage.InputTokens),
+				Output: int64(m.Usage.OutputTokens),
+			})
 		case agentrun.MessageError:
-			return nativeError(errors.New(m.Content))
+			return classifyNativeError(errors.New(m.Content))
 		default:
 			return nil
 		}
-		return emit(event)
 	})
-	return nativeError(err)
+	return classifyNativeError(err)
 }
-func (s *nativeSession) Close() error {
+
+func (s *Session) Close() error {
 	var err error
 	s.once.Do(func() {
-		if s.facade != nil {
-			s.facade.Close()
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		err = s.process.Stop(ctx)
 	})
 	return err
 }
-func nativeError(err error) error {
+
+func classifyNativeError(err error) error {
 	if err == nil {
 		return nil
 	}
 	if errors.Is(err, agentrun.ErrSessionNotFound) {
-		return fmt.Errorf("%w: %v", session.ErrSessionNotFound, err)
+		return fmt.Errorf("%w: %v", errSessionNotFound, err)
 	}
 	for _, marker := range []string{"no conversation found", "session not found", "could not find session", "unknown session"} {
 		if strings.Contains(strings.ToLower(err.Error()), marker) {
-			return fmt.Errorf("%w: %v", session.ErrSessionNotFound, err)
+			return fmt.Errorf("%w: %v", errSessionNotFound, err)
 		}
 	}
 	return err

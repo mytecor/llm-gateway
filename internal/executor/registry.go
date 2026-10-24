@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/mytecor/llm-gateway/internal/executor/bifrost"
 	"github.com/mytecor/llm-gateway/internal/executor/external"
 	sessionexecutor "github.com/mytecor/llm-gateway/internal/executor/session"
 	"github.com/mytecor/llm-gateway/internal/model"
@@ -48,12 +47,12 @@ func New(ctx context.Context, cfg *policy.CompiledConfig) (*Registry, error) {
 	apiCfg := *cfg
 	apiCfg.Providers = map[string]policy.Provider{}
 	for id, p := range cfg.Providers {
-		if p.Executor == "" || p.Executor == "bifrost" {
+		if p.Driver == "" || p.Driver == external.DriverHTTP {
 			apiCfg.Providers[id] = p
 		}
 	}
 	if len(apiCfg.Providers) > 0 {
-		api, err := bifrost.NewBifrostExecutor(ctx, &apiCfg)
+		api, err := external.NewHTTP(ctx, &apiCfg)
 		if err != nil {
 			return fail(err)
 		}
@@ -63,21 +62,20 @@ func New(ctx context.Context, cfg *policy.CompiledConfig) (*Registry, error) {
 		}
 	}
 	for id, p := range cfg.Providers {
-		if p.Executor == "" || p.Executor == "bifrost" {
+		if p.Driver == "" || p.Driver == external.DriverHTTP {
 			continue
 		}
-		var engine session.Engine
-		var err error
-		switch p.Executor {
-		case "acp":
-			engine, err = external.New(external.Config{Protocol: external.ProtocolACP, Command: p.Command, DefaultCWD: p.Session.DefaultCWD, ToolStrategy: p.ToolStrategy})
-		case "web":
-			engine, err = external.New(external.Config{Protocol: external.ProtocolDriver, Command: p.Command, DefaultCWD: p.Session.DefaultCWD, ToolStrategy: p.ToolStrategy})
-		case "external", "subprocess":
-			engine, err = external.New(external.Config{Protocol: p.Protocol, Command: p.Command, DefaultCWD: p.Session.DefaultCWD, ToolStrategy: p.ToolStrategy})
-		default:
-			err = fmt.Errorf("unknown executor %q", p.Executor)
-		}
+		engine, err := external.New(external.Config{
+			Driver:       p.Driver,
+			Command:      p.Command,
+			DefaultCWD:   p.Session.DefaultCWD,
+			ToolStrategy: p.ToolStrategy,
+			Profile:      p.Profile,
+			CDPURL:       p.CDPURL,
+			Account:      p.Account,
+			StateDir:     p.StateDir,
+			Heal:         p.Heal,
+		})
 		if err != nil {
 			return fail(fmt.Errorf("provider %q: %w", id, err))
 		}

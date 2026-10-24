@@ -130,10 +130,11 @@ they do not coordinate independent gateway hosts.
 
 ## Gateway and thread continuation
 
-`configs/config.muse.json` runs this binary with `protocol: driver` and
-`tool_strategy: prompt`. Paths are relative to the gateway working directory;
-build the driver with `make build-web` and start the gateway from the repository
-root:
+`configs/config.muse.json` runs this binary with `"driver": "web"`,
+`"tool_strategy": "prompt"`, and declarative web driver options (`profile`,
+`cdp_url`, `account`, `state_dir`, `heal` — or an explicit `command` override).
+Paths are relative to the gateway working directory; build the driver with
+`make build-web` and start the gateway from the repository root:
 
 ```sh
 go run ./cmd/llm-gateway --config configs/config.muse.json serve

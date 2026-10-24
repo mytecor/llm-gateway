@@ -29,11 +29,11 @@ flowchart TD
         end
 
         subgraph Executors["Execution Layer (Registry)"]
-            BifrostExec["Bifrost HTTP Executor<br/>(OpenAI, Anthropic, Vertex, etc.)"]
+            HTTPClient["Multiplexed HTTP Driver Client<br/>(internal/executor/external)"]
             SessionExec["Session Runtime Adapter<br/>(History, Turn Lifecycle, Checkpoints)"]
             
-            subgraph NativeEngines["External Subprocess Engines"]
-                ExternalEngine["Unified External Engine<br/>(ACP & Driver Protocols)"]
+            subgraph NativeEngines["Session Driver Client"]
+                ExternalEngine["Unified Session Driver Engine<br/>(NDJSON over stdio)"]
                 MCPSystem["Stdio MCP Bridge & Tool Codecs"]
             end
         end
@@ -41,22 +41,22 @@ flowchart TD
         Telemetry["Telemetry & Observability<br/>(Prometheus on Loopback :9209, slog JSON)"]
     end
 
-    UpstreamHTTP["Upstream Cloud APIs<br/>(OpenAI, Anthropic, Bedrock, etc.)"]
-    SubprocessAgents["Local Agent Processes<br/>(agentrun, ACP runners)"]
-    HeadlessBrowsers["Browser Drivers & CLI Processes<br/>(Headless Chrome, Web Automation)"]
+    HTTPDriver["drivers/http (http-driver)<br/>Bifrost Core Upstream Adapter"]
+    ACPDriver["drivers/acp (acp-driver)<br/>agentrun ACP Adapter"]
+    WebDriver["drivers/web (web-driver)<br/>Rust CDP Browser Automation"]
 
     Client --> Server
     Server --> Auth
     Auth --> Scheduler
     Scheduler <--> Subsystems
-    Scheduler --> BifrostExec
+    Scheduler --> HTTPClient
     Scheduler --> SessionExec
     
-    BifrostExec --> UpstreamHTTP
+    HTTPClient --> HTTPDriver
     SessionExec --> ExternalEngine
     ExternalEngine <--> MCPSystem
-    ExternalEngine --> SubprocessAgents
-    ExternalEngine --> HeadlessBrowsers
+    ExternalEngine --> ACPDriver
+    ExternalEngine --> WebDriver
     
     Server -.-> Telemetry
     Scheduler -.-> Telemetry
@@ -82,13 +82,14 @@ llm-gateway/
 │   └── llm-gateway/            # Application entrypoint (CLI bootstrap & mcp-bridge dispatch)
 ├── configs/                    # Example JSON deployment and session configurations
 ├── docs/                       # Subsystem-specific deep-dives (e.g. session-executors.md)
+├── drivers/                    # Isolated external provider driver binaries (NDJSON over stdio)
+│   ├── http/                   # Standalone Go module (http-driver: Bifrost HTTP upstream adapter)
+│   ├── acp/                    # Standalone Go module (acp-driver: agentrun ACP adapter)
+│   └── web/                    # Standalone Rust crate (web-driver: CDP browser automation)
 ├── internal/
-│   ├── executor/               # Executor registry, interfaces, and backend drivers
-│   │   ├── bifrost/            # Bifrost Core HTTP upstream adapter
+│   ├── executor/               # Executor registry, interfaces, and NDJSON driver clients
 │   │   ├── session/            # Stateful session adaptation to OpenAI protocol
-│   │   ├── external/           # Unified external subprocess engine (ACP and Driver protocols)
-│   │   ├── acp/                # Agent Communication Protocol adapter (agentrun + MCP)
-│   │   └── web/                # Native browser driver adapter (legacy alias)
+│   │   └── external/           # Unified NDJSON driver engine (HTTP multiplexed & stateful session)
 │   ├── gateway/                # Daemon lifecycle, CLI commands (check, serve), signals
 │   ├── mcpbridge/              # Private stdio Model Context Protocol (MCP) bridge
 │   ├── model/                  # Domain types, capabilities, error taxonomy, token usage
@@ -224,15 +225,17 @@ sequenceDiagram
   - Manages turn lifecycle, idle eviction (`session.ttl`), and turn timeouts (`session.turn_timeout`).
   - Implements atomic checkpointing (`session.store_path`) to persist resume IDs and session metadata across restarts.
 - **`internal/executor/external`**:
-  - Unified engine for local subprocess execution (`executor: "external"` / `"subprocess"`).
-  - Protocol abstraction: supports `protocol: "acp"` (via `agentrun`) and `protocol: "driver"` (line-delimited JSON IPC over stdio).
-  - Pluggable tool strategies (`tool_strategy`):
+  - Unified NDJSON over stdio driver client for both stateless multiplexed HTTP drivers (`HTTPDriver`) and stateful session drivers (`DriverEngine`).
+  - Supports `"driver": "http"`, `"driver": "acp"`, `"driver": "web"`, and `"driver": "custom"`.
+  - Pluggable tool strategies (`tool_strategy`) for session drivers:
     - `mcp`: Bridges client tools into a private, session-scoped stdio MCP server (`internal/mcpbridge`).
     - `prompt`: Injects tool schemas into the system prompt and parses JSON responses (`DecodeToolResponse`) for text-only models.
     - `wire`: Uses direct line protocol events (`tool_call`, `tool_result`).
-    - `both` / `auto`: Accepts both wire events and text prompt JSON.
-- **`internal/executor/acp` & `internal/executor/web`**:
-  - Backward-compatible adapters and legacy aliases delegating to the unified external execution layer.
+    - `both` / `auto`: Accepts both wire events and text prompt JSON (`acp` defaults `auto` to `mcp`).
+- **External Driver Binaries (`drivers/`)**:
+  - [`drivers/http/README.md`](drivers/http/README.md) (`http-driver`): Standalone Go module wrapping Bifrost Core for stateless HTTP/API providers.
+  - [`drivers/acp/README.md`](drivers/acp/README.md) (`acp-driver`): Standalone Go module wrapping `agentrun` ACP agents.
+  - [`drivers/web/README.md`](drivers/web/README.md) (`web-driver`): Standalone Rust crate automating browser sessions over CDP using YAML site profiles.
 - **`internal/mcpbridge`**:
   - Provides the private stdio MCP subprocess mode and the in-gateway session HTTP facade (`mcpbridge.Facade`).
 

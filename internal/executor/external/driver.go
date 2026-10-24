@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -17,26 +18,108 @@ import (
 	"github.com/mytecor/llm-gateway/internal/session"
 )
 
+const catalogTTL = time.Minute
+
 type DriverEngine struct {
+	driver       string
 	command      []string
+	defaultCWD   string
 	toolStrategy string
+	mu           sync.Mutex
+	catalog      []session.ModelInfo
+	discoveryMu  sync.Mutex
+	catalogAt    time.Time
 }
 
 func NewDriver(cfg Config) (*DriverEngine, error) {
-	if len(cfg.Command) == 0 {
-		return nil, errors.New("external driver command is required")
-	}
-	if _, err := exec.LookPath(cfg.Command[0]); err != nil {
-		return nil, err
+	driver := strings.ToLower(strings.TrimSpace(cfg.Driver))
+	if driver == "" {
+		driver = DriverCustom
 	}
 	strategy := strings.ToLower(strings.TrimSpace(cfg.ToolStrategy))
-	if strategy == "" || strategy == ToolStrategyAuto {
-		strategy = ToolStrategyBoth
+
+	var command []string
+	switch driver {
+	case DriverACP:
+		if len(cfg.Command) == 0 || strings.TrimSpace(cfg.Command[0]) == "" {
+			return nil, errors.New("ACP driver requires an agent command")
+		}
+		if _, err := exec.LookPath(cfg.Command[0]); err != nil {
+			return nil, err
+		}
+		if strategy != "" && strategy != ToolStrategyAuto && strategy != ToolStrategyMCP {
+			return nil, fmt.Errorf("ACP driver supports only auto or mcp tool_strategy, got %q", cfg.ToolStrategy)
+		}
+		strategy = ToolStrategyMCP
+		acpBin, err := ResolveDriverBinary(DriverACP)
+		if err != nil {
+			return nil, err
+		}
+		command = append([]string{acpBin, "--"}, cfg.Command...)
+
+	case DriverWeb:
+		if len(cfg.Command) > 0 {
+			if _, err := exec.LookPath(cfg.Command[0]); err != nil {
+				return nil, err
+			}
+			command = append([]string(nil), cfg.Command...)
+		} else if strings.TrimSpace(cfg.Profile) != "" {
+			webBin, err := ResolveDriverBinary(DriverWeb)
+			if err != nil {
+				return nil, err
+			}
+			command = []string{webBin, "run", "--profile", cfg.Profile}
+			if cfg.CDPURL != "" {
+				command = append(command, "--cdp-url", cfg.CDPURL)
+			}
+			if cfg.Account != "" {
+				command = append(command, "--account", cfg.Account)
+			}
+			if cfg.StateDir != "" {
+				command = append(command, "--state-dir", cfg.StateDir)
+			}
+			if cfg.Heal {
+				command = append(command, "--heal")
+			}
+		} else {
+			return nil, errors.New("web driver requires profile or command")
+		}
+		if strategy == "" || strategy == ToolStrategyAuto {
+			strategy = ToolStrategyBoth
+		}
+
+	case DriverCustom:
+		if len(cfg.Command) == 0 || strings.TrimSpace(cfg.Command[0]) == "" {
+			return nil, errors.New("custom driver command is required")
+		}
+		if _, err := exec.LookPath(cfg.Command[0]); err != nil {
+			return nil, err
+		}
+		command = append([]string(nil), cfg.Command...)
+		if strategy == "" || strategy == ToolStrategyAuto {
+			strategy = ToolStrategyBoth
+		}
+
+	default:
+		return nil, fmt.Errorf("unknown session driver %q", cfg.Driver)
 	}
+
+	if strategy != ToolStrategyMCP && strategy != ToolStrategyPrompt && strategy != ToolStrategyWire && strategy != ToolStrategyBoth {
+		return nil, fmt.Errorf("unknown tool strategy %q", cfg.ToolStrategy)
+	}
+
 	return &DriverEngine{
-		command:      append([]string(nil), cfg.Command...),
+		driver:       driver,
+		command:      command,
+		defaultCWD:   cfg.DefaultCWD,
 		toolStrategy: strategy,
 	}, nil
+}
+
+type wireModelInfo struct {
+	ID               string   `json:"id"`
+	Name             string   `json:"name,omitempty"`
+	ReasoningEfforts []string `json:"reasoning_efforts,omitempty"`
 }
 
 type wireEvent struct {
@@ -49,11 +132,157 @@ type wireEvent struct {
 	Input     int64           `json:"input_tokens,omitempty"`
 	Output    int64           `json:"output_tokens,omitempty"`
 	Error     string          `json:"error,omitempty"`
+	Models    []wireModelInfo `json:"models,omitempty"`
+}
+
+func (e *DriverEngine) Models(ctx context.Context) ([]session.ModelInfo, error) {
+	if e.driver != DriverACP {
+		return nil, nil
+	}
+	e.discoveryMu.Lock()
+	defer e.discoveryMu.Unlock()
+	e.mu.Lock()
+	cached := append([]session.ModelInfo(nil), e.catalog...)
+	fresh := !e.catalogAt.IsZero() && time.Since(e.catalogAt) < catalogTTL
+	e.mu.Unlock()
+	if fresh {
+		return cached, nil
+	}
+
+	discoveryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	discovered, err := e.queryModels(discoveryCtx)
+	if err != nil {
+		if len(cached) > 0 {
+			return cached, nil
+		}
+		return nil, err
+	}
+	e.mu.Lock()
+	e.catalog = append([]session.ModelInfo(nil), discovered...)
+	e.catalogAt = time.Now()
+	e.mu.Unlock()
+	return discovered, nil
+}
+
+func (e *DriverEngine) queryModels(ctx context.Context) ([]session.ModelInfo, error) {
+	cmd := exec.CommandContext(ctx, e.command[0], e.command[1:]...)
+	if e.defaultCWD != "" {
+		cmd.Dir = e.defaultCWD
+	}
+	cmd.Stderr = io.Discard
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		return nil, err
+	}
+	defer func() {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	reqData, _ := json.Marshal(map[string]any{
+		"type": "models",
+		"cwd":  e.defaultCWD,
+	})
+	if _, err := stdin.Write(append(reqData, '\n')); err != nil {
+		return nil, err
+	}
+	_ = stdin.Close()
+
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 4096), 16<<20)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return nil, err
+		}
+		return nil, errors.New("driver closed without returning models")
+	}
+	var ev wireEvent
+	if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+		return nil, err
+	}
+	if ev.Type == "error" {
+		return nil, errors.New(ev.Error)
+	}
+	if ev.Type != "models" {
+		return nil, fmt.Errorf("unexpected driver response %q to models request", ev.Type)
+	}
+	result := make([]session.ModelInfo, 0, len(ev.Models))
+	for _, m := range ev.Models {
+		result = append(result, session.ModelInfo{
+			ID:               m.ID,
+			Name:             m.Name,
+			ReasoningEfforts: m.ReasoningEfforts,
+		})
+	}
+	return result, nil
+}
+
+func (e *DriverEngine) Resolve(ctx context.Context, model, effort string) (string, error) {
+	if model == "default" {
+		model = ""
+	}
+	if model == "" {
+		if effort != "" {
+			return "", errors.New("select a concrete model to choose effort")
+		}
+		return "", nil
+	}
+	if e.driver != DriverACP {
+		if effort != "" {
+			return "", errors.New("reasoning effort unsupported by this engine")
+		}
+		return model, nil
+	}
+
+	e.mu.Lock()
+	models := append([]session.ModelInfo(nil), e.catalog...)
+	e.mu.Unlock()
+	if len(models) == 0 {
+		discoveryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		discovered, err := e.Models(discoveryCtx)
+		cancel()
+		if err != nil {
+			if effort != "" {
+				return "", fmt.Errorf("reasoning effort discovery: %w", err)
+			}
+			return model, nil
+		}
+		models = discovered
+	}
+	for _, m := range models {
+		if m.ID == model && len(m.ReasoningEfforts) > 0 {
+			if effort == "" {
+				return fmt.Sprintf("%s[%s]", model, m.ReasoningEfforts[0]), nil
+			}
+			if slices.Contains(m.ReasoningEfforts, effort) {
+				return fmt.Sprintf("%s[%s]", model, effort), nil
+			}
+			return "", fmt.Errorf("reasoning effort %q is not available for model", effort)
+		}
+	}
+	if effort != "" {
+		return "", fmt.Errorf("reasoning effort %q is not available for model", effort)
+	}
+	return model, nil
 }
 
 type nativeSession struct {
 	cmd          *exec.Cmd
 	stdin        io.WriteCloser
+	bw           *bufio.Writer
+	writeMu      sync.Mutex
 	output       chan wireEvent
 	closed       chan struct{}
 	readDone     chan struct{}
@@ -120,6 +349,7 @@ func (e *DriverEngine) Start(ctx context.Context, spec session.Spec) (session.Se
 	s := &nativeSession{
 		cmd:          cmd,
 		stdin:        stdin,
+		bw:           bufio.NewWriter(stdin),
 		output:       make(chan wireEvent, 32),
 		closed:       make(chan struct{}),
 		readDone:     make(chan struct{}),
@@ -162,6 +392,7 @@ func (e *DriverEngine) Start(ctx context.Context, spec session.Spec) (session.Se
 
 	startPayload := map[string]any{
 		"type":      "start",
+		"cwd":       spec.CWD,
 		"model":     spec.Model,
 		"system":    system,
 		"resume_id": spec.ResumeID,
@@ -203,8 +434,30 @@ func (e *DriverEngine) Start(ctx context.Context, spec session.Spec) (session.Se
 }
 
 func (s *nativeSession) write(ctx context.Context, value any) error {
+	if ctx.Err() != nil {
+		_ = s.Close()
+		return ctx.Err()
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
 	done := make(chan error, 1)
-	go func() { done <- json.NewEncoder(s.stdin).Encode(value) }()
+	go func() {
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
+		select {
+		case <-s.closed:
+			done <- errors.New("external driver closed")
+			return
+		default:
+		}
+		if _, err := s.bw.Write(append(data, '\n')); err != nil {
+			done <- err
+			return
+		}
+		done <- s.bw.Flush()
+	}()
 	select {
 	case err := <-done:
 		return err
@@ -325,9 +578,13 @@ func (s *nativeSession) Close() error {
 		}
 	})
 	select {
-	case <-s.waitDone:
+	case <-eWait(s.waitDone):
 		return nil
 	case <-time.After(5 * time.Second):
 		return errors.New("external driver did not stop")
 	}
+}
+
+func eWait(ch <-chan struct{}) <-chan struct{} {
+	return ch
 }

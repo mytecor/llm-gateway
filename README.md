@@ -16,17 +16,19 @@ The gateway encapsulates upstream LLM providers: clients interact with virtual l
 
 ---
 
-## Native External Subprocess Executors (ACP & Web/Driver)
+## Modular External Drivers (`http`, `acp`, `web`, `custom`)
 
-In addition to standard API providers, the gateway executes external subprocesses directly (such as ACP agents via `agentrun` or browser automation drivers) without an intermediate HTTP service. A unified runtime manages conversations, history checkpoints, session resume, and pending tool calls. Tools provided in OpenAI `tools` are executed by the client (e.g., Pi); the gateway returns `tool_calls` and forwards the received tool results to the waiting engine. For ACP and drivers configured with MCP, this operates through a session-scoped MCP bridge.
+All provider integrations are isolated from the core gateway into standalone driver binaries under `drivers/` communicating over a unified NDJSON stdio protocol:
+- **`"driver": "http"` (default):** Stateless multiplexed HTTP/API driver ([`drivers/http/README.md`](drivers/http/README.md), binary `http-driver`) powered by Bifrost Core.
+- **`"driver": "acp"`:** Stateful ACP agent session driver ([`drivers/acp/README.md`](drivers/acp/README.md), binary `acp-driver`) powered by `agentrun` with session-scoped MCP tool bridging.
+- **`"driver": "web"`:** Stateful CDP browser automation driver ([`drivers/web/README.md`](drivers/web/README.md), binary `web-driver`) written in Rust with YAML site profiles (`profile`, `cdp_url`, `account`).
+- **`"driver": "custom"`:** Custom external subprocess speaking the gateway NDJSON protocol directly (`command`, `tool_strategy`: `"auto"`, `"mcp"`, `"prompt"`, `"wire"`, `"both"`).
 
-Existing providers use `executor: "bifrost"` by default. Native external executors are configured via `executor: "external"` (or `"subprocess"`, with legacy aliases `"acp"` and `"web"`), `command`, `protocol` (`"acp"` or `"driver"`), and optional `tool_strategy` (`"auto"`, `"mcp"`, `"prompt"`, `"wire"`, `"both"`). They support the text Chat Completions API; stateful routes require a single target, `race count: 1`, and disabled retry/fallback/hedge/continue/repetition.
+Stateful session routes (`acp`, `web`, `custom`) support the text Chat Completions API and require a single target, `race count: 1`, and disabled retry/fallback/hedge/continue/repetition.
 
 - [Session Configuration Example](configs/config.sessions.example.json)
-- [Sessions, Tools, and Browser Driver Protocol Documentation](docs/session-executors.md)
+- [Sessions, Tools, and Driver Protocol Documentation](docs/session-executors.md)
 - [Architecture Deep-Dive](ARCHITECTURE.md)
-
-The [Rust web driver](drivers/web/README.md) embeds `../parser` and runs YAML site profiles over CDP. A Muse profile is included; login and root system text-file cleanup were checked against the live UI. Real requests, SSE responses, conversation continuity and restart/resume were verified through the gateway. Build it with `make build-web`.
 
 ---
 

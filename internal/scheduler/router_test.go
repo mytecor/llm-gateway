@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mytecor/llm-gateway/internal/executor/bifrost"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/subsystem"
@@ -1312,7 +1311,7 @@ func TestMeaningfulPayloadRecognizesReasoningAndTools(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if !bifrost.MeaningfulPayload([]byte(test.data), test.event) {
+			if !model.MeaningfulPayload([]byte(test.data), test.event) {
 				t.Fatalf("payload was not meaningful: %s", test.data)
 			}
 		})

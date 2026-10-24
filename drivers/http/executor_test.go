@@ -1,8 +1,6 @@
-package bifrost
+package main
 
 import (
-	"github.com/mytecor/llm-gateway/internal/model"
-	"github.com/mytecor/llm-gateway/internal/policy"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,30 +13,19 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
-func bifrostTestConfig(t *testing.T, upstreamURL string) *policy.CompiledConfig {
-	t.Helper()
-	cfg := policy.TestConfig()
-	cfg.Providers = cfg.Providers[:1]
-	cfg.Providers[0].ID = "mock-openai"
-	cfg.Providers[0].InferenceURL = upstreamURL
-	cfg.Providers[0].APIKey = "provider-secret"
-	cfg.Providers[0].AllowPrivateNetwork = true
-	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "mock-openai"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 1),
-	}
-	compiled, err := policy.CompileConfig(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return compiled
+func testProviders(upstreamURL string) []ProviderConfig {
+	return []ProviderConfig{{
+		ID:                    "mock-openai",
+		BaseProvider:          "openai",
+		InferenceURL:          upstreamURL,
+		APIKey:                "provider-secret",
+		RequestTimeoutSeconds: 60,
+		AllowPrivateNetwork:   true,
+	}}
 }
 
 func TestBifrostKeyForVertexCarriesProjectRegionAndCredentials(t *testing.T) {
-	provider := policy.Provider{
+	provider := ProviderConfig{
 		ID:                    "google-vertex",
 		VertexProjectID:       "mytecor",
 		VertexRegion:          "global",
@@ -60,8 +47,7 @@ func TestBifrostKeyForVertexCarriesProjectRegionAndCredentials(t *testing.T) {
 }
 
 func TestBifrostExecutorRegistersVertexAsStandardProvider(t *testing.T) {
-	cfg := policy.TestConfig()
-	cfg.Providers = []policy.Provider{{
+	providers := []ProviderConfig{{
 		ID:                    "google-vertex",
 		BaseProvider:          "vertex",
 		InferenceURL:          "https://aiplatform.googleapis.com",
@@ -69,18 +55,7 @@ func TestBifrostExecutorRegistersVertexAsStandardProvider(t *testing.T) {
 		VertexRegion:          "global",
 		VertexAuthCredentials: `{"type":"service_account"}`,
 	}}
-	cfg.Rules = []policy.Rule{
-		policy.FilterModel("smart", "smart"),
-		policy.FilterProvider("smart", "google-vertex"),
-		policy.MapRuleHelper("smart", "gemini-4-argon"),
-		policy.RankRuleHelper("smart"),
-		policy.RaceRuleHelper("smart", 1),
-	}
-	compiled, err := policy.CompileConfig(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	executor, err := NewBifrostExecutor(context.Background(), compiled)
+	executor, err := NewExecutor(context.Background(), providers)
 	if err != nil {
 		t.Fatalf("Vertex must initialize through Bifrost's standard provider path: %v", err)
 	}
@@ -88,20 +63,24 @@ func TestBifrostExecutorRegistersVertexAsStandardProvider(t *testing.T) {
 	if got := executor.bifrostProviders["google-vertex"]; got != schemas.Vertex {
 		t.Fatalf("google-vertex resolved to %q, want %q", got, schemas.Vertex)
 	}
-	request, callErr := executor.chatRequest(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), model.Target{
-		Provider: "google-vertex",
-		Model:    "gemini-4-argon",
-	}, []byte(`{"messages":[{"role":"user","content":"hello"}]}`))
+	request, callErr := executor.chatRequest(
+		schemas.NewBifrostContext(context.Background(), schemas.NoDeadline),
+		"google-vertex",
+		"gemini-4-argon",
+		[]byte(`{"messages":[{"role":"user","content":"hello"}]}`),
+	)
 	if callErr != nil {
 		t.Fatal(callErr)
 	}
 	if request.Provider != schemas.Vertex {
 		t.Fatalf("request provider = %q, want %q", request.Provider, schemas.Vertex)
 	}
-	responsesRequest, callErr := executor.responsesRequest(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), model.Target{
-		Provider: "google-vertex",
-		Model:    "gemini-4-argon",
-	}, []byte(`{"input":"hello"}`))
+	responsesRequest, callErr := executor.responsesRequest(
+		schemas.NewBifrostContext(context.Background(), schemas.NoDeadline),
+		"google-vertex",
+		"gemini-4-argon",
+		[]byte(`{"input":"hello"}`),
+	)
 	if callErr != nil {
 		t.Fatal(callErr)
 	}
@@ -132,16 +111,12 @@ func TestBifrostExecutorCustomProviderChat(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	compiled := bifrostTestConfig(t, upstream.URL)
-	executor, err := NewBifrostExecutor(context.Background(), compiled)
+	executor, err := NewExecutor(context.Background(), testProviders(upstream.URL))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer executor.Close()
-	body, callErr := executor.Do(context.Background(), model.Target{Provider: "mock-openai", Model: "native-model"}, model.ExecuteRequest{
-		Kind: model.RequestChat,
-		Body: []byte(`{"model":"standard","messages":[{"role":"user","content":"hello"}]}`),
-	})
+	body, callErr := executor.Do(context.Background(), "mock-openai", "native-model", "chat", []byte(`{"model":"standard","messages":[{"role":"user","content":"hello"}]}`))
 	if callErr != nil {
 		t.Fatal(callErr)
 	}
@@ -158,19 +133,16 @@ func TestBifrostExecutorCustomProviderChat(t *testing.T) {
 }
 
 func TestStripParamsRemovesUnsupportedReasoningControl(t *testing.T) {
-	// hyperfusion/litellm rejects zai's `thinking` control with 400; the
-	// provider declares strip_params, and the gateway must drop the key
-	// before sending while keeping the rest of the body intact.
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		var body map[string]any
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			t.Error(err)
 		}
 		if _, leaked := body["thinking"]; leaked {
-			t.Errorf("thinking reach upstream despite strip_params: %#v", body)
+			t.Errorf("thinking reached upstream despite strip_params: %#v", body)
 		}
 		if _, leaked := body["reasoning_effort"]; leaked {
-			t.Errorf("reasoning_effort reach upstream despite strip_params: %#v", body)
+			t.Errorf("reasoning_effort reached upstream despite strip_params: %#v", body)
 		}
 		if body["model"] != "native-model" {
 			t.Errorf("model rewrite lost: %#v", body["model"])
@@ -183,30 +155,20 @@ func TestStripParamsRemovesUnsupportedReasoningControl(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	compiled := bifrostTestConfig(t, upstream.URL)
-	compiled.Raw.Providers[0].StripParams = []string{"thinking", "reasoning_effort"}
-	compiled2, err := policy.CompileConfig(compiled.Raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	executor, err := NewBifrostExecutor(context.Background(), compiled2)
+	providers := testProviders(upstream.URL)
+	providers[0].StripParams = []string{"thinking", "reasoning_effort"}
+	executor, err := NewExecutor(context.Background(), providers)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer executor.Close()
-	_, callErr := executor.Do(context.Background(), model.Target{Provider: "mock-openai", Model: "native-model"}, model.ExecuteRequest{
-		Kind: model.RequestChat,
-		Body: []byte(`{"model":"standard","thinking":{"type":"enabled"},"reasoning_effort":"high","messages":[{"role":"user","content":"hello"}]}`),
-	})
+	_, callErr := executor.Do(context.Background(), "mock-openai", "native-model", "chat", []byte(`{"model":"standard","thinking":{"type":"enabled"},"reasoning_effort":"high","messages":[{"role":"user","content":"hello"}]}`))
 	if callErr != nil {
 		t.Fatal(callErr)
 	}
 }
 
 func TestSetParamsForcesDisabledThinking(t *testing.T) {
-	// The gateway hard-disables reasoning upstream where the provider accepts
-	// the control: set_params forces thinking:{"type":"disabled"} and, being
-	// applied after strip_params, wins even if the client sent its own value.
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		var body map[string]any
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
@@ -227,26 +189,17 @@ func TestSetParamsForcesDisabledThinking(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	compiled := bifrostTestConfig(t, upstream.URL)
-	compiled.Raw.Providers[0].StripParams = []string{"thinking"}
-	compiled.Raw.Providers[0].SetParams = map[string]json.RawMessage{
+	providers := testProviders(upstream.URL)
+	providers[0].StripParams = []string{"thinking"}
+	providers[0].SetParams = map[string]json.RawMessage{
 		"thinking": json.RawMessage(`{"type":"disabled"}`),
 	}
-	compiled2, err := policy.CompileConfig(compiled.Raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	executor, err := NewBifrostExecutor(context.Background(), compiled2)
+	executor, err := NewExecutor(context.Background(), providers)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer executor.Close()
-	_, callErr := executor.Do(context.Background(), model.Target{Provider: "mock-openai", Model: "native-model"}, model.ExecuteRequest{
-		Kind: model.RequestChat,
-		// The client tried to enable thinking; strip_params drops it, then
-		// set_params forces the disabled value.
-		Body: []byte(`{"model":"standard","thinking":{"type":"enabled"},"messages":[{"role":"user","content":"hello"}]}`),
-	})
+	_, callErr := executor.Do(context.Background(), "mock-openai", "native-model", "chat", []byte(`{"model":"standard","thinking":{"type":"enabled"},"messages":[{"role":"user","content":"hello"}]}`))
 	if callErr != nil {
 		t.Fatal(callErr)
 	}
@@ -254,9 +207,6 @@ func TestSetParamsForcesDisabledThinking(t *testing.T) {
 
 func TestBifrostExecutorCustomProviderChatWithVersionedBasePath(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		// A provider whose OpenAI-compatible server lives under an arbitrary
-		// routed prefix (e.g. Supabase Edge Functions at
-		// "/functions/v1/gonka") must not have a duplicate "/v1" re-appended.
 		if request.URL.Path != "/functions/v1/gonka/chat/completions" {
 			t.Errorf("unexpected path %s", request.URL.Path)
 			writer.WriteHeader(http.StatusNotFound)
@@ -267,16 +217,12 @@ func TestBifrostExecutorCustomProviderChatWithVersionedBasePath(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	compiled := bifrostTestConfig(t, upstream.URL+"/functions/v1/gonka")
-	executor, err := NewBifrostExecutor(context.Background(), compiled)
+	executor, err := NewExecutor(context.Background(), testProviders(upstream.URL+"/functions/v1/gonka"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer executor.Close()
-	_, callErr := executor.Do(context.Background(), model.Target{Provider: "mock-openai", Model: "native-model"}, model.ExecuteRequest{
-		Kind: model.RequestChat,
-		Body: []byte(`{"model":"standard","messages":[{"role":"user","content":"hello"}]}`),
-	})
+	_, callErr := executor.Do(context.Background(), "mock-openai", "native-model", "chat", []byte(`{"model":"standard","messages":[{"role":"user","content":"hello"}]}`))
 	if callErr != nil {
 		t.Fatal(callErr)
 	}
@@ -299,20 +245,16 @@ func TestBifrostExecutorStreamingMeaningfulChunk(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	compiled := bifrostTestConfig(t, upstream.URL)
-	executor, err := NewBifrostExecutor(context.Background(), compiled)
+	executor, err := NewExecutor(context.Background(), testProviders(upstream.URL))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer executor.Close()
-	stream, callErr := executor.Stream(context.Background(), model.Target{Provider: "mock-openai", Model: "native-model"}, model.ExecuteRequest{
-		Kind: model.RequestChat,
-		Body: []byte(`{"model":"standard","stream":true,"messages":[{"role":"user","content":"hello"}]}`),
-	})
+	stream, callErr := executor.Stream(context.Background(), "mock-openai", "native-model", "chat", []byte(`{"model":"standard","stream":true,"messages":[{"role":"user","content":"hello"}]}`), 0)
 	if callErr != nil {
 		t.Fatal(callErr)
 	}
-	var meaningful []model.StreamEvent
+	var meaningful []StreamChunk
 	deadline := time.After(2 * time.Second)
 	for {
 		select {
@@ -354,16 +296,12 @@ func TestBifrostExecutorResponses(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	compiled := bifrostTestConfig(t, upstream.URL)
-	executor, err := NewBifrostExecutor(context.Background(), compiled)
+	executor, err := NewExecutor(context.Background(), testProviders(upstream.URL))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer executor.Close()
-	body, callErr := executor.Do(context.Background(), model.Target{Provider: "mock-openai", Model: "native-model"}, model.ExecuteRequest{
-		Kind: model.RequestResponses,
-		Body: []byte(`{"model":"standard","input":"hello"}`),
-	})
+	body, callErr := executor.Do(context.Background(), "mock-openai", "native-model", "responses", []byte(`{"model":"standard","input":"hello"}`))
 	if callErr != nil {
 		t.Fatal(callErr)
 	}
@@ -404,20 +342,16 @@ func TestBifrostExecutorResponsesStreaming(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	compiled := bifrostTestConfig(t, upstream.URL)
-	executor, err := NewBifrostExecutor(context.Background(), compiled)
+	executor, err := NewExecutor(context.Background(), testProviders(upstream.URL))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer executor.Close()
-	stream, callErr := executor.Stream(context.Background(), model.Target{Provider: "mock-openai", Model: "native-model"}, model.ExecuteRequest{
-		Kind: model.RequestResponses,
-		Body: []byte(`{"model":"standard","stream":true,"input":"hello"}`),
-	})
+	stream, callErr := executor.Stream(context.Background(), "mock-openai", "native-model", "responses", []byte(`{"model":"standard","stream":true,"input":"hello"}`), 0)
 	if callErr != nil {
 		t.Fatal(callErr)
 	}
-	var events []model.StreamEvent
+	var events []StreamChunk
 	for event := range stream {
 		if event.Err != nil {
 			t.Fatal(event.Err)
@@ -433,15 +367,15 @@ func TestBifrostExecutorResponsesStreaming(t *testing.T) {
 }
 
 func TestBifrostErrorClassification(t *testing.T) {
-	for status, expected := range map[int]model.ErrorClass{
-		429: model.ErrorRateLimit,
-		401: model.ErrorUpstream,
-		402: model.ErrorUpstream,
-		403: model.ErrorUpstream,
-		404: model.ErrorNotFound,
-		410: model.ErrorNotFound,
-		503: model.ErrorUpstream,
-		504: model.ErrorTimeout,
+	for status, expected := range map[int]string{
+		429: "429",
+		401: "5xx",
+		402: "5xx",
+		403: "5xx",
+		404: "404",
+		410: "404",
+		503: "5xx",
+		504: "timeout",
 	} {
 		status := status
 		got := classifyBifrostError(context.Background(), &schemas.BifrostError{StatusCode: &status})

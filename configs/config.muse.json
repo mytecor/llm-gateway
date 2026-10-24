@@ -7,19 +7,11 @@
   "providers": [
     {
       "id": "muse-provider",
-      "executor": "external",
-      "protocol": "driver",
+      "driver": "web",
       "tool_strategy": "prompt",
-      "command": [
-        "./drivers/web/target/release/web-driver",
-        "run",
-        "--profile",
-        "./drivers/web/sites/muse.yaml",
-        "--cdp-url",
-        "http://127.0.0.1:19222",
-        "--account",
-        "main"
-      ],
+      "profile": "./drivers/web/sites/muse.yaml",
+      "cdp_url": "http://127.0.0.1:19222",
+      "account": "main",
       "session": {
         "default_cwd": ".",
         "allowed_roots": ["."],

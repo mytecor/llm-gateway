@@ -1,4 +1,4 @@
-package acp
+package main
 
 import (
 	"context"
@@ -22,6 +22,7 @@ func (e *catalogEngine) ListModels(context.Context, agentrun.Session) ([]agentru
 	e.lists++
 	return e.models, e.err
 }
+
 func TestEffortSelectionAndCatalogCache(t *testing.T) {
 	source := &catalogEngine{models: []agentrun.ModelInfo{
 		{ID: "model[low]", Name: "Model low"},

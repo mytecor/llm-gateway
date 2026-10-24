@@ -14,8 +14,6 @@ import (
 	"strings"
 	"time"
 
-	bifrost "github.com/maximhq/bifrost/core"
-	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/telemetry"
 )
@@ -28,20 +26,29 @@ const defaultCatalogRefresh = 10 * time.Minute
 // without emitting events for a long time.
 const defaultStreamIdleTimeout = 5 * time.Minute
 
-// BifrostProviderKey translates the stable provider ID into the key Bifrost expects.
-func BifrostProviderKey(provider Provider) (schemas.ModelProvider, bool, error) {
-	baseProvider := schemas.ModelProvider(provider.BaseProvider)
-	if bifrost.IsSupportedBaseProvider(baseProvider) {
-		return schemas.ModelProvider(provider.ID), true, nil
+var supportedHTTPBaseProviders = map[string]bool{
+	"anthropic":   true,
+	"bedrock":     true,
+	"cohere":      true,
+	"gemini":      true,
+	"openai":      true,
+	"huggingface": true,
+	"replicate":   true,
+}
+
+// HTTPProviderKey translates the stable provider ID into the key the HTTP driver expects.
+func HTTPProviderKey(provider Provider) (string, bool, error) {
+	if supportedHTTPBaseProviders[provider.BaseProvider] {
+		return provider.ID, true, nil
 	}
-	if baseProvider == schemas.Vertex {
-		return schemas.Vertex, false, nil
+	if provider.BaseProvider == "vertex" {
+		return "vertex", false, nil
 	}
 	return "", false, fmt.Errorf("provider %q has unsupported Bifrost base_provider %q", provider.ID, provider.BaseProvider)
 }
 
-func bifrostProviderKey(provider Provider) (schemas.ModelProvider, bool, error) {
-	return BifrostProviderKey(provider)
+func bifrostProviderKey(provider Provider) (string, bool, error) {
+	return HTTPProviderKey(provider)
 }
 
 // CheckConfig validates a configuration file as requested by the "check" CLI command.
@@ -120,12 +127,16 @@ type SessionSettings struct {
 }
 
 type Provider struct {
-	// Executor defaults to bifrost for backward compatibility.
-	// Native executors: "acp", "web", "external", "subprocess".
-	Executor     string           `json:"executor,omitempty"`
-	Protocol     string           `json:"protocol,omitempty"`
+	// Driver selects the external provider integration driver:
+	// "http" (default), "acp", "web", or "custom".
+	Driver       string           `json:"driver,omitempty"`
 	ToolStrategy string           `json:"tool_strategy,omitempty"`
 	Command      []string         `json:"command,omitempty"`
+	Profile      string           `json:"profile,omitempty"`
+	CDPURL       string           `json:"cdp_url,omitempty"`
+	Account      string           `json:"account,omitempty"`
+	StateDir     string           `json:"state_dir,omitempty"`
+	Heal         bool             `json:"heal,omitempty"`
 	Session      *SessionSettings `json:"session,omitempty"`
 	ID           string           `json:"id"`
 	BaseProvider string           `json:"base_provider"`
@@ -685,51 +696,41 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 		provider.VertexRegion = strings.TrimSpace(provider.VertexRegion)
 		provider.VertexAuthCredentials = strings.TrimSpace(provider.VertexAuthCredentials)
 		provider.StripParams = trimNonEmpty(provider.StripParams)
-		provider.Executor = strings.TrimSpace(provider.Executor)
-		if provider.Executor == "" {
-			provider.Executor = "bifrost"
+		provider.Driver = strings.ToLower(strings.TrimSpace(provider.Driver))
+		if provider.Driver == "" {
+			provider.Driver = "http"
 		}
-		if provider.Executor != "bifrost" && provider.Executor != "acp" && provider.Executor != "web" && provider.Executor != "external" && provider.Executor != "subprocess" {
-			return nil, fmt.Errorf("provider %q: unknown executor %q", provider.ID, provider.Executor)
+		if provider.Driver != "http" && provider.Driver != "acp" && provider.Driver != "web" && provider.Driver != "custom" {
+			return nil, fmt.Errorf("provider %q: unknown driver %q", provider.ID, provider.Driver)
 		}
 		if _, exists := compiled.Providers[provider.ID]; exists {
 			return nil, fmt.Errorf("duplicate provider id %q", provider.ID)
 		}
-		if provider.Executor == "bifrost" && (provider.Protocol != "" || provider.ToolStrategy != "") {
-			return nil, fmt.Errorf("provider %q: protocol and tool_strategy are not supported by bifrost executor", provider.ID)
+		if provider.Driver == "http" && provider.ToolStrategy != "" {
+			return nil, fmt.Errorf("provider %q: tool_strategy is not supported by http driver", provider.ID)
 		}
-		if provider.Executor != "bifrost" {
-			if provider.ID == "" || len(provider.Command) == 0 || strings.TrimSpace(provider.Command[0]) == "" {
+		if provider.Driver != "http" {
+			if provider.ID == "" {
+				return nil, errors.New("session providers require id")
+			}
+			hasCommand := len(provider.Command) > 0 && strings.TrimSpace(provider.Command[0]) != ""
+			provider.Profile = strings.TrimSpace(provider.Profile)
+			if provider.Driver == "web" {
+				if !hasCommand && provider.Profile == "" {
+					return nil, errors.New("web driver requires profile or command")
+				}
+			} else if !hasCommand {
 				return nil, errors.New("session providers require id and command")
 			}
 			if provider.InferenceURL != "" || provider.BaseProvider != "" || provider.ModelsURL != "" || provider.APIKey != "" || provider.VertexAuthCredentials != "" || len(provider.Headers) > 0 || len(provider.StripParams) > 0 || len(provider.SetParams) > 0 || provider.BifrostMaxRetries != 0 {
-				return nil, fmt.Errorf("provider %q: HTTP/Bifrost settings are not supported by %s executor", provider.ID, provider.Executor)
-			}
-			provider.Protocol = strings.TrimSpace(strings.ToLower(provider.Protocol))
-			if provider.Executor == "acp" {
-				if provider.Protocol != "" && provider.Protocol != "acp" {
-					return nil, fmt.Errorf("provider %q: executor acp conflicts with protocol %q", provider.ID, provider.Protocol)
-				}
-				provider.Protocol = "acp"
-			} else if provider.Executor == "web" {
-				if provider.Protocol != "" && provider.Protocol != "driver" && provider.Protocol != "web" && provider.Protocol != "ndjson" {
-					return nil, fmt.Errorf("provider %q: executor web conflicts with protocol %q", provider.ID, provider.Protocol)
-				}
-				provider.Protocol = "driver"
-			} else if provider.Executor == "external" || provider.Executor == "subprocess" {
-				if provider.Protocol == "" {
-					provider.Protocol = "driver"
-				}
-				if provider.Protocol != "acp" && provider.Protocol != "driver" && provider.Protocol != "web" && provider.Protocol != "ndjson" {
-					return nil, fmt.Errorf("provider %q: unknown external protocol %q", provider.ID, provider.Protocol)
-				}
+				return nil, fmt.Errorf("provider %q: HTTP settings are not supported by %s driver", provider.ID, provider.Driver)
 			}
 			provider.ToolStrategy = strings.TrimSpace(strings.ToLower(provider.ToolStrategy))
 			if provider.ToolStrategy != "" && provider.ToolStrategy != "auto" && provider.ToolStrategy != "mcp" && provider.ToolStrategy != "prompt" && provider.ToolStrategy != "wire" && provider.ToolStrategy != "both" {
 				return nil, fmt.Errorf("provider %q: unknown tool strategy %q", provider.ID, provider.ToolStrategy)
 			}
-			if provider.Protocol == "acp" && provider.ToolStrategy != "" && provider.ToolStrategy != "auto" && provider.ToolStrategy != "mcp" {
-				return nil, fmt.Errorf("provider %q: ACP protocol supports only auto or mcp tool_strategy, got %q", provider.ID, provider.ToolStrategy)
+			if provider.Driver == "acp" && provider.ToolStrategy != "" && provider.ToolStrategy != "auto" && provider.ToolStrategy != "mcp" {
+				return nil, fmt.Errorf("provider %q: ACP driver supports only auto or mcp tool_strategy, got %q", provider.ID, provider.ToolStrategy)
 			}
 			if provider.Session == nil {
 				provider.Session = &SessionSettings{}
@@ -778,6 +779,20 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 				settings.StorePath = path
 			}
 			provider.Session = &settings
+			if provider.Profile != "" {
+				pPath, err := filepath.Abs(provider.Profile)
+				if err != nil {
+					return nil, err
+				}
+				provider.Profile = pPath
+			}
+			if provider.StateDir != "" {
+				sPath, err := filepath.Abs(provider.StateDir)
+				if err != nil {
+					return nil, err
+				}
+				provider.StateDir = sPath
+			}
 			if provider.RequestTimeout.Duration < 0 || provider.Cooldown.Duration < 0 {
 				return nil, fmt.Errorf("provider %q: durations must not be negative", provider.ID)
 			}
@@ -796,8 +811,8 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 			compiled.Providers[provider.ID] = provider
 			continue
 		}
-		if len(provider.Command) > 0 || provider.Session != nil {
-			return nil, fmt.Errorf("provider %q: command/session require a session executor", provider.ID)
+		if len(provider.Command) > 0 || provider.Session != nil || provider.Profile != "" {
+			return nil, fmt.Errorf("provider %q: command/session/profile require a session driver", provider.ID)
 		}
 		if provider.ID == "" || provider.InferenceURL == "" {
 			return nil, errors.New("every provider requires id and inference_url")
@@ -823,10 +838,10 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 		if err != nil {
 			return nil, err
 		}
-		if existingID, exists := bifrostProviderKeys[string(providerKey)]; exists {
+		if existingID, exists := bifrostProviderKeys[providerKey]; exists {
 			return nil, fmt.Errorf("providers %q and %q resolve to the same Bifrost provider key %q", existingID, provider.ID, providerKey)
 		}
-		bifrostProviderKeys[string(providerKey)] = provider.ID
+		bifrostProviderKeys[providerKey] = provider.ID
 		if provider.RequestTimeout.Duration == 0 {
 			provider.RequestTimeout.Duration = 60 * time.Second
 		}

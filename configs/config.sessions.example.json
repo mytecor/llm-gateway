@@ -5,8 +5,7 @@
   "providers": [
     {
       "id": "coding-agent",
-      "executor": "external",
-      "protocol": "acp",
+      "driver": "acp",
       "tool_strategy": "mcp",
       "command": ["claude-agent-acp"],
       "session": {
@@ -19,8 +18,7 @@
     },
     {
       "id": "browser-model",
-      "executor": "external",
-      "protocol": "driver",
+      "driver": "custom",
       "tool_strategy": "prompt",
       "command": ["python3", "/absolute/path/to/browser_driver.py"],
       "session": {

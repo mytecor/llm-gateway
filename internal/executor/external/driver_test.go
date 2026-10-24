@@ -15,11 +15,11 @@ func TestExternalDriverConfigValidation(t *testing.T) {
 	if _, err := New(Config{}); err == nil {
 		t.Fatal("expected error on empty command")
 	}
-	if _, err := New(Config{Command: []string{"nonexistent-binary-12345"}}); err == nil {
+	if _, err := New(Config{Driver: DriverCustom, Command: []string{"nonexistent-binary-12345"}}); err == nil {
 		t.Fatal("expected error on nonexistent binary")
 	}
-	if _, err := New(Config{Protocol: "unknown", Command: []string{"go"}}); err == nil {
-		t.Fatal("expected error on unknown protocol")
+	if _, err := New(Config{Driver: "unknown", Command: []string{"go"}}); err == nil {
+		t.Fatal("expected error on unknown driver")
 	}
 }
 
@@ -30,7 +30,11 @@ func TestDriverSessionUpdateWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine, err := NewDriver(Config{Command: []string{executable, "-test.run=^TestDriverSessionUpdateProcess$"}, ToolStrategy: ToolStrategyPrompt})
+	engine, err := NewDriver(Config{
+		Driver:       DriverCustom,
+		Command:      []string{executable, "-test.run=^TestDriverSessionUpdateProcess$"},
+		ToolStrategy: ToolStrategyPrompt,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,8 +83,8 @@ func TestDriverSessionUpdateProcess(t *testing.T) {
 func TestExternalACPRejectsUnsupportedToolStrategies(t *testing.T) {
 	for _, strategy := range []string{"prompt", "wire", "both", " Prompt ", "unknown"} {
 		t.Run(strategy, func(t *testing.T) {
-			_, err := New(Config{Protocol: " ACP ", Command: []string{"go"}, ToolStrategy: strategy})
-			if err == nil || !strings.Contains(err.Error(), "ACP protocol supports only auto or mcp tool_strategy") {
+			_, err := New(Config{Driver: " ACP ", Command: []string{"go"}, ToolStrategy: strategy})
+			if err == nil || !strings.Contains(err.Error(), "ACP driver supports only auto or mcp tool_strategy") {
 				t.Fatalf("expected unsupported ACP tool strategy error, got %v", err)
 			}
 		})
@@ -88,7 +92,7 @@ func TestExternalACPRejectsUnsupportedToolStrategies(t *testing.T) {
 }
 
 func TestExternalDriverToolStrategyNormalization(t *testing.T) {
-	d, err := NewDriver(Config{Command: []string{"go"}, ToolStrategy: "AUTO"})
+	d, err := NewDriver(Config{Driver: DriverCustom, Command: []string{"go"}, ToolStrategy: "AUTO"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +100,7 @@ func TestExternalDriverToolStrategyNormalization(t *testing.T) {
 		t.Fatalf("expected auto strategy to normalize to %q, got %q", ToolStrategyBoth, d.toolStrategy)
 	}
 
-	d, err = NewDriver(Config{Command: []string{"go"}, ToolStrategy: "Prompt"})
+	d, err = NewDriver(Config{Driver: DriverCustom, Command: []string{"go"}, ToolStrategy: "Prompt"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,11 +109,8 @@ func TestExternalDriverToolStrategyNormalization(t *testing.T) {
 	}
 }
 
-func TestExternalNewDispatchesProtocol(t *testing.T) {
-	ctx := context.Background()
-	_ = ctx
-	// Driver protocol with "go" binary
-	e, err := New(Config{Protocol: ProtocolDriver, Command: []string{"go"}})
+func TestExternalNewDispatchesDriver(t *testing.T) {
+	e, err := New(Config{Driver: DriverCustom, Command: []string{"go"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,8 +118,15 @@ func TestExternalNewDispatchesProtocol(t *testing.T) {
 		t.Fatalf("expected *DriverEngine, got %T", e)
 	}
 
-	// Web alias
-	e, err = New(Config{Protocol: ProtocolWeb, Command: []string{"go"}})
+	e, err = New(Config{Driver: DriverWeb, Command: []string{"go"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := e.(*DriverEngine); !ok {
+		t.Fatalf("expected *DriverEngine, got %T", e)
+	}
+
+	e, err = New(Config{Driver: DriverACP, Command: []string{"go"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,3 +134,55 @@ func TestExternalNewDispatchesProtocol(t *testing.T) {
 		t.Fatalf("expected *DriverEngine, got %T", e)
 	}
 }
+
+func TestDriverModelsAndEffortResolution(t *testing.T) {
+	t.Setenv("MODELS_DRIVER_TEST_PROCESS", "1")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := &DriverEngine{
+		driver:  DriverACP,
+		command: []string{executable, "-test.run=^TestDriverModelsProcess$"},
+	}
+	models, err := engine.Models(context.Background())
+	if err != nil || len(models) != 1 || len(models[0].ReasoningEfforts) != 2 {
+		t.Fatal(models, err)
+	}
+	for _, tc := range []struct{ model, effort, want string }{
+		{"model", "high", "model[high]"},
+		{"model", "", "model[low]"},
+		{"default", "", ""},
+	} {
+		got, err := engine.Resolve(context.Background(), tc.model, tc.effort)
+		if err != nil || got != tc.want {
+			t.Fatal(got, err)
+		}
+	}
+	if _, err := engine.Resolve(context.Background(), "model", "unknown"); err == nil {
+		t.Fatal("accepted unknown effort")
+	}
+	if _, err := engine.Resolve(context.Background(), "default", "high"); err == nil {
+		t.Fatal("accepted effort for backend default")
+	}
+}
+
+func TestDriverModelsProcess(t *testing.T) {
+	if os.Getenv("MODELS_DRIVER_TEST_PROCESS") != "1" {
+		return
+	}
+	decoder := json.NewDecoder(os.Stdin)
+	var input map[string]any
+	if decoder.Decode(&input) != nil {
+		os.Exit(2)
+	}
+	encoder := json.NewEncoder(os.Stdout)
+	_ = encoder.Encode(wireEvent{
+		Type: "models",
+		Models: []wireModelInfo{
+			{ID: "model", Name: "Model", ReasoningEfforts: []string{"low", "high"}},
+		},
+	})
+	os.Exit(0)
+}
+
