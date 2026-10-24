@@ -31,10 +31,9 @@ argument arrays passed directly to exec; no shell interpretation is performed.
   native-session restore, pending tool calls, cancellation and turn deadlines.
 - `internal/executor/session`: OpenAI request/result and SSE adaptation.
 - `internal/executor/external`: unified NDJSON driver client supporting both stateless multiplexed HTTP drivers (`http-driver`) and stateful session drivers (`acp-driver`, `web-driver`, custom drivers) with configurable tool delivery strategies (MCP, prompt codec, wire).
-- `internal/mcpbridge`: private stdio MCP subprocess mode and in-gateway session facade.
-- `drivers/http`, `drivers/acp`, `drivers/web`: isolated external driver implementations (each with its own dependency tree and README).
+- `drivers/http`, `drivers/acp`, `drivers/web`: isolated external driver implementations (each with its own dependency tree and README; `drivers/acp` owns the private stdio MCP bridge and session facade).
 
-All session drivers implement `session.Engine` / `session.Session` via `external.DriverEngine`. The core gateway binary contains no provider-specific SDK dependencies (`bifrost` or `agentrun`).
+All session drivers implement `session.Engine` / `session.Session` via `external.DriverEngine`. The core gateway binary is pure Go standard library with zero external SDK dependencies (`bifrost`, `agentrun`, or `modelcontextprotocol`).
 
 Session and tool lifecycle code is adapted from agentrun-openai. Its second HTTP
 server, authentication and public CLI have not been copied. The source project
@@ -141,7 +140,7 @@ The driver replies:
 Gateway starts a process with the resolved working directory and sends:
 
 ```json
-{"type":"start","model":"default","effort":"","system":"...","resume_id":"","tools":[],"mcp_servers":[]}
+{"type":"start","model":"default","effort":"","system":"...","resume_id":"","tools":[]}
 ```
 
 The driver replies `{"type":"ready","resume_id":"optional-native-id"}`.

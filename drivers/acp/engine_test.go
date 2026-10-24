@@ -2,11 +2,24 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
 	"testing"
 
 	"github.com/dmora/agentrun"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+func init() {
+	if len(os.Args) > 1 && os.Args[1] == "__mcp-bridge" {
+		if err := runMCPBridge(context.Background(), os.Args[2:]); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+}
 
 type catalogEngine struct {
 	models []agentrun.ModelInfo
@@ -57,5 +70,41 @@ func TestEffortSelectionAndCatalogCache(t *testing.T) {
 	source.err = errors.New("temporarily unavailable")
 	if models, err = engine.Models(context.Background()); err != nil || len(models) != 1 {
 		t.Fatal("lost last known catalog", models, err)
+	}
+}
+
+func TestMCPBridgeFacadeRoundTrip(t *testing.T) {
+	tools := []Tool{{
+		Name:        "echo",
+		Description: "Echoes input",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"x":{"type":"integer"}},"required":["x"]}`),
+	}}
+	facade, err := NewFacade(context.Background(), tools, func(_ context.Context, name string, args json.RawMessage) (string, error) {
+		return name + ":" + string(args), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer facade.Close()
+
+	desc := facade.Descriptor()
+	cmd := exec.Command(desc.Command, desc.Args...)
+	clientSession, err := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1"}, nil).Connect(context.Background(), &mcp.CommandTransport{Command: cmd}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientSession.Close()
+
+	listed, err := clientSession.ListTools(context.Background(), nil)
+	if err != nil || len(listed.Tools) != 1 || listed.Tools[0].Name != "echo" {
+		t.Fatalf("unexpected tools list: %+v, err=%v", listed, err)
+	}
+	res, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"x": 42}})
+	if err != nil || res.IsError || len(res.Content) != 1 {
+		t.Fatalf("unexpected tool result: %+v, err=%v", res, err)
+	}
+	textContent, ok := res.Content[0].(*mcp.TextContent)
+	if !ok || textContent.Text != `echo:{"x":42}` {
+		t.Fatalf("unexpected text content: %+v", res.Content[0])
 	}
 }

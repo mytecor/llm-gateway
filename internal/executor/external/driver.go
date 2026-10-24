@@ -17,7 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/mytecor/llm-gateway/internal/mcpbridge"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/session"
 	"github.com/mytecor/llm-gateway/internal/telemetry"
@@ -69,27 +68,27 @@ type wireModelInfo struct {
 }
 
 type wireInbound struct {
-	Type                string                       `json:"type"`
-	ID                  string                       `json:"id,omitempty"`
-	ToolStrategy        string                       `json:"tool_strategy,omitempty"`
-	ModelsURL           string                       `json:"models_url,omitempty"`
-	HasSession          bool                         `json:"has_session,omitempty"`
-	RequestTimeoutMs    int64                        `json:"request_timeout_ms,omitempty"`
-	Config              map[string]any               `json:"config,omitempty"`
-	CWD                 string                       `json:"cwd,omitempty"`
-	Provider            string                       `json:"provider,omitempty"`
-	Model               string                       `json:"model,omitempty"`
-	ReasoningEffort     string                       `json:"reasoning_effort,omitempty"`
-	System              string                       `json:"system,omitempty"`
-	ResumeID            string                       `json:"resume_id,omitempty"`
-	Tools               []session.FunctionTool       `json:"tools,omitempty"`
-	MCPServers          []mcpbridge.ServerDescriptor `json:"mcp_servers,omitempty"`
-	Text                string                       `json:"text,omitempty"`
-	Content             string                       `json:"content,omitempty"`
-	Kind                string                       `json:"kind,omitempty"`
-	Stream              bool                         `json:"stream,omitempty"`
-	StreamIdleTimeoutMs int64                        `json:"stream_idle_timeout_ms,omitempty"`
-	Body                json.RawMessage              `json:"body,omitempty"`
+	Type                string                 `json:"type"`
+	ID                  string                 `json:"id,omitempty"`
+	ToolStrategy        string                 `json:"tool_strategy,omitempty"`
+	ModelsURL           string                 `json:"models_url,omitempty"`
+	HasSession          bool                   `json:"has_session,omitempty"`
+	RequestTimeoutMs    int64                  `json:"request_timeout_ms,omitempty"`
+	Config              map[string]any         `json:"config,omitempty"`
+	CWD                 string                 `json:"cwd,omitempty"`
+	Provider            string                 `json:"provider,omitempty"`
+	Model               string                 `json:"model,omitempty"`
+	ReasoningEffort     string                 `json:"reasoning_effort,omitempty"`
+	System              string                 `json:"system,omitempty"`
+	ResumeID            string                 `json:"resume_id,omitempty"`
+	Tools               []session.FunctionTool `json:"tools,omitempty"`
+	Text                string                 `json:"text,omitempty"`
+	Content             string                 `json:"content,omitempty"`
+	Error               string                 `json:"error,omitempty"`
+	Kind                string                 `json:"kind,omitempty"`
+	Stream              bool                   `json:"stream,omitempty"`
+	StreamIdleTimeoutMs int64                  `json:"stream_idle_timeout_ms,omitempty"`
+	Body                json.RawMessage        `json:"body,omitempty"`
 }
 
 type wireEvent struct {
@@ -896,7 +895,6 @@ type nativeSession struct {
 	once         sync.Once
 	spec         session.Spec
 	init         wireEvent
-	facade       *mcpbridge.Facade
 	toolStrategy string
 }
 
@@ -906,57 +904,22 @@ func (d *Driver) Start(ctx context.Context, spec session.Spec) (session.Session,
 	// Drivers own browser/external credentials; stderr is deliberately excluded from logs.
 	cmd.Stderr = io.Discard
 
-	env := os.Environ()
 	if len(d.env) > 0 {
-		env = appendEnv(env, d.env)
-	}
-
-	var facade *mcpbridge.Facade
-	var mcpServers []mcpbridge.ServerDescriptor
-	if d.toolStrategy == ToolStrategyMCP && len(spec.Tools) > 0 {
-		var bridgeTools []mcpbridge.Tool
-		for _, tool := range spec.Tools {
-			bridgeTools = append(bridgeTools, mcpbridge.Tool{Name: tool.Function.Name, Description: tool.Function.Description, InputSchema: tool.Function.Parameters})
-		}
-		var err error
-		facade, err = mcpbridge.NewFacade(context.Background(), bridgeTools, spec.CallTool)
-		if err != nil {
-			return nil, err
-		}
-		desc := facade.Descriptor()
-		mcpServers = []mcpbridge.ServerDescriptor{desc}
-		descJSON, _ := json.Marshal(mcpServers)
-		env = append(env,
-			"MCP_SERVERS="+string(descJSON),
-			"MCP_SERVER_COMMAND="+desc.Command,
-			"MCP_SERVER_ARGS="+strings.Join(desc.Args, " "),
-		)
-	}
-	if len(d.env) > 0 || len(mcpServers) > 0 {
-		cmd.Env = env
+		cmd.Env = appendEnv(os.Environ(), d.env)
 	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		if facade != nil {
-			facade.Close()
-		}
 		return nil, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
-		if facade != nil {
-			facade.Close()
-		}
 		return nil, err
 	}
 	if err = cmd.Start(); err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
-		if facade != nil {
-			facade.Close()
-		}
 		return nil, err
 	}
 
@@ -969,7 +932,6 @@ func (d *Driver) Start(ctx context.Context, spec session.Spec) (session.Session,
 		readDone:     make(chan struct{}),
 		waitDone:     make(chan struct{}),
 		spec:         spec,
-		facade:       facade,
 		toolStrategy: d.toolStrategy,
 	}
 
@@ -1005,14 +967,13 @@ func (d *Driver) Start(ctx context.Context, spec session.Spec) (session.Session,
 	}
 
 	startPayload := wireInbound{
-		Type:       "start",
-		Config:     d.driverConfig,
-		CWD:        spec.CWD,
-		Model:      spec.Model,
-		System:     system,
-		ResumeID:   spec.ResumeID,
-		Tools:      spec.Tools,
-		MCPServers: mcpServers,
+		Type:     "start",
+		Config:   d.driverConfig,
+		CWD:      spec.CWD,
+		Model:    spec.Model,
+		System:   system,
+		ResumeID: spec.ResumeID,
+		Tools:    spec.Tools,
 	}
 
 	if err = s.write(ctx, startPayload); err != nil {
@@ -1083,6 +1044,13 @@ func (s *nativeSession) write(ctx context.Context, value any) error {
 }
 
 func (s *nativeSession) Run(ctx context.Context, prompt string, emit func(session.Event) error) error {
+	ctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	defer func() {
+		cancel()
+		wg.Wait()
+	}()
+
 	if s.init.Type != "" {
 		if err := emit(session.Event{Kind: session.EventInit, ResumeID: s.init.ResumeID}); err != nil {
 			return err
@@ -1092,10 +1060,13 @@ func (s *nativeSession) Run(ctx context.Context, prompt string, emit func(sessio
 	if err := s.write(ctx, wireInbound{Type: "prompt", Text: prompt}); err != nil {
 		return err
 	}
+	callErrCh := make(chan error, 1)
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case err := <-callErrCh:
+			return err
 		case event, ok := <-s.output:
 			if !ok {
 				return errors.New("external driver closed before completion")
@@ -1128,9 +1099,16 @@ func (s *nativeSession) Run(ctx context.Context, prompt string, emit func(sessio
 				if s.toolStrategy == ToolStrategyPrompt {
 					continue
 				}
-				if err := s.call(ctx, event.ID, event.Name, event.Arguments); err != nil {
-					return err
-				}
+				wg.Add(1)
+				go func(id, name string, args json.RawMessage) {
+					defer wg.Done()
+					if err := s.call(ctx, id, name, args); err != nil {
+						select {
+						case callErrCh <- err:
+						default:
+						}
+					}
+				}(event.ID, event.Name, event.Arguments)
 			case "message":
 				if s.toolStrategy == ToolStrategyWire || s.toolStrategy == ToolStrategyMCP {
 					continue
@@ -1168,6 +1146,7 @@ func (s *nativeSession) call(ctx context.Context, id, name string, args json.Raw
 	}
 	result, err := s.spec.CallTool(ctx, name, args)
 	if err != nil {
+		_ = s.write(ctx, wireInbound{Type: "tool_result", ID: id, Error: err.Error()})
 		return err
 	}
 	return s.write(ctx, wireInbound{Type: "tool_result", ID: id, Content: result})
@@ -1177,9 +1156,6 @@ func (s *nativeSession) Close() error {
 	s.once.Do(func() {
 		close(s.closed)
 		_ = s.stdin.Close()
-		if s.facade != nil {
-			s.facade.Close()
-		}
 		// Give external drivers an opportunity to clean up in a finally/deferred
 		// block before escalating to a hard kill.
 		_ = s.cmd.Process.Signal(os.Interrupt)

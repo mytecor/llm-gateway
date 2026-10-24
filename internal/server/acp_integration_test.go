@@ -4,18 +4,20 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/mytecor/llm-gateway/internal/executor"
-	"github.com/mytecor/llm-gateway/internal/mcpbridge"
 	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/scheduler"
 	"github.com/mytecor/llm-gateway/internal/session"
@@ -30,16 +32,163 @@ func init() {
 		runWebWorker()
 		os.Exit(0)
 	}
-	if len(os.Args) > 1 && os.Args[1] == "__mcp-bridge" {
-		if err := mcpbridge.Run(context.Background(), os.Args[2:]); err != nil {
-			os.Exit(1)
-		}
-		os.Exit(0)
-	}
 	if len(os.Args) > 1 && os.Args[1] == "--test-acp-worker" {
 		runToolACP()
 		os.Exit(0)
 	}
+}
+
+type testMCPResponse struct {
+	Result json.RawMessage
+	Err    error
+}
+
+type testMCPClient struct {
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	writeMu sync.Mutex
+	enc     *json.Encoder
+	nextID  atomic.Int64
+	mu      sync.Mutex
+	pending map[int64]chan testMCPResponse
+	done    chan struct{}
+}
+
+func connectTestMCP(command string, args ...string) (*testMCPClient, error) {
+	cmd := exec.Command(command, args...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		return nil, err
+	}
+	c := &testMCPClient{
+		cmd:     cmd,
+		stdin:   stdin,
+		enc:     json.NewEncoder(stdin),
+		pending: make(map[int64]chan testMCPResponse),
+		done:    make(chan struct{}),
+	}
+	go func() {
+		defer close(c.done)
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 4096), 4<<20)
+		for scanner.Scan() {
+			var msg struct {
+				ID     *int64          `json:"id"`
+				Result json.RawMessage `json:"result"`
+				Error  *struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if json.Unmarshal(scanner.Bytes(), &msg) != nil || msg.ID == nil {
+				continue
+			}
+			c.mu.Lock()
+			ch, ok := c.pending[*msg.ID]
+			c.mu.Unlock()
+			if ok {
+				var resp testMCPResponse
+				if msg.Error != nil {
+					resp.Err = errors.New(msg.Error.Message)
+				} else {
+					resp.Result = msg.Result
+				}
+				ch <- resp
+			}
+		}
+	}()
+	if _, err := c.call("initialize", map[string]any{
+		"protocolVersion": "2024-11-05",
+		"capabilities":    map[string]any{},
+		"clientInfo":      map[string]string{"name": "fake-acp", "version": "1"},
+	}); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
+	c.writeMu.Lock()
+	_ = c.enc.Encode(map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"})
+	c.writeMu.Unlock()
+	return c, nil
+}
+
+func (c *testMCPClient) call(method string, params any) (json.RawMessage, error) {
+	id := c.nextID.Add(1)
+	ch := make(chan testMCPResponse, 1)
+	c.mu.Lock()
+	c.pending[id] = ch
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+	}()
+	c.writeMu.Lock()
+	err := c.enc.Encode(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+	c.writeMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	select {
+	case resp := <-ch:
+		return resp.Result, resp.Err
+	case <-c.done:
+		return nil, errors.New("MCP bridge closed")
+	}
+}
+
+func (c *testMCPClient) ListTools() ([]json.RawMessage, error) {
+	raw, err := c.call("tools/list", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Tools []json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out.Tools, nil
+}
+
+func (c *testMCPClient) CallTool(name string, args map[string]any) (string, bool, error) {
+	raw, err := c.call("tools/call", map[string]any{"name": name, "arguments": args})
+	if err != nil {
+		return "", false, err
+	}
+	var out struct {
+		IsError bool `json:"isError"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", false, err
+	}
+	var text strings.Builder
+	for _, item := range out.Content {
+		if item.Type == "text" {
+			text.WriteString(item.Text)
+		}
+	}
+	return text.String(), out.IsError, nil
+}
+
+func (c *testMCPClient) Close() error {
+	_ = c.stdin.Close()
+	if c.cmd.Process != nil {
+		_ = c.cmd.Process.Kill()
+	}
+	return c.cmd.Wait()
 }
 
 // This subprocess speaks ACP over real stdio and launches the descriptor it
@@ -55,10 +204,10 @@ func runToolACP() {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 4096), 4<<20)
 	enc := json.NewEncoder(os.Stdout)
-	var session *mcp.ClientSession
+	var mcpSession *testMCPClient
 	defer func() {
-		if session != nil {
-			session.Close()
+		if mcpSession != nil {
+			_ = mcpSession.Close()
 		}
 	}()
 	for scanner.Scan() {
@@ -101,19 +250,18 @@ func runToolACP() {
 			}
 			if len(p.MCPServers) > 0 {
 				d := p.MCPServers[0]
-				cmd := exec.Command(d.Command, d.Args...)
 				var err error
-				session, err = mcp.NewClient(&mcp.Implementation{Name: "fake-acp", Version: "1"}, nil).Connect(context.Background(), &mcp.CommandTransport{Command: cmd}, nil)
+				mcpSession, err = connectTestMCP(d.Command, d.Args...)
 				if err != nil {
 					fail(err)
 					continue
 				}
-				tools, err := session.ListTools(context.Background(), nil)
+				tools, err := mcpSession.ListTools()
 				if err != nil {
 					fail(err)
 					continue
 				}
-				logEvent(map[string]any{"tools": tools.Tools})
+				logEvent(map[string]any{"tools": tools})
 			}
 			if req.Method == "session/load" {
 				reply(map[string]any{})
@@ -136,17 +284,17 @@ func runToolACP() {
 				select {}
 			}
 			if strings.Contains(prompt, "parallel") {
-				errors := make(chan error, 2)
+				errs := make(chan error, 2)
 				for _, name := range []string{"foo", "bar"} {
 					go func(name string) {
-						result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: map[string]any{"x": 1}})
-						if err == nil && result.IsError {
+						_, isErr, err := mcpSession.CallTool(name, map[string]any{"x": 1})
+						if err == nil && isErr {
 							err = fmt.Errorf("tool error")
 						}
-						errors <- err
+						errs <- err
 					}(name)
 				}
-				one, two := <-errors, <-errors
+				one, two := <-errs, <-errs
 				if one != nil {
 					fail(one)
 				} else if two != nil {
@@ -157,7 +305,7 @@ func runToolACP() {
 				}
 				continue
 			}
-			if session == nil || strings.Contains(prompt, "no-call") {
+			if mcpSession == nil || strings.Contains(prompt, "no-call") {
 				text("final")
 				reply(map[string]string{"stopReason": "end_turn"})
 				continue
@@ -169,22 +317,16 @@ func runToolACP() {
 			failed := false
 			for _, name := range names {
 				text("before " + name)
-				result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: map[string]any{"x": 1}})
+				content, isErr, err := mcpSession.CallTool(name, map[string]any{"x": 1})
 				if err != nil {
 					fail(err)
 					failed = true
 					break
 				}
-				if result.IsError {
-					fail(fmt.Errorf("MCP error: %v", result.Content))
+				if isErr {
+					fail(fmt.Errorf("MCP error: %s", content))
 					failed = true
 					break
-				}
-				content := ""
-				for _, c := range result.Content {
-					if c, ok := c.(*mcp.TextContent); ok {
-						content += c.Text
-					}
 				}
 				logEvent(map[string]any{"result": content, "name": name})
 			}

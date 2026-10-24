@@ -3,11 +3,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dmora/agentrun"
@@ -24,18 +26,13 @@ type ModelInfo struct {
 	ReasoningEfforts []string `json:"reasoning_efforts,omitempty"`
 }
 
-type MCPServer struct {
-	Name    string   `json:"name"`
-	Command string   `json:"command"`
-	Args    []string `json:"args"`
-}
-
 type Spec struct {
-	CWD        string
-	Model      string
-	System     string
-	ResumeID   string
-	MCPServers []MCPServer
+	CWD      string
+	Model    string
+	System   string
+	ResumeID string
+	Tools    []Tool
+	Emit     func(Event) error
 }
 
 type Capabilities struct {
@@ -49,16 +46,19 @@ type Capabilities struct {
 }
 
 type Event struct {
-	Type         string        `json:"type"`
-	Text         string        `json:"text,omitempty"`
-	ResumeID     string        `json:"resume_id,omitempty"`
-	Input        int64         `json:"input_tokens,omitempty"`
-	Output       int64         `json:"output_tokens,omitempty"`
-	Error        string        `json:"error,omitempty"`
-	Models       []ModelInfo   `json:"models,omitempty"`
-	ToolStrategy string        `json:"tool_strategy,omitempty"`
-	Capabilities *Capabilities `json:"capabilities,omitempty"`
-	Config       map[string]any `json:"config,omitempty"`
+	Type         string          `json:"type"`
+	ID           string          `json:"id,omitempty"`
+	Name         string          `json:"name,omitempty"`
+	Arguments    json.RawMessage `json:"arguments,omitempty"`
+	Text         string          `json:"text,omitempty"`
+	ResumeID     string          `json:"resume_id,omitempty"`
+	Input        int64           `json:"input_tokens,omitempty"`
+	Output       int64           `json:"output_tokens,omitempty"`
+	Error        string          `json:"error,omitempty"`
+	Models       []ModelInfo     `json:"models,omitempty"`
+	ToolStrategy string          `json:"tool_strategy,omitempty"`
+	Capabilities *Capabilities   `json:"capabilities,omitempty"`
+	Config       map[string]any  `json:"config,omitempty"`
 }
 
 type Engine struct {
@@ -186,6 +186,11 @@ func splitEffort(id string) (string, string, bool) {
 }
 
 func (e *Engine) Start(ctx context.Context, spec Spec) (*Session, string, error) {
+	s := &Session{
+		emit:    spec.Emit,
+		pending: make(map[string]chan toolCallResult),
+		closed:  make(chan struct{}),
+	}
 	options := map[string]string{agentrun.OptionHITL: string(agentrun.HITLOff)}
 	if spec.ResumeID != "" {
 		options[agentrun.OptionResumeID] = spec.ResumeID
@@ -194,18 +199,25 @@ func (e *Engine) Start(ctx context.Context, spec Spec) (*Session, string, error)
 		options[agentrun.OptionSystemPrompt] = spec.System
 	}
 	native := agentrun.Session{CWD: spec.CWD, Model: spec.Model, Options: options}
-	for _, srv := range spec.MCPServers {
-		native.MCPServers = append(native.MCPServers, agentrun.MCPServer{
-			Name:    srv.Name,
-			Command: srv.Command,
-			Args:    srv.Args,
-		})
+	if len(spec.Tools) > 0 {
+		facade, err := NewFacade(context.Background(), spec.Tools, s.callTool)
+		if err != nil {
+			return nil, "", err
+		}
+		s.facade = facade
+		desc := facade.Descriptor()
+		native.MCPServers = []agentrun.MCPServer{{
+			Name:    desc.Name,
+			Command: desc.Command,
+			Args:    desc.Args,
+		}}
 	}
 	proc, err := e.engine.Start(ctx, native)
 	if err != nil {
+		_ = s.Close()
 		return nil, "", classifyNativeError(err)
 	}
-	s := &Session{process: proc}
+	s.process = proc
 	for {
 		select {
 		case <-ctx.Done():
@@ -231,9 +243,75 @@ func (e *Engine) Start(ctx context.Context, spec Spec) (*Session, string, error)
 	}
 }
 
+type toolCallResult struct {
+	content string
+	err     string
+}
+
 type Session struct {
-	process agentrun.Process
-	once    sync.Once
+	process    agentrun.Process
+	facade     *Facade
+	emit       func(Event) error
+	nextCallID atomic.Uint64
+	mu         sync.Mutex
+	pending    map[string]chan toolCallResult
+	closed     chan struct{}
+	once       sync.Once
+}
+
+func (s *Session) callTool(ctx context.Context, name string, args json.RawMessage) (string, error) {
+	if s.emit == nil {
+		return "", errors.New("tool emitter is unavailable")
+	}
+	id := fmt.Sprintf("mcp-%d", s.nextCallID.Add(1))
+	ch := make(chan toolCallResult, 1)
+	s.mu.Lock()
+	select {
+	case <-s.closed:
+		s.mu.Unlock()
+		return "", errors.New("ACP session closed")
+	default:
+	}
+	s.pending[id] = ch
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.pending, id)
+		s.mu.Unlock()
+	}()
+
+	if err := s.emit(Event{
+		Type:      "tool_call",
+		ID:        id,
+		Name:      name,
+		Arguments: args,
+	}); err != nil {
+		return "", err
+	}
+
+	select {
+	case res := <-ch:
+		if res.err != "" {
+			return "", errors.New(res.err)
+		}
+		return res.content, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-s.closed:
+		return "", errors.New("ACP session closed")
+	}
+}
+
+func (s *Session) ResolveToolCall(id, content, errMsg string) {
+	s.mu.Lock()
+	ch, ok := s.pending[id]
+	s.mu.Unlock()
+	if ok {
+		select {
+		case ch <- toolCallResult{content: content, err: errMsg}:
+		default:
+		}
+	}
 }
 
 func (s *Session) RunTurn(ctx context.Context, prompt string, emit func(Event) error) error {
@@ -284,9 +362,15 @@ func (s *Session) RunTurn(ctx context.Context, prompt string, emit func(Event) e
 func (s *Session) Close() error {
 	var err error
 	s.once.Do(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		err = s.process.Stop(ctx)
+		close(s.closed)
+		if s.facade != nil {
+			s.facade.Close()
+		}
+		if s.process != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err = s.process.Stop(ctx)
+		}
 	})
 	return err
 }

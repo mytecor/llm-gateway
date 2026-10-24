@@ -15,6 +15,17 @@ import (
 	"syscall"
 )
 
+type functionTool struct {
+	Type     string         `json:"type"`
+	Function toolDefinition `json:"function"`
+}
+
+type toolDefinition struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
 type inboundMessage struct {
 	Type             string          `json:"type"`
 	ID               string          `json:"id,omitempty"`
@@ -30,7 +41,9 @@ type inboundMessage struct {
 	System           string          `json:"system,omitempty"`
 	ResumeID         string          `json:"resume_id,omitempty"`
 	Text             string          `json:"text,omitempty"`
-	MCPServers       []MCPServer     `json:"mcp_servers,omitempty"`
+	Content          string          `json:"content,omitempty"`
+	Error            string          `json:"error,omitempty"`
+	Tools            []functionTool  `json:"tools,omitempty"`
 }
 
 type rawACPConfig struct {
@@ -79,6 +92,12 @@ func main() {
 	if len(args) > 0 && args[0] == "--" {
 		args = args[1:]
 	}
+	if len(args) > 0 && args[0] == "__mcp-bridge" {
+		if err := runMCPBridge(context.Background(), args[1:]); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -88,6 +107,7 @@ func main() {
 }
 
 func serve(ctx context.Context, defaultCommand []string, r io.Reader, w io.Writer) error {
+	ctx, cancel := context.WithCancel(ctx)
 	var writeMu sync.Mutex
 	bw := bufio.NewWriter(w)
 	emit := func(ev Event) error {
@@ -106,9 +126,14 @@ func serve(ctx context.Context, defaultCommand []string, r io.Reader, w io.Write
 	cwd, _ := os.Getwd()
 	var engine *Engine
 	var sess *Session
+	var turnDone chan error
 	defer func() {
+		cancel()
 		if sess != nil {
 			_ = sess.Close()
+		}
+		if turnDone != nil {
+			<-turnDone
 		}
 	}()
 
@@ -150,6 +175,18 @@ func serve(ctx context.Context, defaultCommand []string, r io.Reader, w io.Write
 		select {
 		case <-ctx.Done():
 			return nil
+		case err := <-turnDone:
+			turnDone = nil
+			if err != nil {
+				if errors.Is(err, errSessionNotFound) {
+					_ = emit(Event{Type: "session_not_found"})
+				} else {
+					_ = emit(Event{Type: "error", Error: err.Error()})
+				}
+				return nil
+			}
+			_ = emit(Event{Type: "done"})
+			continue
 		case line, ok = <-lines:
 			if !ok {
 				select {
@@ -231,13 +268,22 @@ func serve(ctx context.Context, defaultCommand []string, r io.Reader, w io.Write
 			if dir == "" {
 				dir = cwd
 			}
+			var bridgeTools []Tool
+			for _, t := range msg.Tools {
+				bridgeTools = append(bridgeTools, Tool{
+					Name:        t.Function.Name,
+					Description: t.Function.Description,
+					InputSchema: t.Function.Parameters,
+				})
+			}
 			var resumeID string
 			sess, resumeID, err = eng.Start(ctx, Spec{
-				CWD:        dir,
-				Model:      resolvedModel,
-				System:     msg.System,
-				ResumeID:   msg.ResumeID,
-				MCPServers: msg.MCPServers,
+				CWD:      dir,
+				Model:    resolvedModel,
+				System:   msg.System,
+				ResumeID: msg.ResumeID,
+				Tools:    bridgeTools,
+				Emit:     emit,
 			})
 			if err != nil {
 				if errors.Is(err, errSessionNotFound) {
@@ -253,16 +299,21 @@ func serve(ctx context.Context, defaultCommand []string, r io.Reader, w io.Write
 				_ = emit(Event{Type: "error", Error: "ACP session not started"})
 				return nil
 			}
-			err := sess.RunTurn(ctx, msg.Text, emit)
-			if err != nil {
-				if errors.Is(err, errSessionNotFound) {
-					_ = emit(Event{Type: "session_not_found"})
-				} else {
-					_ = emit(Event{Type: "error", Error: err.Error()})
-				}
+			if turnDone != nil {
+				_ = emit(Event{Type: "error", Error: "ACP turn already in progress"})
 				return nil
 			}
-			_ = emit(Event{Type: "done"})
+			turnDone = make(chan error, 1)
+			promptText := msg.Text
+			go func() {
+				turnDone <- sess.RunTurn(ctx, promptText, emit)
+			}()
+		case "tool_result":
+			if sess == nil {
+				_ = emit(Event{Type: "error", Error: "ACP session not started"})
+				return nil
+			}
+			sess.ResolveToolCall(msg.ID, msg.Content, msg.Error)
 		default:
 			_ = emit(Event{Type: "error", Error: "unknown ACP driver command: " + msg.Type})
 		}

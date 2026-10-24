@@ -6,10 +6,12 @@ Standalone Go module implementing the stateful Agent Client Protocol (ACP) sessi
 
 ```text
 drivers/acp/
-  go.mod            Standalone Go module (isolates agentrun ACP backend dependencies)
-  main.go           NDJSON stdio loop for `models` discovery and `start`/`prompt` sessions
-  engine.go         agentrun ACP process lifecycle, MCP server injection, model[effort] resolution
-  engine_test.go    Unit and subprocess integration tests (models, effort, restore, effective model)
+  go.mod            Standalone Go module (isolates agentrun and MCP SDK dependencies)
+  main.go           NDJSON stdio loop for `models` discovery, `start`/`prompt` sessions, and `__mcp-driver` entrypoint
+  engine.go         agentrun ACP process lifecycle, MCP bridge orchestration, model[effort] resolution
+  bridge.go         Private stdio MCP subprocess mode (`__mcp-bridge`)
+  facade.go         Session-scoped loopback HTTP facade translating MCP tool calls to NDJSON `tool_call`/`tool_result`
+  engine_test.go    Unit and subprocess integration tests (models, effort, MCP bridge round-trip, effective model)
 ```
 
 ## Build and test
@@ -49,7 +51,7 @@ When `llm-gateway` resolves a provider with `"driver": "acp"`, [`external.Resolv
 ```
 
 - `driver`: `"acp"`.
-- `tool_strategy`: `"auto"` (default) or `"mcp"`. Both deliver client tools to the ACP agent through the gateway's session-scoped stdio MCP bridge (`mcp_servers` in the `start` handshake).
+- `tool_strategy`: `"auto"` (default) or `"mcp"`. Both deliver client `tools` from the gateway `start` handshake to the ACP agent through `acp-driver`'s session-scoped stdio MCP bridge (`acp-driver __mcp-bridge`) and forward tool invocations over NDJSON `tool_call` / `tool_result` events.
 - `command`: Executable and arguments of the target ACP agent binary (passed directly via `exec`, no shell interpretation).
 
 ## Behavior and ACP specifics

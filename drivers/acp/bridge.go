@@ -1,6 +1,4 @@
-// Package mcpbridge implements the private stdio MCP subprocess. The gateway
-// owns tool execution state; this process only translates MCP to local IPC.
-package mcpbridge
+package main
 
 import (
 	"bytes"
@@ -20,18 +18,20 @@ type Tool struct {
 	Description string          `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"inputSchema"`
 }
+
 type Call struct {
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
 }
+
 type Result struct {
 	Content string `json:"content"`
 	Error   string `json:"error,omitempty"`
 }
 
-// Run serves stdio until the ACP client or the owning gateway disconnects.
+// runMCPBridge serves stdio until the ACP client or the owning acp-driver disconnects.
 // address is a numeric loopback host:port, never an arbitrary remote URL.
-func Run(ctx context.Context, args []string) error {
+func runMCPBridge(ctx context.Context, args []string) error {
 	if len(args) != 2 {
 		return fmt.Errorf("__mcp-bridge requires address and session token")
 	}
@@ -88,8 +88,8 @@ func Run(ctx context.Context, args []string) error {
 	server := mcp.NewServer(&mcp.Implementation{Name: "agentrun-openai", Version: "1"}, nil)
 	for _, t := range definitions {
 		server.AddTool(&mcp.Tool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			// Headers are sent immediately by the gateway; the body may wait for an
-			// OpenAI tool result for the whole remaining ACP turn timeout.
+			// Headers are sent immediately by acp-driver; the body waits for the
+			// gateway tool result for the remaining ACP turn timeout.
 			resp, err := request(ctx, "/call", Call{Name: req.Params.Name, Arguments: req.Params.Arguments})
 			if err != nil {
 				return nil, err
