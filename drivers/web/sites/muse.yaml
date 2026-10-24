@@ -1,0 +1,188 @@
+version: 1
+site: muse
+origin: https://muse.ai
+
+# Rules are native ast-grep configurations. Keys become parser rule IDs.
+# Email/OTP form and root text-file cleanup inspected on live Camoufox.
+# Conversation creation, response extraction and restart/resume verified via gateway.
+rules:
+  chat-input:
+    language: Html
+    message: Chat message composer
+    rule:
+      kind: element
+      any:
+        - regex: '^<textarea(?:\s|>)'
+        - regex: '^<div[^>]*contenteditable="true"[^>]*role="textbox"'
+        - regex: '^<div[^>]*role="textbox"[^>]*contenteditable="true"'
+  thread-ready:
+    language: Html
+    message: Chat history has finished its initial loading animation
+    rule:
+      kind: element
+      regex: '^<div[^>]*data-initial-history-motion="complete"'
+  send-button:
+    language: Html
+    message: Send chat message
+    rule:
+      kind: element
+      regex: '^<button[^>]*data-pel-click="chat_send_message"'
+  assistant-message:
+    language: Html
+    message: Assistant response only
+    rule:
+      kind: element
+      regex: '^<[^ >]+[^>]*data-message-role="assistant"'
+  generation-active:
+    language: Html
+    message: Generation stop button or busy chat area
+    rule:
+      kind: element
+      regex: '^<[^ >]+[^>]*data-testid="(?:hatch-composer-stop-button|hatch-chat-typing-indicator)"'
+  login-email:
+    language: Html
+    message: Email field on login form
+    rule:
+      kind: element
+      regex: '^<input[^>]*(?:type="email"|aria-label="Mobile number or email")'
+  login-password:
+    language: Html
+    message: Password field on login form
+    rule:
+      kind: element
+      regex: '^<input[^>]*type="password"'
+  login-code:
+    language: Html
+    message: One-time verification code
+    rule:
+      kind: element
+      regex: '^<input[^>]*(?:autocomplete="one-time-code"|aria-label="6-digit security code")'
+  login-submit:
+    language: Html
+    message: Submit login form
+    rule:
+      kind: element
+      regex: '^<button[^>]*type="submit"'
+  system-files-ready:
+    language: Html
+    message: System files header confirms the library view
+    rule:
+      kind: element
+      regex: '^<[^ >]+[^>]*data-testid="hatch-route-header-content"[^>]*>[\s\S]*System files'
+  system-files-loaded:
+    language: Html
+    message: Loaded system files collection (file/folder rows or an explicit empty state)
+    rule:
+      kind: element
+      any:
+        - all:
+            - regex: '^<div[^>]*role="button"'
+            - regex: '^<div[^>]*class="group flex cursor-pointer flex-col'
+        - regex: '^<(?:p|div|span)[^>]*>\s*(?:No files(?: yet| found)?|No system files(?: yet)?)\s*</'
+  system-file-row:
+    language: Html
+    message: Root system text file row (folders are excluded)
+    rule:
+      kind: element
+      all:
+        - regex: '^<div[^>]*role="button"'
+        - regex: '^<div[^>]*class="group flex cursor-pointer flex-col'
+        - has:
+            kind: element
+            regex: '^<span[^>]*>Text</span>$'
+            stopBy: end
+  system-file-menu:
+    language: Html
+    message: More actions in the opened system file editor
+    rule:
+      kind: element
+      regex: '^<button[^>]*data-testid="hatch-file-editor-more-actions"'
+  delete-system-file:
+    language: Html
+    message: Explicit delete action in the open file editor menu
+    rule:
+      kind: element
+      all:
+        - regex: '^<[^ >]+[^>]*role="menuitem"'
+        - any:
+            - regex: '^<[^ >]+[^>]*class="[^"]*(?:destructive|danger|red)[^"]*"'
+            - regex: '^<[^ >]+[^>]*data-testid="hatch-file-editor-delete"'
+      inside:
+        kind: element
+        regex: '^<[^ >]+[^>]*role="menu"'
+        stopBy: end
+  confirm-delete:
+    language: Html
+    message: Explicit destructive confirmation within the delete dialog
+    rule:
+      kind: element
+      regex: '^<button[^>]*class="[^"]*destructive[^"]*"'
+      inside:
+        kind: element
+        regex: '^<[^ >]+[^>]*role="dialog"'
+        stopBy: end
+
+session:
+  url_pattern: '^https://muse\.ai/thread/([a-zA-Z0-9_-]+)$'
+  on_missing: error
+
+auth:
+  authenticated_rule: chat-input
+  challenges:
+    - rule: login-email
+      pipeline: enter_email
+      prompt: Email
+    - rule: login-password
+      pipeline: enter_password
+      prompt: Password
+      secret: true
+    - rule: login-code
+      pipeline: enter_code
+      prompt: Verification code
+      secret: true
+  after_login:
+    - clean_system_files
+
+pipelines:
+  check_auth:
+    - navigate: { url: 'https://muse.ai/' }
+  login:
+    - navigate: { url: 'https://muse.ai/' }
+  enter_email:
+    - fill: { rule: login-email, value: '${auth.input}' }
+    - click: { rule: login-submit }
+  enter_password:
+    - fill: { rule: login-password, value: '${auth.input}' }
+    - click: { rule: login-submit }
+  enter_code:
+    - fill: { rule: login-code, value: '${auth.input}' }
+    - click: { rule: login-submit }
+  create_thread:
+    - navigate: { url: 'https://muse.ai/thread/new' }
+    - wait: { rule: chat-input, timeout_ms: 30000 }
+    - wait: { rule: thread-ready, timeout_ms: 30000 }
+  resume_thread:
+    - navigate: { url: '${session.url}' }
+    - wait: { rule: chat-input, timeout_ms: 30000 }
+    - wait: { rule: thread-ready, timeout_ms: 30000 }
+  prompt:
+    - observe: { rule: assistant-message, busy_rule: generation-active, mode: auto }
+    - fill: { rule: chat-input, value: '${turn.text}' }
+    - wait: { rule: send-button, timeout_ms: 10000 }
+    - click: { rule: send-button }
+    - await_response: { timeout_ms: 900000, settle_ms: 1500 }
+  clean_system_files:
+    - navigate: { url: 'https://muse.ai/library/files' }
+    - wait: { rule: system-files-ready, timeout_ms: 30000 }
+    - wait: { rule: system-files-loaded, timeout_ms: 30000 }
+    - repeat: { while_rule: system-file-row, pipeline: delete_system_file, max_iterations: 200, wait_for_decrease_ms: 10000 }
+    - wait: { rule: system-files-loaded, timeout_ms: 30000 }
+    - assert_absent: { rule: system-file-row }
+  delete_system_file:
+    - click: { rule: system-file-row, pick: first }
+    - wait: { rule: system-file-menu, timeout_ms: 10000 }
+    - click: { rule: system-file-menu }
+    - wait: { rule: delete-system-file, timeout_ms: 5000 }
+    - click: { rule: delete-system-file }
+    - wait: { rule: confirm-delete, timeout_ms: 5000 }
+    - click: { rule: confirm-delete }

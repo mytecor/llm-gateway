@@ -2,6 +2,8 @@ package policy
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -112,8 +114,7 @@ func TestSessionExecutorRejectsInvalidSettings(t *testing.T) {
 		{"command", func(p *Provider) { p.Command = nil }},
 		{"url", func(p *Provider) { p.InferenceURL = "https://example.com" }},
 		{"key", func(p *Provider) { p.APIKey = "secret" }},
-		{"cwd", func(p *Provider) { p.Session.DefaultCWD = "relative" }},
-		{"root", func(p *Provider) { p.Session.AllowedRoots = []string{"relative"} }},
+		{"root", func(p *Provider) { p.Session.AllowedRoots = []string{""} }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := sessionConfig(t, "acp")
@@ -158,5 +159,27 @@ func TestProvidersCannotShareCheckpointFile(t *testing.T) {
 	cfg.Providers = append(cfg.Providers, other)
 	if _, err := CompileConfig(cfg); err == nil || !strings.Contains(err.Error(), "store_path") {
 		t.Fatal("accepted shared checkpoint file", err)
+	}
+}
+
+func TestSessionPathsResolveFromWorkingDirectory(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := sessionConfig(t, "external")
+	cfg.Providers[0].Session.DefaultCWD = "."
+	cfg.Providers[0].Session.AllowedRoots = []string{".", "../other"}
+	cfg.Providers[0].Session.StorePath = "state/sessions.json"
+	compiled, err := CompileConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := compiled.Providers["p"].Session
+	if settings.DefaultCWD != cwd || settings.AllowedRoots[0] != cwd || settings.AllowedRoots[1] != filepath.Join(cwd, "../other") || settings.StorePath != filepath.Join(cwd, "state/sessions.json") {
+		t.Fatalf("unexpected resolved paths: %+v", settings)
+	}
+	if cfg.Providers[0].Session.AllowedRoots[0] != "." {
+		t.Fatal("compilation mutated config roots")
 	}
 }

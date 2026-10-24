@@ -26,7 +26,7 @@ Existing providers use `executor: "bifrost"` by default. Native external executo
 - [Sessions, Tools, and Browser Driver Protocol Documentation](docs/session-executors.md)
 - [Architecture Deep-Dive](ARCHITECTURE.md)
 
-*Note: Drivers for specific websites must be implemented separately; a Muse driver is not included.*
+The [Rust web driver](drivers/web/README.md) embeds `../parser` and runs YAML site profiles over CDP. A Muse profile is included; login and root system text-file cleanup were checked against the live UI. Real requests, SSE responses, conversation continuity and restart/resume were verified through the gateway. Build it with `make build-web`.
 
 ---
 

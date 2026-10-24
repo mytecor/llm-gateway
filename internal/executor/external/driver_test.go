@@ -2,8 +2,13 @@ package external
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/mytecor/llm-gateway/internal/session"
 )
 
 func TestExternalDriverConfigValidation(t *testing.T) {
@@ -16,6 +21,59 @@ func TestExternalDriverConfigValidation(t *testing.T) {
 	if _, err := New(Config{Protocol: "unknown", Command: []string{"go"}}); err == nil {
 		t.Fatal("expected error on unknown protocol")
 	}
+}
+
+// Exercise the actual subprocess wire, including IDs assigned after the first prompt.
+func TestDriverSessionUpdateWire(t *testing.T) {
+	t.Setenv("WEB_DRIVER_TEST_PROCESS", "1")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := NewDriver(Config{Command: []string{executable, "-test.run=^TestDriverSessionUpdateProcess$"}, ToolStrategy: ToolStrategyPrompt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	proc, err := engine.Start(ctx, session.Spec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proc.Close()
+	var resumed string
+	err = proc.Run(ctx, "hello", func(event session.Event) error {
+		if event.Kind == session.EventInit && event.ResumeID != "" {
+			resumed = event.ResumeID
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed != "https://example.test/thread/created" {
+		t.Fatalf("lost updated resume ID: %q", resumed)
+	}
+}
+
+func TestDriverSessionUpdateProcess(t *testing.T) {
+	if os.Getenv("WEB_DRIVER_TEST_PROCESS") != "1" {
+		return
+	}
+	decoder := json.NewDecoder(os.Stdin)
+	var input map[string]any
+	if decoder.Decode(&input) != nil {
+		os.Exit(2)
+	}
+	encoder := json.NewEncoder(os.Stdout)
+	_ = encoder.Encode(wireEvent{Type: "ready"})
+	if decoder.Decode(&input) != nil {
+		os.Exit(2)
+	}
+	_ = encoder.Encode(wireEvent{Type: "session_updated", ResumeID: "https://example.test/thread/created"})
+	_ = encoder.Encode(wireEvent{Type: "text", Text: "hello"})
+	_ = encoder.Encode(wireEvent{Type: "done"})
+	os.Exit(0)
 }
 
 func TestExternalACPRejectsUnsupportedToolStrategies(t *testing.T) {

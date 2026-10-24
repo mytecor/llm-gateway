@@ -14,7 +14,9 @@ The driver protocol supports all listed strategies; `"auto"` selects `"both"`.
 This also applies to the legacy `acp` and `web` executor aliases.
 
 Start with [config.sessions.example.json](../configs/config.sessions.example.json).
-Replace the example commands and absolute paths before serving. `check` validates
+Replace the example commands and paths before serving. Relative
+`session.default_cwd`, `session.allowed_roots`, and `session.store_path` paths
+resolve against the gateway working directory at startup. `check` validates
 configuration without launching agents, browsers or MCP processes. Commands are
 argument arrays passed directly to exec; no shell interpretation is performed.
 
@@ -129,8 +131,8 @@ Existing compiled rules retain their behavior.
 
 ## Direct browser-driver protocol
 
-The gateway includes a driver adapter, not a site-specific browser automation
-implementation. There is no bundled Muse driver. A driver runs the browser,
+The gateway includes an external driver adapter and a [Rust CDP web driver](../drivers/web/README.md)
+with YAML site profiles. The external process controls the browser,
 authenticates to its site, selects the model and maps these messages to that
 site's conversation UI or native transport. Its lifecycle is owned by the gateway.
 
@@ -147,6 +149,11 @@ Gateway starts a process with the resolved working directory and sends:
 The driver replies `{"type":"ready","resume_id":"optional-native-id"}`.
 If a requested native session is missing, reply `{"type":"session_not_found"}`.
 The driver should make its restored conversation ready before emitting `ready`.
+If the site assigns its ID only after the first prompt, emit
+`{"type":"session_updated","resume_id":"https://site/thread/123"}` before
+`message`/`done`. The gateway records it using the existing session checkpoint.
+For strict restore, return an `error` event instead of `session_not_found`;
+`session_not_found` explicitly allows the runtime to create a replacement session.
 Gateway then sends `{"type":"prompt","text":"..."}` for each native turn.
 
 Driver output events:
@@ -159,6 +166,7 @@ Driver output events:
 | `usage` | `input_tokens`, `output_tokens` | Usage snapshot for the current exchange |
 | `tool_call` | `id`, `name`, `arguments` object | Structured function request |
 | `message` | `id`, `text` | Complete text-tool JSON response |
+| `session_updated` | `resume_id` | Update the native session checkpoint after the site assigns a thread ID |
 | `done` | — | Native turn has completed |
 | `error` | `error` | Native failure |
 

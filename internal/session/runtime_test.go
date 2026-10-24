@@ -16,6 +16,7 @@ type fakeEngine struct {
 	mu         sync.Mutex
 	specs      []Spec
 	prompts    []string
+	startError error
 	failResume bool
 	closed     int
 	run        func(context.Context, Spec, string, func(Event) error) error
@@ -25,6 +26,9 @@ func (e *fakeEngine) Start(_ context.Context, spec Spec) (Session, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.specs = append(e.specs, spec)
+	if e.startError != nil {
+		return nil, e.startError
+	}
 	if e.failResume && spec.ResumeID != "" {
 		return nil, ErrSessionNotFound
 	}
@@ -388,5 +392,48 @@ func TestHeartbeatIsSemanticAndDoesNotBecomeModelOutput(t *testing.T) {
 	})
 	if !errors.Is(err, stop) {
 		t.Fatal("missing heartbeat", err)
+	}
+}
+
+func TestFailedRestorePreservesCheckpointUntilPromptSubmission(t *testing.T) {
+	cwd := t.TempDir()
+	store := filepath.Join(t.TempDir(), "sessions.json")
+	r := newRuntime(t, &fakeEngine{}, Config{DefaultCWD: cwd, StorePath: store})
+	req := request("hello")
+	first, err := r.Exchange(context.Background(), req, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Messages = append(req.Messages, message("assistant", first.Text), message("user", "continue"))
+	_ = r.Close()
+	checkpoint, err := os.ReadFile(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := &fakeEngine{startError: errors.New("auth_required")}
+	failed := newRuntime(t, engine, Config{DefaultCWD: cwd, StorePath: store})
+	for i := 0; i < 2; i++ {
+		if _, err = failed.Exchange(context.Background(), req, nil); err == nil {
+			t.Fatal("expected authentication failure")
+		}
+		if len(engine.prompts) != 0 {
+			t.Fatal("prompt sent during failed restore")
+		}
+		if engine.specs[i].ResumeID != "native-session" {
+			t.Fatal("failed restore discarded native ID")
+		}
+		current, err := os.ReadFile(store)
+		if err != nil || string(current) != string(checkpoint) {
+			t.Fatalf("failed restore changed checkpoint: %s %v", current, err)
+		}
+	}
+	_ = failed.Close()
+	recoveredEngine := &fakeEngine{}
+	recovered := newRuntime(t, recoveredEngine, Config{DefaultCWD: cwd, StorePath: store})
+	if _, err = recovered.Exchange(context.Background(), req, nil); err != nil {
+		t.Fatal(err)
+	}
+	if recoveredEngine.specs[0].ResumeID != "native-session" || recoveredEngine.prompts[0] != "continue" {
+		t.Fatal("did not restore original thread after authentication recovery")
 	}
 }

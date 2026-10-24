@@ -1,0 +1,5 @@
+<html><body><form><input type="email"><button type="submit">Login</button></form><script>
+document.querySelector('form').onsubmit = event => {
+  event.preventDefault(); document.cookie = 'testauth=1;path=/'; location.href = '/thread/new';
+};
+</script></body></html>

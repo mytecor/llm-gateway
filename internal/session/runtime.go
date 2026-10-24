@@ -165,7 +165,9 @@ func (r *Runtime) Exchange(ctx context.Context, req Request, emit func(Event) er
 		if promptErr != nil {
 			return nil, invalid("invalid_messages", promptErr)
 		}
+		preserveResumeOnStartError := false
 		start = func(useResume bool, prompt string) error {
+			preserveResumeOnStartError = useResume
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -175,15 +177,6 @@ func (r *Runtime) Exchange(ctx context.Context, req Request, emit func(Event) er
 			state.current.Store(turn)
 			state.cwd = cwd
 			state.toolHash = hash
-			// In-flight native work cannot be recovered from a saved checkpoint.
-			if err := r.registry.store.delete(key); err != nil {
-				close(turn.done)
-				turn.cancel(err)
-				cancel()
-				state.active = nil
-				state.current.Store(nil)
-				return err
-			}
 			if state.process == nil {
 				spec := Spec{CWD: cwd, Model: req.Model, System: systemPrompt(messages), Tools: tools}
 				if useResume {
@@ -219,6 +212,21 @@ func (r *Runtime) Exchange(ctx context.Context, req Request, emit func(Event) er
 				}
 				state.process = proc
 			}
+			// Keep the last checkpoint throughout startup: no prompt has been sent yet.
+			// Once Run can submit work, an interrupted turn is no longer recoverable.
+			if err := r.registry.store.delete(key); err != nil {
+				if state.process != nil {
+					_ = state.process.Close()
+					state.process = nil
+				}
+				close(turn.done)
+				turn.cancel(err)
+				cancel()
+				state.active = nil
+				state.current.Store(nil)
+				return err
+			}
+			preserveResumeOnStartError = false
 			go turn.run(state.process, prompt)
 			// A suspended turn has no HTTP/request goroutine to clean it up at expiry.
 			go func() {
@@ -247,7 +255,9 @@ func (r *Runtime) Exchange(ctx context.Context, req Request, emit func(Event) er
 			}
 		}
 		if err != nil {
-			_ = r.clear(state, key)
+			if !preserveResumeOnStartError {
+				_ = r.clear(state, key)
+			}
 			return nil, err
 		}
 	}

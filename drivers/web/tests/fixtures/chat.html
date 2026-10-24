@@ -1,0 +1,17 @@
+<main>__MESSAGES__</main><form><textarea></textarea><button type="submit">Send</button></form><script>
+let pulse = 0;
+globalThis.__fixturePulse = setInterval(() => document.body.dataset.pulse = String(++pulse), 1);
+document.querySelector('form').onsubmit = async event => {
+  event.preventDefault(); const text = document.querySelector('textarea').value;
+  let ticks = 0; const activity = setInterval(() => document.body.dataset.tick = String(++ticks), 1);
+  const busy = document.createElement('button'); busy.dataset.testid = 'stop'; document.body.append(busy);
+  const response = await fetch('/send', {method:'POST', body:JSON.stringify({url:location.pathname, text})});
+  const data = await response.json(); history.replaceState(null, '', data.url);
+  const message = document.createElement('div'); message.dataset.role = 'assistant'; document.querySelector('main').append(message);
+  let count = 0; const chars = Array.from(data.response);
+  const timer = setInterval(() => {
+    message.textContent = chars.slice(0, count += 7).join('');
+    if (count >= chars.length) { clearInterval(timer); clearInterval(activity); busy.remove(); }
+  }, 30);
+};
+</script></body></html>

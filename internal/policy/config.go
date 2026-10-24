@@ -93,12 +93,12 @@ type Config struct {
 	// non-secret label) in the request/usage metrics; an empty list disables
 	// client authentication entirely (keyless loopback mode). Key values are
 	// literal secrets or "env.VARNAME" references resolved at load time.
-	ClientAPIKeys          []ClientKey  `json:"client_api_keys"`
-	CatalogRefreshInterval Duration     `json:"catalog_refresh_interval"`
-	StreamIdleTimeout      Duration     `json:"stream_idle_timeout"`
-	AffinityFile           string       `json:"affinity_file,omitempty"`
-	Providers              []Provider   `json:"providers"`
-	Rules                  Rules        `json:"rules"`
+	ClientAPIKeys          []ClientKey `json:"client_api_keys"`
+	CatalogRefreshInterval Duration    `json:"catalog_refresh_interval"`
+	StreamIdleTimeout      Duration    `json:"stream_idle_timeout"`
+	AffinityFile           string      `json:"affinity_file,omitempty"`
+	Providers              []Provider  `json:"providers"`
+	Rules                  Rules       `json:"rules"`
 }
 
 // ClientKey is one named client credential. ID is the non-secret identity
@@ -742,12 +742,19 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 					return nil, err
 				}
 			}
-			if !filepath.IsAbs(settings.DefaultCWD) {
-				return nil, fmt.Errorf("provider %q: session.default_cwd must be absolute", provider.ID)
+			var pathErr error
+			settings.DefaultCWD, pathErr = filepath.Abs(settings.DefaultCWD)
+			if pathErr != nil {
+				return nil, fmt.Errorf("provider %q: resolve session.default_cwd: %w", provider.ID, pathErr)
 			}
-			for _, root := range settings.AllowedRoots {
-				if !filepath.IsAbs(root) {
-					return nil, fmt.Errorf("provider %q: allowed roots must be absolute", provider.ID)
+			settings.AllowedRoots = append([]string(nil), settings.AllowedRoots...)
+			for i, root := range settings.AllowedRoots {
+				if strings.TrimSpace(root) == "" {
+					return nil, fmt.Errorf("provider %q: allowed roots must not be empty", provider.ID)
+				}
+				settings.AllowedRoots[i], pathErr = filepath.Abs(root)
+				if pathErr != nil {
+					return nil, fmt.Errorf("provider %q: resolve allowed root: %w", provider.ID, pathErr)
 				}
 			}
 			if settings.TTL.Duration < 0 || settings.TurnTimeout.Duration < 0 {

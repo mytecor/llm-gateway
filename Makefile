@@ -1,4 +1,4 @@
-.PHONY: all build test test-race lint run clean check-config
+.PHONY: all build test test-race lint run clean check-config build-web test-web
 
 APP_NAME := llm-gateway
 CMD_DIR := ./cmd/llm-gateway
@@ -33,3 +33,11 @@ lint:
 
 clean:
 	rm -rf $(BIN_DIR)
+
+# The Rust parser must be checked out at ../parser.
+build-web:
+	cargo build --release --locked --manifest-path drivers/web/Cargo.toml
+
+test-web:
+	cargo test --locked --manifest-path drivers/web/Cargo.toml
+	cargo test --locked --manifest-path drivers/web/Cargo.toml --test browser -- --ignored --nocapture

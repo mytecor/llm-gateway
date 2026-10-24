@@ -1,0 +1,28 @@
+<html><body><button data-testid="system-files-nav">System files</button>
+<main><div data-testid="user-file">User file</div></main><script>
+setTimeout(() => {
+  document.querySelector('main').insertAdjacentHTML('afterbegin', __ROWS__);
+  let row;
+  function empty() {
+    if (!document.querySelector('[data-testid="system-file-row"]')) {
+      const e = document.createElement('p'); e.dataset.testid = 'system-files-empty';
+      e.textContent = 'Empty'; document.body.append(e);
+    }
+  }
+  empty();
+  document.querySelectorAll('[aria-haspopup="menu"]').forEach(button => button.onpointerdown = () => {
+    row = button.parentElement;
+    const item = document.createElement('button'); item.dataset.testid = 'delete-system-file';
+    item.textContent = 'Delete'; document.body.append(item);
+    item.onclick = () => {
+      item.remove(); const confirm = document.createElement('button');
+      confirm.dataset.testid = 'confirm-delete'; confirm.textContent = 'Confirm'; document.body.append(confirm);
+      confirm.onclick = async () => {
+        const response = await fetch('/delete?name=' + encodeURIComponent(row.dataset.file), {method:'POST'});
+        if (!response.ok) throw new Error('deletion failed');
+        confirm.remove(); row.remove(); empty();
+      };
+    };
+  });
+}, 500);
+</script></body></html>

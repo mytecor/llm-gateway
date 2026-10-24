@@ -1,0 +1,163 @@
+version: 1
+site: fixture
+origin: https://muse.ai
+
+# Synthetic local test UI; these rules are not live Muse selectors.
+rules:
+  chat-input:
+    language: Html
+    message: Chat message composer
+    rule:
+      kind: element
+      any:
+        - regex: '^<textarea(?:\s|>)'
+        - regex: '^<div[^>]*contenteditable="true"[^>]*role="textbox"'
+        - regex: '^<div[^>]*role="textbox"[^>]*contenteditable="true"'
+  send-button:
+    language: Html
+    message: Send chat message
+    rule:
+      kind: element
+      regex: '^<button[^>]*(?:type="submit"|data-testid="[^"]*send[^"]*")'
+  assistant-message:
+    language: Html
+    message: Assistant response only
+    rule:
+      kind: element
+      regex: '^<[^ >]+[^>]*(?:data-role="assistant"|data-message-author-role="assistant")'
+  generation-active:
+    language: Html
+    message: Generation stop button or busy chat area
+    rule:
+      kind: element
+      regex: '^<[^ >]+[^>]*(?:data-testid="[^"]*stop[^"]*"|aria-busy="true")'
+  login-email:
+    language: Html
+    message: Email field on login form
+    rule:
+      kind: element
+      regex: '^<input[^>]*type="email"'
+  login-password:
+    language: Html
+    message: Password field on login form
+    rule:
+      kind: element
+      regex: '^<input[^>]*type="password"'
+  login-code:
+    language: Html
+    message: One-time verification code
+    rule:
+      kind: element
+      regex: '^<input[^>]*autocomplete="one-time-code"'
+  login-submit:
+    language: Html
+    message: Submit login form
+    rule:
+      kind: element
+      regex: '^<button[^>]*type="submit"'
+  system-files-nav:
+    language: Html
+    message: Explicit system files navigation link
+    rule:
+      kind: element
+      regex: '^<(?:a|button)[^>]*data-testid="system-files-nav"'
+  system-file-row:
+    language: Html
+    message: System file row, excluding user files
+    rule:
+      kind: element
+      regex: '^<[^ >]+[^>]*data-testid="system-file-row"'
+  system-file-menu:
+    language: Html
+    message: Action menu inside a system file row
+    rule:
+      kind: element
+      regex: '^<button[^>]*aria-haspopup="menu"'
+      inside:
+        kind: element
+        regex: '^<[^ >]+[^>]*data-testid="system-file-row"'
+        stopBy: end
+  delete-system-file:
+    language: Html
+    message: Explicit delete action in open system file menu
+    rule:
+      kind: element
+      regex: '^<[^ >]+[^>]*data-testid="delete-system-file"'
+  confirm-delete:
+    language: Html
+    message: Confirm deletion in the active dialog
+    rule:
+      kind: element
+      regex: '^<button[^>]*data-testid="confirm-delete"'
+  collection-loaded:
+    language: Html
+    rule:
+      kind: element
+      regex: '^<[^ >]+[^>]*data-testid="(?:system-file-row|system-files-empty)"'
+  system-files-empty:
+    language: Html
+    message: System files view explicitly reports empty
+    rule:
+      kind: element
+      regex: '^<[^ >]+[^>]*data-testid="system-files-empty"'
+
+session:
+  url_pattern: '^https://muse\.ai/thread/([a-zA-Z0-9_-]+)$'
+  on_missing: error
+
+auth:
+  authenticated_rule: chat-input
+  challenges:
+    - rule: login-email
+      pipeline: enter_email
+      prompt: Email
+    - rule: login-password
+      pipeline: enter_password
+      prompt: Password
+      secret: true
+    - rule: login-code
+      pipeline: enter_code
+      prompt: Verification code
+      secret: true
+  after_login:
+    - clean_system_files
+
+pipelines:
+  check_auth:
+    - navigate: { url: 'https://muse.ai/thread/new' }
+  login:
+    - navigate: { url: 'https://muse.ai/' }
+  enter_email:
+    - fill: { rule: login-email, value: '${auth.input}' }
+    - click: { rule: login-submit }
+  enter_password:
+    - fill: { rule: login-password, value: '${auth.input}' }
+    - click: { rule: login-submit }
+  enter_code:
+    - fill: { rule: login-code, value: '${auth.input}' }
+    - click: { rule: login-submit }
+  create_thread:
+    - navigate: { url: 'https://muse.ai/thread/new' }
+    - wait: { rule: chat-input, timeout_ms: 30000 }
+  resume_thread:
+    - navigate: { url: '${session.url}' }
+    - wait: { rule: chat-input, timeout_ms: 30000 }
+  prompt:
+    - observe: { rule: assistant-message, busy_rule: generation-active, mode: message }
+    - fill: { rule: chat-input, value: '${turn.text}' }
+    - click: { rule: send-button }
+    - await_response: { timeout_ms: 900000, settle_ms: 1500 }
+  clean_system_files:
+    - navigate: { url: 'https://muse.ai/library/files' }
+    - wait: { rule: system-files-nav, timeout_ms: 30000 }
+    - click: { rule: system-files-nav }
+    - wait: { rule: collection-loaded, timeout_ms: 5000 }
+    - repeat: { while_rule: system-file-row, pipeline: delete_system_file, max_iterations: 200, wait_for_decrease_ms: 10000 }
+    - wait: { rule: system-files-empty, timeout_ms: 30000 }
+    - assert_absent: { rule: system-file-row }
+  delete_system_file:
+    - click: { rule: system-file-menu, pick: first }
+    - wait: { rule: delete-system-file, timeout_ms: 5000 }
+    - click: { rule: delete-system-file }
+    - wait: { rule: confirm-delete, timeout_ms: 5000 }
+    - click: { rule: confirm-delete }

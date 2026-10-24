@@ -1,0 +1,26 @@
+[package]
+name = "web-driver"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+fs2 = "0.4"
+playwright-cdp = "=0.3.0"
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+rpassword = "7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde-saphyr = "2"
+sha2 = "0.11"
+tokio = { version = "1", features = ["full"] }
+# Enable TLS on playwright-cdp's WebSocket dependency (upstream leaves it optional).
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
+url = "2"
+universal-self-healing-parser = { path = "../../../parser" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -189,6 +189,10 @@ func (e *DriverEngine) Start(ctx context.Context, spec session.Spec) (session.Se
 			_ = s.Close()
 			return nil, session.ErrSessionNotFound
 		}
+		if event.Type == "error" {
+			_ = s.Close()
+			return nil, errors.New("external driver: " + event.Error)
+		}
 		if event.Type != "ready" {
 			_ = s.Close()
 			return nil, errors.New("external driver did not become ready")
@@ -245,6 +249,13 @@ func (s *nativeSession) Run(ctx context.Context, prompt string, emit func(sessio
 				}
 			case "usage":
 				if err := emit(session.Event{Kind: session.EventUsage, Usage: &session.Usage{Input: event.Input, Output: event.Output}}); err != nil {
+					return err
+				}
+			case "session_updated":
+				if event.ResumeID == "" {
+					return errors.New("external driver sent an empty session update")
+				}
+				if err := emit(session.Event{Kind: session.EventInit, ResumeID: event.ResumeID}); err != nil {
 					return err
 				}
 			case "tool_call":

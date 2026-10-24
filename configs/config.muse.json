@@ -11,17 +11,19 @@
       "protocol": "driver",
       "tool_strategy": "prompt",
       "command": [
-        "node",
-        "/Users/mytecor/Desktop/projects/llm-gateway/drivers/muse/dist/index.js",
-        "--cdp-host",
-        "127.0.0.1",
-        "--cdp-port",
-        "9222"
+        "./drivers/web/target/release/web-driver",
+        "run",
+        "--profile",
+        "./drivers/web/sites/muse.yaml",
+        "--cdp-url",
+        "http://127.0.0.1:19222",
+        "--account",
+        "main"
       ],
       "session": {
-        "default_cwd": "/Users/mytecor/Desktop/projects/llm-gateway",
-        "allowed_roots": ["/Users/mytecor/Desktop/projects/llm-gateway"],
-        "store_path": "/Users/mytecor/Desktop/projects/llm-gateway/state/muse-sessions.json",
+        "default_cwd": ".",
+        "allowed_roots": ["."],
+        "store_path": "./state/muse-web-sessions.json",
         "ttl": "30m",
         "turn_timeout": "15m"
       }
