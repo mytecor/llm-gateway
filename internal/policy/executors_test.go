@@ -204,16 +204,11 @@ func TestSessionRoutesRejectSpeculationAndReplay(t *testing.T) {
 	}
 }
 
-func TestProvidersCannotShareCheckpointFile(t *testing.T) {
-	cfg := sessionConfig(t, "acp")
-	cfg.Providers[0].Session.StorePath = t.TempDir() + "/sessions.json"
-	other := cfg.Providers[0]
-	other.ID = "another-provider"
-	settings := *other.Session
-	other.Session = &settings
-	cfg.Providers = append(cfg.Providers, other)
-	if _, err := CompileConfig(cfg); err == nil || !strings.Contains(err.Error(), "store_path") {
-		t.Fatal("accepted shared checkpoint file", err)
+func TestSessionStorePathOnProviderIsRejected(t *testing.T) {
+	raw := `{"providers":[{"id":"p","driver":"acp","command":["driver"],"session":{"default_cwd":".","store_path":"sessions.json"}}],"rules":[{"route":"main","action":"filter","where":{"model":{"eq":"agent"}}},{"route":"main","action":"map","providers":["p"],"native":"default"},{"route":"main","action":"race","count":1}]}`
+	var cfg Config
+	if err := json.Unmarshal([]byte(raw), &cfg); err == nil || !strings.Contains(err.Error(), "store_path") {
+		t.Fatal("accepted legacy session.store_path on provider", err)
 	}
 }
 
@@ -223,16 +218,16 @@ func TestSessionPathsResolveFromWorkingDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := sessionConfig(t, "")
+	cfg.SessionFile = "state/sessions.json"
 	cfg.Providers[0].Session.DefaultCWD = "."
 	cfg.Providers[0].Session.AllowedRoots = []string{".", "../other"}
-	cfg.Providers[0].Session.StorePath = "state/sessions.json"
 	compiled, err := CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	settings := compiled.Providers["p"].Session
-	if settings.DefaultCWD != cwd || settings.AllowedRoots[0] != cwd || settings.AllowedRoots[1] != filepath.Join(cwd, "../other") || settings.StorePath != filepath.Join(cwd, "state/sessions.json") {
-		t.Fatalf("unexpected resolved paths: %+v", settings)
+	if settings.DefaultCWD != cwd || settings.AllowedRoots[0] != cwd || settings.AllowedRoots[1] != filepath.Join(cwd, "../other") || compiled.Raw.SessionFile != filepath.Join(cwd, "state/sessions.json") {
+		t.Fatalf("unexpected resolved paths: %+v session_file=%q", settings, compiled.Raw.SessionFile)
 	}
 	if cfg.Providers[0].Session.AllowedRoots[0] != "." {
 		t.Fatal("compilation mutated config roots")

@@ -81,6 +81,7 @@ type Config struct {
 	CatalogRefreshInterval Duration    `json:"catalog_refresh_interval"`
 	StreamIdleTimeout      Duration    `json:"stream_idle_timeout"`
 	AffinityFile           string      `json:"affinity_file,omitempty"`
+	SessionFile            string      `json:"session_file,omitempty"`
 	Providers              []Provider  `json:"providers"`
 	Rules                  Rules       `json:"rules"`
 }
@@ -97,7 +98,6 @@ type ClientKey struct {
 type SessionSettings struct {
 	DefaultCWD   string   `json:"default_cwd"`
 	AllowedRoots []string `json:"allowed_roots,omitempty"`
-	StorePath    string   `json:"store_path,omitempty"`
 	TTL          Duration `json:"ttl,omitempty"`
 	TurnTimeout  Duration `json:"turn_timeout,omitempty"`
 	Heartbeat    Duration `json:"heartbeat,omitempty"`
@@ -803,6 +803,14 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 	if len(cfg.Providers) == 0 {
 		return nil, errors.New("at least one provider is required")
 	}
+	cfg.SessionFile = strings.TrimSpace(cfg.SessionFile)
+	if cfg.SessionFile != "" {
+		path, err := filepath.Abs(cfg.SessionFile)
+		if err != nil {
+			return nil, fmt.Errorf("resolve session_file: %w", err)
+		}
+		cfg.SessionFile = path
+	}
 
 	compiled := &CompiledConfig{
 		Raw:            cfg,
@@ -811,7 +819,6 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 		CatalogSources: make(map[string][]CatalogSource),
 		ClientKeys:     make(map[string]string, len(cfg.ClientAPIKeys)),
 	}
-	sessionStorePaths := map[string]string{}
 	for _, clientKey := range cfg.ClientAPIKeys {
 		id := strings.TrimSpace(clientKey.ID)
 		if id == "" {
@@ -900,17 +907,6 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 			}
 			if settings.TurnTimeout.Duration == 0 {
 				settings.TurnTimeout.Duration = 30 * time.Minute
-			}
-			if settings.StorePath != "" {
-				path, err := filepath.Abs(settings.StorePath)
-				if err != nil {
-					return nil, err
-				}
-				if other, exists := sessionStorePaths[path]; exists {
-					return nil, fmt.Errorf("providers %q and %q must not share session.store_path", other, provider.ID)
-				}
-				sessionStorePaths[path] = provider.ID
-				settings.StorePath = path
 			}
 			provider.Session = &settings
 			if provider.RequestTimeout.Duration == 0 {

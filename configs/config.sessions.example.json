@@ -2,6 +2,7 @@
   "host": "127.0.0.1",
   "port": 9208,
   "log_level": "info",
+  "session_file": "/absolute/path/to/state/sessions.json",
   "providers": [
     {
       "id": "coding-agent",
@@ -11,7 +12,6 @@
       "session": {
         "default_cwd": "/absolute/path/to/project",
         "allowed_roots": ["/absolute/path/to/project"],
-        "store_path": "/absolute/path/to/state/acp-sessions.json",
         "ttl": "10m",
         "turn_timeout": "30m"
       }

@@ -67,11 +67,13 @@ type Result struct {
 	Usage                         *Usage
 }
 type Config struct {
+	Provider                string
 	DefaultCWD              string
 	AllowedRoots            []string
 	TurnTimeout, SessionTTL time.Duration
 	HeartbeatInterval       time.Duration
 	StorePath               string
+	Store                   *Store
 }
 
 type Error struct {

@@ -19,7 +19,7 @@ The `"web"` and `"custom"` drivers support all listed strategies; `"auto"` selec
 
 Start with [config.sessions.example.json](../configs/config.sessions.example.json).
 Replace the example commands and paths before serving. Relative
-`session.default_cwd`, `session.allowed_roots`, and `session.store_path` paths
+`session.default_cwd`, `session.allowed_roots`, and top-level `session_file` paths
 resolve against the gateway working directory at startup. `check` validates
 configuration without launching agents, browsers or MCP processes. Commands are
 argument arrays passed directly to exec; no shell interpretation is performed.
@@ -91,10 +91,10 @@ default). That deadline includes time spent waiting for pi. Disconnection during
 an attached exchange cancels its turn; completing an exchange with tool_calls
 **detaches** it from that HTTP request. Shutdown cancels all native work.
 
-`session.store_path` enables atomic checkpoint persistence. The file contains
+`session_file` (configured at the top level of the gateway config, alongside `affinity_file`) enables atomic checkpoint persistence across all stateful providers. The file contains
 native resume IDs, CWD, history count/hash and toolset hash, not prompts or tool
-results. Use a different store path for every provider. Pending work is never
-persisted. This checkpoint format is version 2; use a new store path when moving
+results. Pending work is never
+persisted. This checkpoint format is version 2; use a new file path when moving
 from agentrun-openai, whose version 1 keys do not include gateway client/model
 identity. Legacy files are rejected rather than silently reusing another scope. Completed sessions can resume after eviction/restart; a missing native
 session falls back once to the supplied conversation history.

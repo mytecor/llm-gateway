@@ -437,3 +437,53 @@ func TestFailedRestorePreservesCheckpointUntilPromptSubmission(t *testing.T) {
 		t.Fatal("did not restore original thread after authentication recovery")
 	}
 }
+
+func TestSharedStorePersistsMultipleProvidersIndependently(t *testing.T) {
+	cwd := t.TempDir()
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engineA := &fakeEngine{}
+	engineB := &fakeEngine{}
+	runtimeA := newRuntime(t, engineA, Config{Provider: "provider-a", DefaultCWD: cwd, Store: store})
+	runtimeB := newRuntime(t, engineB, Config{Provider: "provider-b", DefaultCWD: cwd, Store: store})
+
+	reqA := request("hello-a")
+	resA, err := runtimeA.Exchange(context.Background(), reqA, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqB := request("hello-b")
+	resB, err := runtimeB.Exchange(context.Background(), reqB, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = runtimeA.Close()
+	_ = runtimeB.Close()
+
+	reloadedStore, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumedEngineA := &fakeEngine{}
+	resumedEngineB := &fakeEngine{}
+	resumedA := newRuntime(t, resumedEngineA, Config{Provider: "provider-a", DefaultCWD: cwd, Store: reloadedStore})
+	resumedB := newRuntime(t, resumedEngineB, Config{Provider: "provider-b", DefaultCWD: cwd, Store: reloadedStore})
+
+	reqA.Messages = append(reqA.Messages, message("assistant", resA.Text), message("user", "next-a"))
+	if _, err := resumedA.Exchange(context.Background(), reqA, nil); err != nil {
+		t.Fatal(err)
+	}
+	reqB.Messages = append(reqB.Messages, message("assistant", resB.Text), message("user", "next-b"))
+	if _, err := resumedB.Exchange(context.Background(), reqB, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(resumedEngineA.specs) != 1 || resumedEngineA.specs[0].ResumeID != "native-session" || resumedEngineA.prompts[0] != "next-a" {
+		t.Fatalf("provider-a did not resume independently: specs=%+v prompts=%v", resumedEngineA.specs, resumedEngineA.prompts)
+	}
+	if len(resumedEngineB.specs) != 1 || resumedEngineB.specs[0].ResumeID != "native-session" || resumedEngineB.prompts[0] != "next-b" {
+		t.Fatalf("provider-b did not resume independently: specs=%+v prompts=%v", resumedEngineB.specs, resumedEngineB.prompts)
+	}
+}

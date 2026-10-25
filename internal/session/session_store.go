@@ -22,10 +22,18 @@ type persistedSessions struct {
 	Sessions map[string]persistedSession `json:"sessions"`
 }
 
+// Store persists completed session checkpoints across gateway restarts and can
+// be shared safely across multiple stateful provider runtimes.
+type Store = sessionStore
+
 type sessionStore struct {
 	mu      sync.Mutex
 	path    string
 	records map[string]persistedSession
+}
+
+func NewStore(path string) (*Store, error) {
+	return newSessionStore(path)
 }
 
 func newSessionStore(path string) (*sessionStore, error) {

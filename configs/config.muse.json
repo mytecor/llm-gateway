@@ -4,6 +4,7 @@
   "metrics_host": "127.0.0.1",
   "metrics_port": 9209,
   "log_level": "info",
+  "session_file": "./state/sessions.json",
   "providers": [
     {
       "id": "muse-provider",
@@ -15,7 +16,6 @@
       "session": {
         "default_cwd": ".",
         "allowed_roots": ["."],
-        "store_path": "./state/muse-web-sessions.json",
         "ttl": "30m",
         "turn_timeout": "15m"
       }

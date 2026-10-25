@@ -44,6 +44,7 @@ func NewRegistry(bindings map[string]Binding, middleware ...Middleware) *Registr
 func New(ctx context.Context, cfg *policy.CompiledConfig) (*Registry, error) {
 	registry := NewRegistry(nil)
 	fail := func(err error) (*Registry, error) { _ = registry.Close(); return nil, err }
+	var sessionStore *session.Store
 	for id, p := range cfg.Providers {
 		var defaultCWD string
 		if p.Session != nil {
@@ -67,13 +68,22 @@ func New(ctx context.Context, cfg *policy.CompiledConfig) (*Registry, error) {
 		}
 		caps := drv.Capabilities()
 		if caps.Stateful {
+			if sessionStore == nil {
+				sessionStore, err = session.NewStore(cfg.Raw.SessionFile)
+				if err != nil {
+					_ = drv.Close()
+					return fail(fmt.Errorf("session_file: %w", err))
+				}
+			}
 			s := p.Session
 			exec, err := sessionexecutor.New(drv, session.Config{
+				Provider:          id,
 				DefaultCWD:        s.DefaultCWD,
 				AllowedRoots:      s.AllowedRoots,
 				SessionTTL:        s.TTL.Duration,
 				TurnTimeout:       s.TurnTimeout.Duration,
-				StorePath:         s.StorePath,
+				StorePath:         cfg.Raw.SessionFile,
+				Store:             sessionStore,
 				HeartbeatInterval: s.Heartbeat.Duration,
 			})
 			if err != nil {

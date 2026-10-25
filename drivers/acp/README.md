@@ -44,8 +44,7 @@ When `llm-gateway` resolves a provider with `"driver": "acp"`, [`external.Resolv
     "allowed_roots": ["."],
     "ttl": "10m",
     "turn_timeout": "30m",
-    "heartbeat": "20s",
-    "store_path": "./state/acp-codex-sessions.json"
+    "heartbeat": "20s"
   }
 }
 ```

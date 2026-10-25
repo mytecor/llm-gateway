@@ -48,7 +48,7 @@ func New(engine Engine, cfg Config) (*Runtime, error) {
 			return nil, errors.New("allowed roots must be absolute")
 		}
 	}
-	registry, err := newRegistry(cfg.SessionTTL, cfg.StorePath)
+	registry, err := newRegistry(cfg.SessionTTL, cfg.Store, cfg.StorePath)
 	if err != nil {
 		return nil, err
 	}
@@ -107,8 +107,12 @@ func (r *Runtime) Exchange(ctx context.Context, req Request, emit func(Event) er
 		return nil, invalid("invalid_cwd", err)
 	}
 	// Structured keys avoid collisions between user-supplied names and isolate
-	// principals, native models and effort selections within one provider runtime.
-	keyBytes, _ := json.Marshal([]string{req.Principal, req.Conversation, req.LogicalModel, req.Model, req.ReasoningEffort})
+	// principals, providers, native models and effort selections in the store.
+	keyParts := []string{req.Principal, req.Conversation, req.LogicalModel, req.Model, req.ReasoningEffort}
+	if r.config.Provider != "" {
+		keyParts = append(keyParts, r.config.Provider)
+	}
+	keyBytes, _ := json.Marshal(keyParts)
 	key := string(keyBytes)
 	lockCtx, stopLock := context.WithCancel(ctx)
 	stopShutdown := context.AfterFunc(r.ctx, stopLock)

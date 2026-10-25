@@ -60,10 +60,13 @@ type registry struct {
 	store    *sessionStore
 }
 
-func newRegistry(ttl time.Duration, path string) (*registry, error) {
-	store, err := newSessionStore(path)
-	if err != nil {
-		return nil, err
+func newRegistry(ttl time.Duration, store *sessionStore, path string) (*registry, error) {
+	if store == nil {
+		var err error
+		store, err = newSessionStore(path)
+		if err != nil {
+			return nil, err
+		}
 	}
 	r := &registry{sessions: map[string]*sessionState{}, ttl: ttl, store: store}
 	for key, saved := range store.recordsSnapshot() {

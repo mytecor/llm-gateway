@@ -219,7 +219,7 @@ sequenceDiagram
   - Maintains conversation threads identified by `X-Session-Affinity` or `session_id`.
   - Computes canonical history hashes to compute deltas: only new messages are delivered to existing native sessions.
   - Manages turn lifecycle, idle eviction (`session.ttl`), and turn timeouts (`session.turn_timeout`).
-  - Implements atomic checkpointing (`session.store_path`) to persist resume IDs and session metadata across restarts.
+  - Implements atomic checkpointing (`session_file`) to persist resume IDs and session metadata across restarts.
 - **`internal/executor/external`**:
   - Unified, driver-agnostic NDJSON-over-stdio client (`external.Driver` and `external.Describe`) serving both stateless multiplexed drivers (`stateful: false`, such as `http-driver`) and stateful session drivers (`stateful: true`, such as `acp-driver`, `web-driver`, or custom drivers).
   - Resolves `<driver>-driver` binaries dynamically via `ResolveDriverBinary` (or runs an explicit `command`), delegates driver-specific config validation and `Capabilities` discovery via the `{"type":"init",...}` handshake, and wraps stateful drivers in `sessionexecutor.New(...)`.
