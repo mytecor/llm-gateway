@@ -16,6 +16,64 @@ fallback for missing protocol commands.
 Rust 1.90+ is required. The browser is externally managed, retains its persistent
 profile, and must expose a **browser-level** CDP endpoint.
 
+## Architecture and tool turns
+
+Each active conversation owns a `web-driver` process and one background tab in an
+externally managed browser. YAML profiles define site workflows; native CDP
+commands provide navigation, snapshots, and input.
+
+```mermaid
+flowchart LR
+    GW["Gateway"] <-->|NDJSON over stdio| App["web-driver app<br/>Protocol dispatch"]
+    Profile["YAML Site Profile"] --> Site["site<br/>Session workflows and response observation"]
+    App --> Site
+    Site --> Browser["browser<br/>Snapshots and native input"]
+    Site --> DOM["dom<br/>Immutable HTML and rule matching"]
+    Browser --> DOM
+    Browser --> CDP["cdp<br/>Transport and owned target lifecycle"]
+    CDP <-->|Native CDP commands and events| Tab["Owned Tab<br/>Persistent external browser"]
+```
+
+The sequence below uses `tool_strategy: prompt` with response mode `auto` or
+`message`. The gateway adds tool schemas and envelope instructions to the system
+prompt; the driver returns the site's tool envelope as a `message` event.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant GW as Gateway
+    participant Driver as web-driver
+    participant Tab as Owned Browser Tab (CDP)
+
+    opt New driver process or native session restore
+        GW->>Driver: start (system with tools, resume_id, config)
+        Driver->>Tab: Create owned tab and check authentication
+        Driver->>Tab: Create thread or restore saved thread URL
+        Driver-->>GW: ready (resume_id)
+    end
+    GW->>Driver: prompt (new messages)
+    Driver->>Tab: Observe baseline, fill prompt, submit with native input
+    loop Until response completes
+        Driver->>Tab: Capture native DOM snapshot
+        Tab-->>Driver: Response text and busy state
+    end
+    opt Site assigns a thread URL
+        Driver-->>GW: session_updated (resume_id: full thread URL)
+    end
+    Driver-->>GW: message (JSON tool envelope)
+    Note over GW,Driver: Driver waits for all requested tool results before submitting a follow-up
+    GW->>Driver: tool_result (one event per call)
+    Driver->>Tab: Submit follow-up after collecting all tool results
+    Tab-->>Driver: Final response observed through snapshots
+    Driver-->>GW: message (final answer) / done
+```
+
+Without client tools, `auto` streams `text` deltas. The completed thread URL is
+checkpointed for later resume. Eviction or cancellation closes the owned tab and
+CDP connection; the persistent browser retains its profile and other tabs.
+See [gateway and thread continuation](#gateway-and-thread-continuation) for restore
+policy and [profile format](#profile-format) for response modes.
+
 ## Source layout
 
 The dependency direction follows the abstraction levels: `app` runs `site`

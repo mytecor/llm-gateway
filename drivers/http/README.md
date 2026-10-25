@@ -2,6 +2,48 @@
 
 Standalone Go module implementing the stateless multiplexed NDJSON HTTP/API provider driver for `llm-gateway`, powered by [Bifrost Core](https://github.com/maximhq/bifrost).
 
+## Architecture and request flow
+
+One long-lived `http-driver` process serves each configured HTTP provider.
+Concurrent requests share the stdio connection and are correlated by request `id`.
+
+```mermaid
+flowchart LR
+    GW["Gateway"] <-->|NDJSON over stdio| Driver["http-driver<br/>Multiplexed request loop"]
+    Driver --> Bifrost["Bifrost Core<br/>Payload translation and provider adapter"]
+    Bifrost <-->|HTTP / SSE| API["Upstream Provider API"]
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant GW as Gateway
+    participant Driver as http-driver
+    participant API as Upstream API (via Bifrost)
+
+    Note over GW,Driver: Provider worker startup
+    GW->>Driver: start (provider config)
+    Driver-->>GW: ready (stateful: false)
+    GW->>Driver: request (id, model, body, stream)
+    Driver->>API: HTTP inference request
+    alt Streaming
+        Driver-->>GW: stream_opened (id)
+        loop Upstream stream chunks
+            API-->>Driver: SSE event
+            Driver-->>GW: chunk (id, data)
+        end
+        Driver-->>GW: done (id)
+    else Non-streaming
+        API-->>Driver: JSON response
+        Driver-->>GW: response (id, data)
+    end
+```
+
+Tool calls are returned to the gateway as part of the upstream response.
+Tool results arrive in the body of a subsequent gateway request. The driver keeps
+no native conversation session. While a request is in flight, the gateway can send
+`cancel (id)` to cancel its upstream context, leaving other request IDs running.
+
 ## Source layout
 
 ```text

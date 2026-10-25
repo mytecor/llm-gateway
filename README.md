@@ -4,6 +4,8 @@ An OpenAI-compatible gateway in Go featuring native ACP/web executors and API pr
 
 The gateway encapsulates upstream LLM providers: clients interact with virtual logical models (e.g., `standard`, `fast`) without needing to know physical model identifiers, provider endpoints, internal URLs, or API keys.
 
+![Animated gateway flow: shared API and routing with separate HTTP, ACP, and Web driver paths.](docs/assets/how-it-works.svg)
+
 ## Features
 
 - **OpenAI Compatibility:** Full support for `/v1/chat/completions` and `/v1/responses` in both standard and streaming (SSE) modes.

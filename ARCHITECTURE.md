@@ -37,9 +37,7 @@ flowchart TD
         Telemetry["Telemetry & Observability<br/>(Prometheus on Loopback :9209, slog JSON)"]
     end
 
-    HTTPDriver["drivers/http (http-driver)<br/>Bifrost Core Upstream Adapter"]
-    ACPDriver["drivers/acp (acp-driver)<br/>agentrun ACP Adapter"]
-    WebDriver["drivers/web (web-driver)<br/>Rust CDP Browser Automation"]
+    Driver["External Driver Binary<br/>(NDJSON over stdio)"]
 
     Client --> Server
     Server --> Auth
@@ -50,13 +48,15 @@ flowchart TD
     
     SessionExec --> ExternalDriver
     ExternalDriver <--> MCPSystem
-    ExternalDriver --> HTTPDriver
-    ExternalDriver --> ACPDriver
-    ExternalDriver --> WebDriver
+    ExternalDriver --> Driver
     
     Server -.-> Telemetry
     Scheduler -.-> Telemetry
 ```
+
+### Animated driver overview
+
+![Animated gateway flow: HTTP multiplexing, ACP agent sessions with MCP tools, and Web browser sessions with prompt tools.](docs/assets/how-it-works.svg)
 
 ### Core Design Tenets
 
@@ -196,30 +196,18 @@ flowchart TD
 
 Beyond standard stateless HTTP inference, LLM Gateway incorporates a session runtime that executes agentic workflows natively.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Client as Client / Pi Harness
-    participant GW as LLM Gateway (Session Runtime)
-    participant Bridge as Stdio MCP Bridge
-    participant Agent as ACP Agent / Browser Driver
+Driver-specific architecture and request flows live alongside each driver:
 
-    Client->>GW: POST /v1/chat/completions (messages, tools, Session-ID)
-    GW->>GW: Hash history prefix & resolve native session
-    GW->>Agent: Launch or Resume Session
-    GW->>Bridge: Register client tools into session-scoped MCP
-    Agent->>Bridge: Call Tool (MCP call)
-    Bridge->>GW: Pending Tool Call Event
-    GW-->>Client: SSE: tool_calls (finish_reason: "tool_calls", [DONE])
-    Note over GW,Agent: Request detaches<br/>Turn stays pending in memory
-    
-    Client->>Client: Execute tool locally
-    Client->>GW: POST /v1/chat/completions (history + role: "tool" results)
-    GW->>GW: Match pending turn & validate tool results
-    GW->>Agent: Forward tool results to waiting turn
-    Agent-->>GW: Final generated text response
-    GW-->>Client: SSE: Assistant text (finish_reason: "stop")
-```
+| Driver | Architecture and sequence diagrams |
+| --- | --- |
+| HTTP | [Multiplexed HTTP requests and upstream streaming](drivers/http/README.md#architecture-and-request-flow) |
+| ACP | [ACP sessions and client tool calls through MCP](drivers/acp/README.md#architecture-and-tool-turns) |
+| Web | [CDP browser sessions and prompt-based client tool calls](drivers/web/README.md#architecture-and-tool-turns) |
+
+The session runtime shares history validation, pending tool turns, and checkpointing
+across stateful drivers. Tool transport is selected per driver; the MCP flow applies
+to ACP, while the Web example uses prompt-based tool envelopes. Custom drivers use
+the shared [session NDJSON protocol](docs/session-executors.md#session-ndjson-driver-protocol).
 
 ### Key Components
 

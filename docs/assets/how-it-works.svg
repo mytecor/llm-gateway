@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1020" viewBox="0 0 1080 1020" role="img" aria-labelledby="title desc">
+  <title id="title">How LLM Gateway routes requests to external drivers</title>
+  <desc id="desc">An animated overview of one OpenAI-compatible request entering authentication and routing, then taking one selected external driver path over NDJSON stdio. HTTP multiplexes requests through Bifrost to provider APIs. ACP owns a child agent and bridges client tools through MCP. Web owns one browser tab and uses native CDP with YAML site profiles. For ACP and Web tool calls, the client executes tools and sends results back to the pending session turn. Stateful routes use one target without retries, racing, or fallback.</desc>
+  <defs>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#243349" opacity=".45"/></pattern>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#101b2e"/><stop offset="1" stop-color="#0a101d"/></linearGradient>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 8 4 0 8" fill="none" stroke="#536782" stroke-width="1.5"/></marker>
+    <style>
+      text{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#e6edf7}
+      .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:14px}
+      .muted{fill:#a0b1c8;font-size:14px}.label{fill:#8ea5c3;font-size:11px;font-weight:700;letter-spacing:1.5px}
+      .heading{font-size:19px;font-weight:650}.small{font-size:13px}.mint{fill:#63e2bd}.amber{fill:#f7c67b}
+      .card{fill:#121e30;stroke:#2b3b53;stroke-width:1.2}.lane{fill:#101a2b;stroke:#243349;stroke-width:1}
+      .wire{fill:none;stroke:#42556f;stroke-width:1.5;marker-end:url(#arrow)}
+      .active{fill:none;stroke:#63e2bd;stroke-width:2;opacity:0;animation:focus 16s linear infinite}
+      .packet{fill:none;stroke:#63e2bd;stroke-width:3;stroke-linecap:round;stroke-dasharray:10 14;opacity:0;animation:travel 16s linear infinite}
+      .s1{animation-delay:0s}.s2{animation-delay:1.5s}.s3{animation-delay:3s}.s4{animation-delay:4.5s}
+      .s5{animation-delay:6s}.s6{animation-delay:7.5s}.s7{animation-delay:9s}.s8{animation-delay:10.5s}.s9{animation-delay:12s}.s10{animation-delay:13.5s}
+      @keyframes focus{0%,1%{opacity:0}3%,11%{opacity:1}14%,100%{opacity:0}}
+      @keyframes travel{0%,1%{opacity:0;stroke-dashoffset:48}3%,11%{opacity:1}14%,100%{opacity:0;stroke-dashoffset:-48}}
+      @media(prefers-reduced-motion:reduce){.active,.packet{animation:none;opacity:0}}
+    </style>
+  </defs>
+  <rect width="1080" height="1020" rx="24" fill="url(#bg)"/>
+  <rect width="1080" height="1020" rx="24" fill="url(#grid)"/>
+  <rect x="40" y="30" width="139" height="25" rx="12.5" fill="#193a36"/>
+  <text x="109.5" y="47" text-anchor="middle" class="label mint">LLM GATEWAY</text>
+  <circle cx="922" cy="43" r="4" fill="#63e2bd"/>
+  <text x="935" y="48" class="small muted">16 s / loop</text>
+  <text x="40" y="96" font-size="32" font-weight="700" letter-spacing="-.8">One API. Three driver paths.</text>
+  <text x="40" y="124" class="muted">Logical models in. Native provider, agent, or browser execution out.</text>
+
+  <!-- Shared ingress: routing chooses a driver path, rather than broadcasting to all drivers. -->
+  <path class="wire" d="M320 215h78"/><path class="packet s1" d="M320 215h70"/>
+  <path class="wire" d="M680 215h78"/><path class="packet s2" d="M680 215h70"/>
+  <rect x="40" y="153" width="280" height="124" rx="16" class="card"/>
+  <rect x="40" y="153" width="280" height="124" rx="16" class="active s1"/>
+  <text x="60" y="182" class="label">01 / CLIENT</text>
+  <text x="60" y="213" class="heading">OpenAI-compatible API</text>
+  <text x="60" y="240" class="mono muted">chat / responses / models</text>
+  <text x="60" y="261" class="small muted">SDKs, Pi, cURL, applications</text>
+  <rect x="400" y="153" width="280" height="124" rx="16" class="card"/>
+  <rect x="400" y="153" width="280" height="124" rx="16" class="active s2"/>
+  <text x="420" y="182" class="label">02 / GATEWAY CORE</text>
+  <text x="420" y="213" class="heading">Authenticate and route</text>
+  <text x="420" y="240" class="muted">Logical model → native model</text>
+  <text x="420" y="261" class="small muted">Policy, capacity, session affinity</text>
+  <rect x="760" y="153" width="280" height="124" rx="16" class="card"/>
+  <rect x="760" y="153" width="280" height="124" rx="16" class="active s3"/>
+  <text x="780" y="182" class="label">03 / EXTERNAL CLIENT</text>
+  <text x="780" y="213" class="heading">Dispatch over stdio</text>
+  <text x="780" y="240" class="mono mint">NDJSON wire protocol</text>
+  <text x="780" y="261" class="small muted">Capabilities select execution mode</text>
+  <text x="40" y="309" class="label">ONE SELECTED ROUTE → ONE DRIVER PATH / LANES ANIMATE IN TURN</text>
+
+  <!-- HTTP: one provider worker multiplexes independent request IDs. -->
+  <rect x="40" y="330" width="1000" height="125" rx="16" class="lane"/>
+  <text x="60" y="361" class="label mint">HTTP</text>
+  <text x="60" y="388" class="small muted">Stateless</text>
+  <text x="60" y="410" class="small muted">Chat + Responses</text>
+  <text x="60" y="432" class="small muted">One provider worker</text>
+  <path class="wire" d="M450 392h48"/><path class="packet s3" d="M450 392h40"/>
+  <path class="wire" d="M730 392h48"/><path class="packet s4" d="M730 392h40"/>
+  <rect x="220" y="345" width="230" height="95" rx="12" class="card"/>
+  <rect x="220" y="345" width="230" height="95" rx="12" class="active s3"/>
+  <text x="238" y="374" class="heading">http-driver</text>
+  <text x="238" y="399" class="mono mint">request / cancel (id)</text>
+  <text x="238" y="423" class="small muted">Concurrent request IDs</text>
+  <rect x="500" y="345" width="230" height="95" rx="12" class="card"/>
+  <rect x="500" y="345" width="230" height="95" rx="12" class="active s4"/>
+  <text x="518" y="374" class="heading">Bifrost → Provider API</text>
+  <text x="518" y="399" class="muted">Native HTTP / SSE requests</text>
+  <text x="518" y="423" class="small muted">Translate payloads and errors</text>
+  <rect x="780" y="345" width="240" height="95" rx="12" class="card"/>
+  <rect x="780" y="345" width="240" height="95" rx="12" class="active s4"/>
+  <text x="798" y="374" class="heading">SSE or JSON response</text>
+  <text x="798" y="399" class="mono muted">chunk / done / response</text>
+  <text x="798" y="423" class="small muted">Gateway returns SSE or JSON</text>
+
+  <!-- ACP: gateway tool events cross a driver-owned MCP bridge to the child agent. -->
+  <rect x="40" y="475" width="1000" height="125" rx="16" class="lane"/>
+  <text x="60" y="506" class="label mint">ACP</text>
+  <text x="60" y="533" class="small muted">Stateful chat</text>
+  <text x="60" y="555" class="small muted">One process/session</text>
+  <text x="60" y="577" class="small muted">Native resume ID</text>
+  <path class="wire" d="M450 537h48"/><path class="packet s5" d="M450 537h40"/>
+  <path class="wire" d="M730 537h48"/><path class="packet s6" d="M730 537h40"/>
+  <rect x="220" y="490" width="230" height="95" rx="12" class="card"/>
+  <rect x="220" y="490" width="230" height="95" rx="12" class="active s5"/>
+  <text x="238" y="519" class="heading">acp-driver</text>
+  <text x="238" y="544" class="mono mint">start / prompt</text>
+  <text x="238" y="568" class="small muted">agentrun owns child lifecycle</text>
+  <rect x="500" y="490" width="230" height="95" rx="12" class="card"/>
+  <rect x="500" y="490" width="230" height="95" rx="12" class="active s6"/>
+  <text x="518" y="519" class="heading">Child ACP agent</text>
+  <text x="518" y="544" class="muted">Native agent conversation</text>
+  <text x="518" y="568" class="small muted">MCP bridge exposes client tools</text>
+  <rect x="780" y="490" width="240" height="95" rx="12" class="card"/>
+  <rect x="780" y="490" width="240" height="95" rx="12" class="active s6"/>
+  <text x="798" y="519" class="heading">Tool call or text</text>
+  <text x="798" y="544" class="mono muted">tool_call / text / done</text>
+  <text x="798" y="568" class="small muted">MCP calls become NDJSON events</text>
+
+  <!-- Web: one owned tab in an externally managed browser; tool example uses prompt mode. -->
+  <rect x="40" y="620" width="1000" height="125" rx="16" class="lane"/>
+  <text x="60" y="651" class="label mint">WEB</text>
+  <text x="60" y="678" class="small muted">Stateful chat</text>
+  <text x="60" y="700" class="small muted">One tab/session</text>
+  <text x="60" y="722" class="small muted">Thread URL resume</text>
+  <path class="wire" d="M450 682h48"/><path class="packet s7" d="M450 682h40"/>
+  <path class="wire" d="M730 682h48"/><path class="packet s8" d="M730 682h40"/>
+  <rect x="220" y="635" width="230" height="95" rx="12" class="card"/>
+  <rect x="220" y="635" width="230" height="95" rx="12" class="active s7"/>
+  <text x="238" y="664" class="heading">web-driver</text>
+  <text x="238" y="689" class="mono mint">YAML site workflows</text>
+  <text x="238" y="713" class="small muted">Native snapshots + rule matching</text>
+  <rect x="500" y="635" width="230" height="95" rx="12" class="card"/>
+  <rect x="500" y="635" width="230" height="95" rx="12" class="active s8"/>
+  <text x="518" y="664" class="heading">Owned browser tab</text>
+  <text x="518" y="689" class="muted">CDP navigation and native input</text>
+  <text x="518" y="713" class="small muted">External browser keeps its profile</text>
+  <rect x="780" y="635" width="240" height="95" rx="12" class="card"/>
+  <rect x="780" y="635" width="240" height="95" rx="12" class="active s8"/>
+  <text x="798" y="664" class="heading">Tool envelope or text</text>
+  <text x="798" y="689" class="mono muted">message / text / done</text>
+  <text x="798" y="713" class="small muted">Prompt tools decoded by gateway</text>
+
+  <!-- Stateful tool continuation uses full-size cards, matching the shared ingress. -->
+  <path d="M40 772h1000" stroke="#2b3b53"/>
+  <text x="40" y="801" class="label">CLIENT TOOLS / ACP AND WEB</text>
+  <text x="1040" y="801" text-anchor="end" class="small amber">Native turn stays pending while the client runs tools</text>
+  <path class="wire" d="M320 886h78"/><path class="packet s9" d="M320 886h70"/>
+  <path class="wire" d="M680 886h78"/><path class="packet s10" d="M680 886h70"/>
+
+  <rect x="40" y="822" width="280" height="130" rx="16" class="card"/>
+  <rect x="40" y="822" width="280" height="130" rx="16" class="active s9"/>
+  <text x="60" y="851" class="label">01 / GATEWAY → CLIENT</text>
+  <text x="60" y="882" class="heading">Return tool calls</text>
+  <text x="60" y="909" class="mono mint">tool_calls + call IDs</text>
+  <text x="60" y="934" class="small muted">End response; keep the turn pending</text>
+
+  <rect x="400" y="822" width="280" height="130" rx="16" class="card"/>
+  <rect x="400" y="822" width="280" height="130" rx="16" class="active s10"/>
+  <text x="420" y="851" class="label">02 / CLIENT EXECUTION</text>
+  <text x="420" y="882" class="heading">Run tools locally</text>
+  <text x="420" y="909" class="mono mint">POST history + results</text>
+  <text x="420" y="934" class="small muted">Same session, matching tool_call_id</text>
+
+  <rect x="760" y="822" width="280" height="130" rx="16" class="card"/>
+  <rect x="760" y="822" width="280" height="130" rx="16" class="active s10"/>
+  <text x="780" y="851" class="label">03 / GATEWAY → DRIVER</text>
+  <text x="780" y="882" class="heading">Continue the native turn</text>
+  <text x="780" y="909" class="mono mint">tool_result → session</text>
+  <text x="780" y="934" class="small muted">Validate results, then resume work</text>
+
+  <text x="40" y="991" class="small muted">Stateful routes: one target, no retry / hedge / fallback. Session runtime validates history and checkpoints resume IDs.</text>
+</svg>

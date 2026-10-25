@@ -8,6 +8,10 @@ Concrete driver documentation lives alongside each driver's source code:
 - [ACP Agent Driver (`drivers/acp/README.md`)](../drivers/acp/README.md) — stateful ACP agent session driver (`acp-driver`) powered by `agentrun`.
 - [Web CDP Driver (`drivers/web/README.md`)](../drivers/web/README.md) — stateful Rust CDP browser automation driver (`web-driver`) with YAML site profiles.
 
+Driver-specific diagrams: [HTTP request flow](../drivers/http/README.md#architecture-and-request-flow),
+[ACP sessions and MCP tools](../drivers/acp/README.md#architecture-and-tool-turns),
+and [Web sessions and prompt tools](../drivers/web/README.md#architecture-and-tool-turns).
+
 Driver-specific settings (such as `base_provider`, `inference_url`, `api_key`, `strip_params`, `set_params`, `profile`, `cdp_url`, `account`, `state_dir`, `heal`, etc.) are stored opaquely by the gateway in `Provider.Config` (with recursive `env.VAR` secret expansion) and validated by the driver itself during the `{"type":"init",...}` handshake, which also returns the provider's `Capabilities` (`chat`, `responses`, `streaming`, `tools`, `stateful`, `resume`, `safe_replay`).
 
 When using a stateful session driver (`capabilities.stateful == true`), configure:

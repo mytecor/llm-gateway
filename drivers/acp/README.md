@@ -2,6 +2,52 @@
 
 Standalone Go module implementing the stateful Agent Client Protocol (ACP) session driver for `llm-gateway`, powered by [`github.com/dmora/agentrun`](https://github.com/dmora/agentrun).
 
+## Architecture and tool turns
+
+Each active conversation owns an `acp-driver` process and its child ACP agent.
+Both `tool_strategy: auto` and `mcp` expose tools supplied by the gateway
+through the driver's session-scoped MCP bridge. The gateway exchanges NDJSON tool events with the driver.
+
+```mermaid
+flowchart LR
+    GW["Gateway"] <-->|NDJSON over stdio| Driver["acp-driver<br/>agentrun and session facade"]
+    Driver <-->|ACP| Agent["Child ACP Agent"]
+    Agent <-->|MCP over stdio| Bridge["acp-driver __mcp-bridge"]
+    Bridge <-->|Authenticated loopback HTTP| Driver
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant GW as Gateway
+    participant Driver as acp-driver
+    participant Agent as ACP Agent
+    participant Bridge as Session MCP Bridge
+
+    opt New driver process or native session restore
+        GW->>Driver: start (tools, model, resume_id)
+        Driver->>Driver: Create session facade and MCP descriptor
+        Driver->>Agent: Launch / resume via agentrun with MCP descriptor
+        Driver-->>GW: ready (resume_id)
+    end
+    GW->>Driver: prompt (new messages)
+    Driver->>Agent: Run ACP turn
+    Agent->>Bridge: MCP tools/call
+    Bridge->>Driver: Tool call through loopback facade
+    Driver-->>GW: tool_call (id, name, arguments)
+    Note over Driver,Bridge: MCP call waits for a tool_result from the gateway
+    GW->>Driver: tool_result (id, content)
+    Driver-->>Bridge: Complete waiting facade call
+    Bridge-->>Agent: MCP tool result
+    Agent-->>Driver: Generated text and turn completion
+    Driver-->>GW: text / done
+```
+
+The agent can also use its own built-in tools within the ACP turn. Session IDs
+reported by the agent become `session_updated` events for gateway checkpointing.
+See the [shared session lifecycle](../../docs/session-executors.md#lifecycle-and-routing)
+for history validation, eviction, and missing-session policy.
+
 ## Source layout
 
 ```text
