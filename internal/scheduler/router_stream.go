@@ -1,12 +1,13 @@
 package scheduler
 
 import (
-	"github.com/mytecor/llm-gateway/internal/model"
-	"github.com/mytecor/llm-gateway/internal/policy"
-	"github.com/mytecor/llm-gateway/internal/subsystem"
 	"context"
 	"errors"
 	"time"
+
+	"github.com/mytecor/llm-gateway/internal/model"
+	"github.com/mytecor/llm-gateway/internal/policy"
+	"github.com/mytecor/llm-gateway/internal/subsystem"
 )
 
 // SelectedStream is the winner of a streaming route: the buffered prelude, the

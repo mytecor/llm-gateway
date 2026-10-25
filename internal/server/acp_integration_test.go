@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mytecor/llm-gateway/internal/config"
 	"github.com/mytecor/llm-gateway/internal/executor"
-	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/scheduler"
 	"github.com/mytecor/llm-gateway/internal/session"
 	"github.com/mytecor/llm-gateway/internal/subsystem"
@@ -365,11 +365,11 @@ func newNativeServer(t *testing.T, kind, mode string, timeout time.Duration, sto
 			map[string]any{"route": "agent", "action": "race", "count": 1},
 		},
 	})
-	var cfg policy.Config
+	var cfg config.Config
 	if err = json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

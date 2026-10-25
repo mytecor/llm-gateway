@@ -1,19 +1,22 @@
 package subsystem
 
 import (
-	"github.com/mytecor/llm-gateway/internal/model"
-	"github.com/mytecor/llm-gateway/internal/policy"
 	"context"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
+
+	"github.com/mytecor/llm-gateway/internal/config"
+	"github.com/mytecor/llm-gateway/internal/model"
+	"github.com/mytecor/llm-gateway/internal/policy"
+	"github.com/mytecor/llm-gateway/internal/provider"
 )
 
-func catalogForProvider(t *testing.T, source policy.CatalogSource) *Catalog {
+func catalogForProvider(t *testing.T, source config.CatalogSource) *Catalog {
 	t.Helper()
-	compiled := policy.RaceOnlyConfig(t)
-	compiled.CatalogSources = map[string][]policy.CatalogSource{"a": {source}}
+	compiled := config.RaceOnlyConfig(t)
+	compiled.CatalogSources = map[string][]config.CatalogSource{"a": {source}}
 	catalog := NewCatalog(compiled)
 	return catalog
 }
@@ -27,7 +30,7 @@ func TestCatalogExactMatchOnly(t *testing.T) {
 		_, _ = writer.Write([]byte(`{"object":"list","data":[{"id":"deepseek-ai/DeepSeek-V4-Flash-0731"},{"id":"gonka/deepseek-ai/DeepSeek-V4-Flash-0731"}]}`))
 	}))
 	defer server.Close()
-	catalog := catalogForProvider(t, policy.CatalogSource{URL: server.URL, Explicit: true})
+	catalog := catalogForProvider(t, config.CatalogSource{URL: server.URL, Explicit: true})
 	if failures := catalog.Refresh(context.Background()); len(failures) != 0 {
 		t.Fatalf("initial refresh failed: %v", failures)
 	}
@@ -55,7 +58,7 @@ func TestCatalogLastKnownGoodSurvivesFailedRefresh(t *testing.T) {
 	}))
 	defer server.Close()
 
-	catalog := catalogForProvider(t, policy.CatalogSource{URL: server.URL, Explicit: true})
+	catalog := catalogForProvider(t, config.CatalogSource{URL: server.URL, Explicit: true})
 	if failures := catalog.Refresh(context.Background()); len(failures) != 0 {
 		t.Fatalf("initial refresh failed: %v", failures)
 	}
@@ -88,16 +91,16 @@ func TestCatalogPartialRefreshIsPerProviderIndependent(t *testing.T) {
 	}))
 	defer available.Close()
 
-	compiled := policy.RaceOnlyConfig(t)
-	compiled.CatalogSources = map[string][]policy.CatalogSource{
+	compiled := config.RaceOnlyConfig(t)
+	compiled.CatalogSources = map[string][]config.CatalogSource{
 		"a": {{URL: unavailable.URL, Explicit: true}},
 		"b": {{URL: available.URL, Explicit: true}},
 	}
 	catalog := NewCatalog(compiled)
 	// Prime both providers with a healthy snapshot.
-	compiled.CatalogSources["a"] = []policy.CatalogSource{{URL: available.URL, Explicit: true}}
+	compiled.CatalogSources["a"] = []config.CatalogSource{{URL: available.URL, Explicit: true}}
 	catalog.Refresh(context.Background())
-	compiled.CatalogSources["a"] = []policy.CatalogSource{{URL: unavailable.URL, Explicit: true}}
+	compiled.CatalogSources["a"] = []config.CatalogSource{{URL: unavailable.URL, Explicit: true}}
 	if failures := catalog.Refresh(context.Background()); len(failures) != 1 {
 		t.Fatalf("expected exactly one failing provider, got %v", failures)
 	}
@@ -112,8 +115,8 @@ func TestCatalogPartialRefreshIsPerProviderIndependent(t *testing.T) {
 func TestCatalogInferredOptimisticWithoutSnapshot(t *testing.T) {
 	// An inferred catalog (no explicit modelsUrl) that has not produced a
 	// snapshot yet must optimistically accept the configured native ID.
-	compiled := policy.RaceOnlyConfig(t)
-	compiled.CatalogSources = map[string][]policy.CatalogSource{
+	compiled := config.RaceOnlyConfig(t)
+	compiled.CatalogSources = map[string][]config.CatalogSource{
 		"a": {{URL: "https://catalog.invalid/v1/models"}}, // inferred, not Explicit
 	}
 	catalog := NewCatalog(compiled)
@@ -123,8 +126,8 @@ func TestCatalogInferredOptimisticWithoutSnapshot(t *testing.T) {
 }
 
 func TestCatalogExplicitFailClosedWithoutSnapshot(t *testing.T) {
-	compiled := policy.RaceOnlyConfig(t)
-	compiled.CatalogSources = map[string][]policy.CatalogSource{
+	compiled := config.RaceOnlyConfig(t)
+	compiled.CatalogSources = map[string][]config.CatalogSource{
 		"a": {{URL: "https://catalog.invalid/v1/models", Explicit: true}},
 	}
 	catalog := NewCatalog(compiled)
@@ -135,8 +138,8 @@ func TestCatalogExplicitFailClosedWithoutSnapshot(t *testing.T) {
 }
 
 func TestCatalogNoDiscoveryProviderIsOptimistic(t *testing.T) {
-	compiled := policy.RaceOnlyConfig(t)
-	compiled.CatalogSources = map[string][]policy.CatalogSource{}
+	compiled := config.RaceOnlyConfig(t)
+	compiled.CatalogSources = map[string][]config.CatalogSource{}
 	catalog := NewCatalog(compiled)
 	if callErr := catalog.Validate("a", "any-explicit-native"); callErr != nil {
 		t.Fatalf("provider without discovery must accept the explicit native: %v", callErr)
@@ -151,7 +154,7 @@ func TestCatalogMergesSourcesAndDetectsAbsence(t *testing.T) {
 		_, _ = writer.Write([]byte(`{"data":[{"id":"zeta"},{"id":"alpha"},{"id":"alpha"}]}`))
 	}))
 	defer server.Close()
-	catalog := catalogForProvider(t, policy.CatalogSource{URL: server.URL, Explicit: true})
+	catalog := catalogForProvider(t, config.CatalogSource{URL: server.URL, Explicit: true})
 	if failures := catalog.Refresh(context.Background()); len(failures) != 0 {
 		t.Fatalf("refresh failed: %v", failures)
 	}
@@ -195,8 +198,8 @@ func TestCatalogFetchesDerivedProviderPaths(t *testing.T) {
 			}))
 			defer server.Close()
 
-			cfg := policy.TestConfig()
-			cfg.Providers = []policy.Provider{cfg.Providers[0]}
+			cfg := config.TestConfig()
+			cfg.Providers = []provider.Provider{cfg.Providers[0]}
 			cfg.Providers[0].Config = map[string]any{
 				"inference_url": server.URL + test.basePath,
 				"api_key":       "provider-key",
@@ -208,7 +211,7 @@ func TestCatalogFetchesDerivedProviderPaths(t *testing.T) {
 				policy.RankRuleHelper("standard"),
 				policy.RaceRuleHelper("standard", 1),
 			}
-			compiled, err := policy.CompileConfig(cfg)
+			compiled, err := config.CompileConfig(cfg)
 			if err != nil {
 				t.Fatal(err)
 			}

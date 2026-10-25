@@ -1,4 +1,4 @@
-package policy
+package config
 
 import (
 	"bytes"
@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/mytecor/llm-gateway/internal/policy"
+	"github.com/mytecor/llm-gateway/internal/provider"
 )
 
 func init() {
@@ -162,13 +165,13 @@ func TestACPToolStrategies(t *testing.T) {
 func TestSessionDriverRejectsInvalidSettings(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		change func(*Provider)
+		change func(*provider.Provider)
 	}{
-		{"unknown", func(p *Provider) { p.Driver = "missing" }},
-		{"command", func(p *Provider) { p.Command = nil }},
-		{"url", func(p *Provider) { p.Config = map[string]any{"inference_url": "https://example.com"} }},
-		{"key", func(p *Provider) { p.Config = map[string]any{"api_key": "secret"} }},
-		{"root", func(p *Provider) { p.Session.AllowedRoots = []string{""} }},
+		{"unknown", func(p *provider.Provider) { p.Driver = "missing" }},
+		{"command", func(p *provider.Provider) { p.Command = nil }},
+		{"url", func(p *provider.Provider) { p.Config = map[string]any{"inference_url": "https://example.com"} }},
+		{"key", func(p *provider.Provider) { p.Config = map[string]any{"api_key": "secret"} }},
+		{"root", func(p *provider.Provider) { p.Session.AllowedRoots = []string{""} }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := sessionConfig(t, "acp")
@@ -188,7 +191,7 @@ func TestSessionRoutesRejectSpeculationAndReplay(t *testing.T) {
 		`{"route":"main","action":"repetition"}`,
 	} {
 		cfg := sessionConfig(t, "acp")
-		var rules Rules
+		var rules policy.Rules
 		if err := json.Unmarshal([]byte("["+action+"]"), &rules); err != nil {
 			t.Fatal(err)
 		}
@@ -198,7 +201,7 @@ func TestSessionRoutesRejectSpeculationAndReplay(t *testing.T) {
 		}
 	}
 	cfg := sessionConfig(t, "acp")
-	cfg.Rules[len(cfg.Rules)-1].(*RaceRule).Count = 0
+	cfg.Rules[len(cfg.Rules)-1].(*policy.RaceRule).Count = 0
 	if _, err := CompileConfig(cfg); err == nil || !strings.Contains(err.Error(), "stateful") {
 		t.Fatal("accepted implicit stateful race", err)
 	}

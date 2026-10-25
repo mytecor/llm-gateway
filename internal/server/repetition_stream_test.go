@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mytecor/llm-gateway/internal/config"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/telemetry"
@@ -27,9 +28,9 @@ func scrape(t *testing.T, m *telemetry.Metrics) string {
 // takeover path) and the repetition loop-guard policy on top of it. The
 // continue rule carries a generous hold horizon so the takeover completes
 // without entering the hold/keep-alive path.
-func repetitionConfig(t *testing.T) *policy.CompiledConfig {
+func repetitionConfig(t *testing.T) *config.CompiledConfig {
 	t.Helper()
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:2] // a, b
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
@@ -40,7 +41,7 @@ func repetitionConfig(t *testing.T) *policy.CompiledConfig {
 		policy.ContinueRuleWait("standard", 90*time.Second, "full", 0, 50*time.Millisecond),
 		policy.RepetitionRuleHelper("standard"),
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +186,7 @@ func TestServerRepetitionLoopTakeoverRejectsTheLoopStream(t *testing.T) {
 // operator arms it (here there is not even a continue rule, so the relay has
 // no loop-related machinery at all).
 func TestServerRepetitionNotArmedByDefault(t *testing.T) {
-	compiled := policy.RaceOnlyConfig(t) // plain race, no continue, no repetition
+	compiled := config.RaceOnlyConfig(t) // plain race, no continue, no repetition
 	var aCalls int
 	executor := &fakeExecutor{
 		stream: func(ctx context.Context, target model.Target, _ model.ExecuteRequest) (<-chan model.StreamEvent, *model.CallError) {
@@ -262,9 +263,9 @@ func TestServerRepetitionLoopSurfaceTerminalError(t *testing.T) {
 // repetitionSingleConfig is a single-provider stream config that declares
 // both the continue policy (a bounded hold horizon so the terminal error
 // surfaces fast) and the repetition loop guard.
-func repetitionSingleConfig(t *testing.T) *policy.CompiledConfig {
+func repetitionSingleConfig(t *testing.T) *config.CompiledConfig {
 	t.Helper()
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:1] // a only
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
@@ -275,7 +276,7 @@ func repetitionSingleConfig(t *testing.T) *policy.CompiledConfig {
 		policy.ContinueRuleWait("standard", 90*time.Second, "full", 0, 50*time.Millisecond),
 		policy.RepetitionRuleHelper("standard"),
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

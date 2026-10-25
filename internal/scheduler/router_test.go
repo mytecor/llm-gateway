@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mytecor/llm-gateway/internal/config"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/subsystem"
@@ -108,7 +109,7 @@ func successBody(winner string) []byte {
 // ---------------------------------------------------------------------------
 
 func TestBoundedRaceStartsExactlyTopCount(t *testing.T) {
-	compiled := policy.RulesConfig(t, 3, policy.EntryRules([]string{"a", "b", "c"}, 2))
+	compiled := config.RulesConfig(t, 3, policy.EntryRules([]string{"a", "b", "c"}, 2))
 	started := make(chan string, 3)
 	release := make(chan struct{})
 	executor := &fakeExecutor{do: func(ctx context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
@@ -159,7 +160,7 @@ func TestBoundedRaceStartsExactlyTopCount(t *testing.T) {
 }
 
 func TestBoundedRaceFirstErrorDoesNotFinishRequest(t *testing.T) {
-	compiled := policy.RaceOnlyConfig(t)
+	compiled := config.RaceOnlyConfig(t)
 	started := make(chan string, 2)
 	release := make(chan struct{})
 	executor := &fakeExecutor{do: func(ctx context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
@@ -199,7 +200,7 @@ func TestBoundedRaceFirstErrorDoesNotFinishRequest(t *testing.T) {
 }
 
 func TestBoundedRaceCancelsLosers(t *testing.T) {
-	compiled := policy.RaceOnlyConfig(t)
+	compiled := config.RaceOnlyConfig(t)
 	started := make(chan string, 2)
 	releaseWinner := make(chan struct{})
 	loserCancelled := make(chan struct{})
@@ -244,7 +245,7 @@ func TestBoundedRaceCancelsLosers(t *testing.T) {
 // of llm_requests_in_flight: the decrement used to live only in the main loop,
 // so a cancelled loser (winner already returned) left +1 in the gauge forever.
 func TestRaceReleasesInFlightGauge(t *testing.T) {
-	compiled := policy.RaceOnlyConfig(t)
+	compiled := config.RaceOnlyConfig(t)
 	started := make(chan string, 2)
 	releaseWinner := make(chan struct{})
 	loserDone := make(chan struct{})
@@ -288,7 +289,7 @@ func TestRaceReleasesInFlightGauge(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestEntryRouteSelectionByModel(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Rules = append(policy.EntryRules([]string{"a", "b"}, 1),
 		policy.FilterModel("stupid", "stupid"),
 		policy.FilterProvider("stupid", "c"),
@@ -296,7 +297,7 @@ func TestEntryRouteSelectionByModel(t *testing.T) {
 		policy.RankRuleHelper("stupid"),
 		policy.RaceRuleHelper("stupid", 1),
 	)
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +327,7 @@ func TestEntryRouteSelectionByModel(t *testing.T) {
 }
 
 func TestDuplicateEntryModelRejected(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Rules = append(cfg.Rules,
 		policy.FilterModel("second", "standard"),
 		policy.FilterProvider("second", "c"),
@@ -334,7 +335,7 @@ func TestDuplicateEntryModelRejected(t *testing.T) {
 		policy.RankRuleHelper("second"),
 		policy.RaceRuleHelper("second", 1),
 	)
-	if _, err := policy.CompileConfig(cfg); err == nil || !strings.Contains(err.Error(), "duplicate entry route") {
+	if _, err := config.CompileConfig(cfg); err == nil || !strings.Contains(err.Error(), "duplicate entry route") {
 		t.Fatalf("expected duplicate entry route rejection, got %v", err)
 	}
 }
@@ -344,7 +345,7 @@ func TestDuplicateEntryModelRejected(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRetrySubroute429FiresRetry(t *testing.T) {
-	compiled := policy.RulesConfig(t, 3, append(
+	compiled := config.RulesConfig(t, 3, append(
 		append(policy.EntryRules([]string{"a", "b", "c"}, 2),
 			policy.RetryRuleHelper("standard", "standard.retry", 1)),
 		retryRulesUnused("standard", []string{"429", "5xx"}, []string{"a", "b", "c"}, 1)...,
@@ -378,7 +379,7 @@ func TestRetrySubroute429FiresRetry(t *testing.T) {
 }
 
 func TestRetrySubroute400NotApplicableReturnsOriginal(t *testing.T) {
-	compiled := policy.RulesConfig(t, 3, append(
+	compiled := config.RulesConfig(t, 3, append(
 		append(policy.EntryRules([]string{"a", "b", "c"}, 2),
 			policy.RetryRuleHelper("standard", "standard.retry", 2)),
 		retryRulesUnused("standard", []string{"429", "5xx"}, []string{"a", "b", "c"}, 1)...,
@@ -402,7 +403,7 @@ func TestRetrySubroute400NotApplicableReturnsOriginal(t *testing.T) {
 func TestRetrySubrouteAttemptsAndBackoff(t *testing.T) {
 	var mu sync.Mutex
 	var backoffs []time.Duration
-	compiled := policy.RulesConfig(t, 3, append(
+	compiled := config.RulesConfig(t, 3, append(
 		append(policy.EntryRules([]string{"a", "b"}, 2),
 			retryRuleBackoff("standard", "standard.retry", 2,
 				&policy.BackoffConfig{Type: "exponential", Initial: policy.Duration{Duration: time.Millisecond}, Max: policy.Duration{Duration: 4 * time.Millisecond}})),
@@ -445,7 +446,7 @@ func TestRetrySubrouteUnusedPoolExhaustionReturnsOriginal(t *testing.T) {
 	rules = append(rules, policy.FilterError("standard.retry", "429"))
 	rules = append(rules, policy.FilterProviderUnused("standard.retry", "a", "b"))
 	rules = append(rules, policy.MapRuleHelper("standard.retry", "native-model"), policy.RankRuleHelper("standard.retry"), policy.RaceRuleHelper("standard.retry", 1))
-	compiled := policy.RulesConfig(t, 2, rules)
+	compiled := config.RulesConfig(t, 2, rules)
 	var calls atomic.Int32
 	executor := &fakeExecutor{do: func(_ context.Context, _ model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
 		calls.Add(1)
@@ -481,7 +482,7 @@ func TestRetrySubrouteUnusedPoolExhaustionContinuesToFallback(t *testing.T) {
 		policy.RankRuleHelper("standard.fallback"),
 		policy.RaceRuleHelper("standard.fallback", 1),
 	)
-	compiled := policy.RulesConfig(t, 2, rules)
+	compiled := config.RulesConfig(t, 2, rules)
 	var calls atomic.Int32
 	executor := &fakeExecutor{do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
 		calls.Add(1)
@@ -508,7 +509,7 @@ func TestRouteTimeoutInterruptsRetryBackoff(t *testing.T) {
 	rules = append(rules, policy.FilterError("standard.retry", "429"))
 	rules = append(rules, policy.FilterProviderUnused("standard.retry", "a", "b"))
 	rules = append(rules, policy.MapRuleHelper("standard.retry", "native-model"), policy.RankRuleHelper("standard.retry"), policy.RaceRuleHelper("standard.retry", 1))
-	compiled := policy.RulesConfig(t, 2, rules)
+	compiled := config.RulesConfig(t, 2, rules)
 	var calls atomic.Int32
 	executor := &fakeExecutor{do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
 		calls.Add(1)
@@ -541,7 +542,7 @@ func TestHedgeStartsOnlyTargetAfterDelay(t *testing.T) {
 	rules = append(rules, policy.FilterError("standard.hedge", "429", "5xx"))
 	rules = append(rules, policy.FilterProviderUnused("standard.hedge", "b", "c"))
 	rules = append(rules, policy.MapRuleHelper("standard.hedge", "native-model"), policy.RankRuleHelper("standard.hedge"), policy.RaceRuleHelper("standard.hedge", 1))
-	compiled := policy.RulesConfig(t, 3, rules)
+	compiled := config.RulesConfig(t, 3, rules)
 	started := make(chan string, 4)
 	release := make(chan struct{})
 	executor := &fakeExecutor{do: func(ctx context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
@@ -605,7 +606,7 @@ func TestHedgeFastTerminalFailureSkipsHedgeAndTransitions(t *testing.T) {
 	rules = append(rules, policy.FilterError("standard.hedge", "5xx"))
 	rules = append(rules, policy.FilterProviderUnused("standard.hedge", "b", "c"))
 	rules = append(rules, policy.MapRuleHelper("standard.hedge", "native-model"), policy.RankRuleHelper("standard.hedge"), policy.RaceRuleHelper("standard.hedge", 1))
-	compiled := policy.RulesConfig(t, 3, rules)
+	compiled := config.RulesConfig(t, 3, rules)
 	started := make(chan string, 4)
 	executor := &fakeExecutor{do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
 		started <- target.Provider
@@ -661,7 +662,7 @@ func TestSemaphoreMaxCallsBoundsTotalCalls(t *testing.T) {
 		policy.RetryRuleHelper("standard", "standard.retry", 1),
 		semaphoreRule("standard", 3, 3, 1))
 	rules = append(rules, retryRulesUnused("standard", []string{"429"}, []string{"a", "b", "c", "d"}, 1)...)
-	compiled := policy.RulesConfig(t, 4, rules)
+	compiled := config.RulesConfig(t, 4, rules)
 	var mu sync.Mutex
 	calls := 0
 	executor := &fakeExecutor{do: func(_ context.Context, _ model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
@@ -692,7 +693,7 @@ func TestSemaphoreMaxCallsPerProviderAcrossRequest(t *testing.T) {
 	rules = append(rules, policy.FilterError("standard.retry", "429"))
 	rules = append(rules, policy.FilterProvider("standard.retry", "a"))
 	rules = append(rules, policy.MapRuleHelper("standard.retry", "native-model"), policy.RankRuleHelper("standard.retry"), policy.RaceRuleHelper("standard.retry", 1))
-	compiled := policy.RulesConfig(t, 1, rules)
+	compiled := config.RulesConfig(t, 1, rules)
 	var calls atomic.Int32
 	executor := &fakeExecutor{do: func(_ context.Context, _ model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
 		calls.Add(1)
@@ -715,7 +716,7 @@ func TestSemaphoreMaxInFlightGatesHedgeTarget(t *testing.T) {
 		semaphoreRule("standard", 3, 2, 1))
 	rules = append(rules, policy.FilterProviderUnused("standard.hedge", "a", "b", "c"))
 	rules = append(rules, policy.MapRuleHelper("standard.hedge", "native-model"), policy.RankRuleHelper("standard.hedge"), policy.RaceRuleHelper("standard.hedge", 1))
-	compiled := policy.RulesConfig(t, 3, rules)
+	compiled := config.RulesConfig(t, 3, rules)
 	releaseA := make(chan struct{})
 	releaseB := make(chan struct{})
 	cStarted := make(chan struct{})
@@ -766,7 +767,7 @@ func TestSemaphoreMaxInFlightGatesHedgeTarget(t *testing.T) {
 func TestSemaphoreRefillsPartiallyStartedInitialRace(t *testing.T) {
 	rules := append(policy.EntryRules([]string{"a", "b", "c"}, 3),
 		semaphoreRule("standard", 3, 1, 1))
-	compiled := policy.RulesConfig(t, 3, rules)
+	compiled := config.RulesConfig(t, 3, rules)
 	var mu sync.Mutex
 	var called []string
 	executor := &fakeExecutor{do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
@@ -800,7 +801,7 @@ func TestNoUpstreamCallsAfterWinner(t *testing.T) {
 	rules = append(rules, policy.FilterError("standard.retry", "429", "5xx"))
 	rules = append(rules, policy.FilterProviderUnused("standard.retry", "a", "b"))
 	rules = append(rules, policy.MapRuleHelper("standard.retry", "native-model"), policy.RankRuleHelper("standard.retry"), policy.RaceRuleHelper("standard.retry", 1))
-	compiled := policy.RulesConfig(t, 2, rules)
+	compiled := config.RulesConfig(t, 2, rules)
 	var calls atomic.Int32
 	executor := &fakeExecutor{do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
 		calls.Add(1)
@@ -824,7 +825,7 @@ func TestNoUpstreamCallsAfterWinner(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestStreamingWinnerRequiresMeaningfulEvent(t *testing.T) {
-	compiled := policy.RaceOnlyConfig(t)
+	compiled := config.RaceOnlyConfig(t)
 	cancelled := make(chan struct{})
 	executor := &fakeExecutor{
 		do: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) { return nil, nil },
@@ -864,7 +865,7 @@ func TestStreamingWinnerRequiresMeaningfulEvent(t *testing.T) {
 }
 
 func TestStreamingRaceIgnoresErrorBeforeWinner(t *testing.T) {
-	compiled := policy.RaceOnlyConfig(t)
+	compiled := config.RaceOnlyConfig(t)
 	executor := &fakeExecutor{
 		do: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) { return nil, nil },
 		stream: func(_ context.Context, target model.Target, _ model.ExecuteRequest) (<-chan model.StreamEvent, *model.CallError) {
@@ -894,7 +895,7 @@ func TestStreamingRaceIgnoresErrorBeforeWinner(t *testing.T) {
 }
 
 func TestSelectedStreamHonorsClientCancellation(t *testing.T) {
-	compiled := policy.RulesConfig(t, 1, policy.EntryRules([]string{"a"}, 1))
+	compiled := config.RulesConfig(t, 1, policy.EntryRules([]string{"a"}, 1))
 	upstreamCancelled := make(chan struct{})
 	executor := &fakeExecutor{
 		do: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) { return nil, nil },
@@ -925,7 +926,7 @@ func TestSelectedStreamHonorsClientCancellation(t *testing.T) {
 }
 
 func TestStreamingRouteTimeoutKeepsWinnerStreamAlive(t *testing.T) {
-	compiled := policy.RulesConfig(t, 1, append(policy.EntryRules([]string{"a"}, 1),
+	compiled := config.RulesConfig(t, 1, append(policy.EntryRules([]string{"a"}, 1),
 		policy.TimeoutRuleHelper("standard", 30*time.Millisecond)))
 	executor := &fakeExecutor{
 		do: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) { return nil, nil },
@@ -961,7 +962,7 @@ func TestStreamingRouteTimeoutKeepsWinnerStreamAlive(t *testing.T) {
 }
 
 func TestNonStreamingRouteTimeoutClassified(t *testing.T) {
-	compiled := policy.RulesConfig(t, 1, append(policy.EntryRules([]string{"a"}, 1),
+	compiled := config.RulesConfig(t, 1, append(policy.EntryRules([]string{"a"}, 1),
 		policy.TimeoutRuleHelper("standard", 20*time.Millisecond)))
 	executor := &fakeExecutor{do: func(ctx context.Context, _ model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
 		<-ctx.Done()
@@ -979,7 +980,7 @@ func TestNonStreamingRouteTimeoutClassified(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCooldownSkipsRecentlyFailedProvider(t *testing.T) {
-	compiled := policy.RaceOnlyConfig(t)
+	compiled := config.RaceOnlyConfig(t)
 	var mu sync.Mutex
 	calls := map[string]int{}
 	executor := &fakeExecutor{do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
@@ -1017,7 +1018,7 @@ func TestCooldownSkipsRecentlyFailedProvider(t *testing.T) {
 // only that pair, leaving the same provider's other native models available.
 // Conversely, a success on the same pair clears only its own window.
 func TestCooldownIsolatesByProviderModelPair(t *testing.T) {
-	compiled := policy.RaceOnlyConfig(t)
+	compiled := config.RaceOnlyConfig(t)
 	runner := NewRunner(compiled, subsystem.NewCatalog(compiled), &fakeExecutor{do: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) {
 		return successBody("a"), nil
 	}})
@@ -1054,7 +1055,7 @@ func TestCooldownIsolatesByProviderModelPair(t *testing.T) {
 // cooldown cycle: the gauge enters with the window, refreshes while the window
 // re-extends, clears on success, and never reports a stale window as cooling.
 func TestCooldownUntilGaugeFlow(t *testing.T) {
-	compiled := policy.RaceOnlyConfig(t)
+	compiled := config.RaceOnlyConfig(t)
 	// Freeze time so window math and the scrape are exact.
 	current := time.Unix(1_000_000, 0)
 	runner := NewRunner(compiled, subsystem.NewCatalog(compiled), &fakeExecutor{do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
@@ -1124,7 +1125,7 @@ func TestCooldownUntilGaugeFlow(t *testing.T) {
 func TestFallbackRunsOnlyAfterMatchingFailure(t *testing.T) {
 	rules := append(policy.EntryRules([]string{"a", "b"}, 2),
 		fallbackRules("standard", []string{"5xx"}, []string{"c"})...)
-	compiled := policy.RulesConfig(t, 3, rules)
+	compiled := config.RulesConfig(t, 3, rules)
 	order := make(chan string, 3)
 	executor := &fakeExecutor{do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
 		order <- target.Provider
@@ -1146,7 +1147,7 @@ func TestFallbackRunsOnlyAfterMatchingFailure(t *testing.T) {
 func TestFallback400NotApplicableReturnsOriginal(t *testing.T) {
 	rules := append(policy.EntryRules([]string{"a", "b"}, 2),
 		fallbackRules("standard", []string{"5xx"}, []string{"c"})...)
-	compiled := policy.RulesConfig(t, 3, rules)
+	compiled := config.RulesConfig(t, 3, rules)
 	var calls atomic.Int32
 	executor := &fakeExecutor{do: func(_ context.Context, _ model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
 		calls.Add(1)
@@ -1166,7 +1167,7 @@ func TestFallbackSharesPrimarySemaphoreBudget(t *testing.T) {
 	rules := append(policy.EntryRules([]string{"a", "b"}, 2),
 		semaphoreRule("standard", 2, 2, 1))
 	rules = append(rules, fallbackRules("standard", []string{"5xx"}, []string{"c"})...)
-	compiled := policy.RulesConfig(t, 3, rules)
+	compiled := config.RulesConfig(t, 3, rules)
 	var mu sync.Mutex
 	calls := map[string]int{}
 	executor := &fakeExecutor{do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
@@ -1193,7 +1194,7 @@ func TestRouteTimeoutBoundsFallback(t *testing.T) {
 	rules := append(policy.EntryRules([]string{"a", "b"}, 2),
 		policy.TimeoutRuleHelper("standard", 40*time.Millisecond))
 	rules = append(rules, fallbackRules("standard", []string{"5xx"}, []string{"c"})...)
-	compiled := policy.RulesConfig(t, 3, rules)
+	compiled := config.RulesConfig(t, 3, rules)
 	fallbackCancelled := make(chan struct{})
 	executor := &fakeExecutor{do: func(ctx context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
 		if target.Provider != "c" {
@@ -1229,7 +1230,7 @@ func TestFailedBatchAggregationIsIndependentOfCompletionOrder(t *testing.T) {
 			rules := append(policy.EntryRules([]string{"a", "b", "c"}, 2),
 				policy.RetryRuleHelper("standard", "standard.retry", 1))
 			rules = append(rules, retryRulesUnused("standard", []string{"429"}, []string{"a", "b", "c"}, 1)...)
-			compiled := policy.RulesConfig(t, 3, rules)
+			compiled := config.RulesConfig(t, 3, rules)
 			var calls atomic.Int32
 			executor := &fakeExecutor{do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
 				calls.Add(1)
@@ -1264,7 +1265,7 @@ func TestFailedBatchAggregationIsIndependentOfCompletionOrder(t *testing.T) {
 func TestStreamingFallbackReturnsCancellationHandle(t *testing.T) {
 	rules := append(policy.EntryRules([]string{"a", "b"}, 2),
 		fallbackRules("standard", []string{"5xx"}, []string{"c"})...)
-	compiled := policy.RulesConfig(t, 3, rules)
+	compiled := config.RulesConfig(t, 3, rules)
 	upstreamCancelled := make(chan struct{})
 	executor := &fakeExecutor{
 		do: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) { return nil, nil },
@@ -1334,7 +1335,7 @@ func leasePipeline(rules []policy.Rule) []policy.Rule {
 }
 
 func TestLeasePromotesHolderToFront(t *testing.T) {
-	compiled := policy.RulesConfig(t, 3, leasePipeline(policy.EntryRules([]string{"a", "b", "c"}, 1)))
+	compiled := config.RulesConfig(t, 3, leasePipeline(policy.EntryRules([]string{"a", "b", "c"}, 1)))
 	var mu sync.Mutex
 	called := []string{}
 	executor := &fakeExecutor{do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
@@ -1366,7 +1367,7 @@ func TestLeasePromotesHolderToFront(t *testing.T) {
 }
 
 func TestLeaseAcquiredByWinnerAndReleasedOnHardFailure(t *testing.T) {
-	compiled := policy.RulesConfig(t, 3, leasePipeline(policy.EntryRules([]string{"a", "b", "c"}, 2)))
+	compiled := config.RulesConfig(t, 3, leasePipeline(policy.EntryRules([]string{"a", "b", "c"}, 2)))
 	var failAll atomic.Bool
 	executor := &fakeExecutor{do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
 		if failAll.Load() {
@@ -1394,7 +1395,7 @@ func TestLeaseAcquiredByWinnerAndReleasedOnHardFailure(t *testing.T) {
 }
 
 func TestLeaseLoserCancellationIsNeutral(t *testing.T) {
-	compiled := policy.RulesConfig(t, 2, leasePipeline(policy.EntryRules([]string{"a", "b"}, 2)))
+	compiled := config.RulesConfig(t, 2, leasePipeline(policy.EntryRules([]string{"a", "b"}, 2)))
 	executor := &fakeExecutor{do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
 		if target.Provider == "b" {
 			return nil, &model.CallError{Class: model.ErrorCancelled, Status: 499}
@@ -1422,7 +1423,7 @@ func TestLeaseReleasedAfterConsecutiveSlowStarts(t *testing.T) {
 	})
 	rules := policy.EntryRules([]string{"a", "b"}, 1)
 	rules = append(rules[:4], append([]policy.Rule{lease}, rules[4:]...)...)
-	compiled := policy.RulesConfig(t, 2, rules)
+	compiled := config.RulesConfig(t, 2, rules)
 	executor := &fakeExecutor{do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
 		if target.Provider == "a" {
 			time.Sleep(60 * time.Millisecond) // slow winner
@@ -1448,7 +1449,7 @@ func TestLeaseReleasedAfterConsecutiveSlowStarts(t *testing.T) {
 // affinity pinning
 // ---------------------------------------------------------------------------
 
-func affinityPipeline(t *testing.T) *policy.CompiledConfig {
+func affinityPipeline(t *testing.T) *config.CompiledConfig {
 	t.Helper()
 	affinity := affinityRule("standard", func(r *policy.AffinityRule) {
 		r.Sources = []string{"responses.previous_response_id"}
@@ -1458,7 +1459,7 @@ func affinityPipeline(t *testing.T) *policy.CompiledConfig {
 	})
 	rules := policy.EntryRules([]string{"a", "b"}, 2)
 	rules = append(rules[:4], append([]policy.Rule{affinity}, rules[4:]...)...)
-	return policy.RulesConfig(t, 2, rules)
+	return config.RulesConfig(t, 2, rules)
 }
 
 func responsesRequest(previousResponseID string) model.ExecuteRequest {
@@ -1583,7 +1584,7 @@ func TestAffinityPinnedRouteNeverUsesFallback(t *testing.T) {
 	rules := policy.EntryRules([]string{"a", "b"}, 2)
 	rules = append(rules[:4], append([]policy.Rule{affinity}, rules[4:]...)...)
 	rules = append(rules, fallbackRules("standard", []string{"5xx", "timeout"}, []string{"c"})...)
-	compiled := policy.RulesConfig(t, 3, rules)
+	compiled := config.RulesConfig(t, 3, rules)
 	var mu sync.Mutex
 	called := map[string]int{}
 	executor := &fakeExecutor{do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
@@ -1612,7 +1613,7 @@ func TestAffinityPinnedRouteNeverUsesFallback(t *testing.T) {
 }
 
 func TestAffinityResolutionFailureRemainsPinned(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	// An explicit catalog requires a last-known-good snapshot. Leaving the
 	// fresh catalog empty makes target resolution fail before executor dispatch.
 	cfg.Providers[0].ModelsURL = "https://catalog.invalid/v1/models"
@@ -1625,7 +1626,7 @@ func TestAffinityResolutionFailureRemainsPinned(t *testing.T) {
 	rules := policy.EntryRules([]string{"a", "b"}, 2)
 	rules = append(rules[:4], append([]policy.Rule{affinity}, rules[4:]...)...)
 	cfg.Rules = rules
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1714,19 +1715,19 @@ func catalogServer(t *testing.T, ids ...string) *httptest.Server {
 // compiledWithCatalogs builds a compiled config whose catalog sources are set
 // directly so tests can prove exact native validation without real HTTP. It
 // returns the shared catalog instance so the runner uses the same snapshots.
-func compiledWithCatalogs(t *testing.T, rules []policy.Rule, catalogs map[string][]string) (*policy.CompiledConfig, *subsystem.Catalog) {
+func compiledWithCatalogs(t *testing.T, rules []policy.Rule, catalogs map[string][]string) (*config.CompiledConfig, *subsystem.Catalog) {
 	t.Helper()
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Rules = rules
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	compiled.CatalogSources = make(map[string][]policy.CatalogSource, len(catalogs))
+	compiled.CatalogSources = make(map[string][]config.CatalogSource, len(catalogs))
 	for providerID, ids := range catalogs {
 		server := catalogServer(t, ids...)
 		t.Cleanup(server.Close)
-		compiled.CatalogSources[providerID] = []policy.CatalogSource{{URL: server.URL, Explicit: true}}
+		compiled.CatalogSources[providerID] = []config.CatalogSource{{URL: server.URL, Explicit: true}}
 	}
 	catalog := subsystem.NewCatalog(compiled)
 	if failures := catalog.Refresh(context.Background()); len(failures) != 0 {
@@ -1781,7 +1782,7 @@ func TestMapGivesDifferentProvidersDifferentNatives(t *testing.T) {
 }
 
 func TestModelNotFoundTriggersExplicitFallback(t *testing.T) {
-	// policy.Provider a's snapshot lacks the primary alias but carries the fallback
+	// Provider a's snapshot lacks the primary alias but carries the fallback
 	// alias; provider b lacks both. All primary targets locally fail
 	// model_not_found, which must activate the fallback subroute and dispatch
 	// its target with the subroute's own native.
@@ -1937,7 +1938,7 @@ func TestNestedTransitionStandardFallbackThenRetry(t *testing.T) {
 		policy.RankRuleHelper("standard.fallback.retry"),
 		policy.RaceRuleHelper("standard.fallback.retry", 1),
 	)
-	compiled := policy.RulesConfig(t, 3, rules)
+	compiled := config.RulesConfig(t, 3, rules)
 	var mu sync.Mutex
 	executor := &fakeExecutor{do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
 		mu.Lock()
@@ -2013,7 +2014,7 @@ func TestSmart404FallbackToUnusedCarrier(t *testing.T) {
 		policy.RankRuleHelper("smart.fallback"),
 		policy.RaceRuleHelper("smart.fallback", 1),
 	}
-	compiled := policy.RulesConfig(t, 3, rules)
+	compiled := config.RulesConfig(t, 3, rules)
 	var calls atomic.Int32
 	executor := &fakeExecutor{do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
 		calls.Add(1)

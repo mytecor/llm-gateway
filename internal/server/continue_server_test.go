@@ -8,16 +8,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mytecor/llm-gateway/internal/config"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
 )
 
-func continueConfigRetries(t *testing.T, retries int) *policy.CompiledConfig {
+func continueConfigRetries(t *testing.T, retries int) *config.CompiledConfig {
 	t.Helper()
 	return continueConfigRetriesWait(t, retries, 50*time.Millisecond)
 }
 
-func continueConfig(t *testing.T) *policy.CompiledConfig {
+func continueConfig(t *testing.T) *config.CompiledConfig {
 	t.Helper()
 	return continueConfigRetries(t, 0)
 }
@@ -128,7 +129,7 @@ func TestServerContinueTakeoverOnEmptyCompletion(t *testing.T) {
 }
 
 func TestServerContinueTakeoverExcludesJustBrokenProvider(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:2] // a, b
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
@@ -138,7 +139,7 @@ func TestServerContinueTakeoverExcludesJustBrokenProvider(t *testing.T) {
 		policy.RaceRuleHelper("standard", 2),
 		policy.ContinueRuleHelper("standard", 90*time.Second, "full"),
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

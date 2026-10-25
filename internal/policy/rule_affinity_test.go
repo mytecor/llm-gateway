@@ -37,7 +37,7 @@ func TestAffinityRuleCompile(t *testing.T) {
 	result := mustCompile(t, affinityRulesPipeline(
 		affinityRule("standard", func(r *AffinityRule) {
 			r.Sources = []string{"responses.conversation"}
-			r.TTL = Duration{time.Hour}
+			r.TTL = Duration{Duration: time.Hour}
 			r.OnMissing = "ignore"
 			r.OnProviderFailure = "fail-closed"
 		}),
@@ -62,7 +62,7 @@ func TestAffinityRuleRejectsUnknownSource(t *testing.T) {
 	_, err := compileRules(affinityRulesPipeline(
 		affinityRule("standard", func(r *AffinityRule) {
 			r.Sources = []string{"chat.messages"}
-			r.TTL = Duration{time.Hour}
+			r.TTL = Duration{Duration: time.Hour}
 			r.OnMissing = "ignore"
 			r.OnProviderFailure = "fail-closed"
 		}),

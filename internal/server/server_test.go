@@ -1,10 +1,6 @@
 package server
 
 import (
-	"github.com/mytecor/llm-gateway/internal/model"
-	"github.com/mytecor/llm-gateway/internal/policy"
-	"github.com/mytecor/llm-gateway/internal/scheduler"
-	"github.com/mytecor/llm-gateway/internal/subsystem"
 	"context"
 	"encoding/json"
 	"io"
@@ -14,10 +10,16 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/mytecor/llm-gateway/internal/config"
+	"github.com/mytecor/llm-gateway/internal/model"
+	"github.com/mytecor/llm-gateway/internal/policy"
+	"github.com/mytecor/llm-gateway/internal/scheduler"
+	"github.com/mytecor/llm-gateway/internal/subsystem"
 )
 
 func TestServerAuthModelsAndLogicalRewrite(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
@@ -26,7 +28,7 @@ func TestServerAuthModelsAndLogicalRewrite(t *testing.T) {
 		policy.RankRuleHelper("standard"),
 		policy.RaceRuleHelper("standard", 1),
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +103,7 @@ func TestServerAuthModelsAndLogicalRewrite(t *testing.T) {
 }
 
 func TestUnknownModelFailsBeforeExecutor(t *testing.T) {
-	compiled := policy.RaceOnlyConfig(t)
+	compiled := config.RaceOnlyConfig(t)
 	called := false
 	executor := &fakeExecutor{
 		do: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) {
@@ -127,7 +129,7 @@ func TestUnknownModelFailsBeforeExecutor(t *testing.T) {
 }
 
 func TestServerStreamsWinnerWithLogicalModel(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
@@ -136,7 +138,7 @@ func TestServerStreamsWinnerWithLogicalModel(t *testing.T) {
 		policy.RankRuleHelper("standard"),
 		policy.RaceRuleHelper("standard", 1),
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,15 +175,17 @@ func TestServerStreamsWinnerWithLogicalModel(t *testing.T) {
 }
 
 func TestManualRefreshDoesNotExposeProviderNamespace(t *testing.T) {
-	compiled := policy.RaceOnlyConfig(t)
+	compiled := config.RaceOnlyConfig(t)
 	compiled.ClientKeys = map[string]string{"primary": "client-secret"}
-	compiled.CatalogSources = map[string][]policy.CatalogSource{
+	compiled.CatalogSources = map[string][]config.CatalogSource{
 		"internal-provider-id": {{URL: "://invalid"}},
 	}
 	catalog := subsystem.NewCatalog(compiled)
 	executor := &fakeExecutor{
-		do:     func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) { return nil, nil },
-		stream: func(context.Context, model.Target, model.ExecuteRequest) (<-chan model.StreamEvent, *model.CallError) { return nil, nil },
+		do: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) { return nil, nil },
+		stream: func(context.Context, model.Target, model.ExecuteRequest) (<-chan model.StreamEvent, *model.CallError) {
+			return nil, nil
+		},
 	}
 	server := httptest.NewServer(NewServer(compiled, catalog, scheduler.NewRunner(compiled, catalog, executor)))
 	defer server.Close()
@@ -199,7 +203,7 @@ func TestManualRefreshDoesNotExposeProviderNamespace(t *testing.T) {
 }
 
 func TestServerReportsFailureAfterStreamingWinner(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
@@ -208,7 +212,7 @@ func TestServerReportsFailureAfterStreamingWinner(t *testing.T) {
 		policy.RankRuleHelper("standard"),
 		policy.RaceRuleHelper("standard", 1),
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,9 +241,9 @@ func TestServerReportsFailureAfterStreamingWinner(t *testing.T) {
 	}
 }
 
-func affinityServerConfig(t *testing.T) *policy.CompiledConfig {
+func affinityServerConfig(t *testing.T) *config.CompiledConfig {
 	t.Helper()
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
@@ -255,7 +259,7 @@ func affinityServerConfig(t *testing.T) *policy.CompiledConfig {
 		},
 		policy.RaceRuleHelper("standard", 1),
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,10 +423,9 @@ func TestServerResponsesAffinityConversationPinsSecondRequest(t *testing.T) {
 	}
 }
 
-
 func affinityRuleHelper(route string) policy.Rule {
 	return &policy.AffinityRule{
 		RuleBase: policy.RuleBase{Route: route, Action: policy.ActionAffinity},
-		TTL: policy.Duration{Duration: 24 * time.Hour},
+		TTL:      policy.Duration{Duration: 24 * time.Hour},
 	}
 }

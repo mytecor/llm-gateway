@@ -1,10 +1,11 @@
 package policy
 
 import (
-	"github.com/mytecor/llm-gateway/internal/model"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mytecor/llm-gateway/internal/model"
 )
 
 func TestLeaseRuleDecode(t *testing.T) {
@@ -44,7 +45,7 @@ func TestLeaseRuleCompile(t *testing.T) {
 	result := mustCompile(t, leaseRulesPipeline(
 		leaseRule("standard", func(r *LeaseRule) {
 			r.Source = "winner"
-			r.Duration = Duration{time.Minute}
+			r.Duration = Duration{Duration: time.Minute}
 			r.RenewOnSuccess = boolPtr(true)
 			r.ReleaseOn = []string{"429", "5xx", "timeout", "connection_error"}
 		}),
@@ -62,7 +63,7 @@ func TestLeaseRuleRenewDefaultsTrue(t *testing.T) {
 	result := mustCompile(t, leaseRulesPipeline(
 		leaseRule("standard", func(r *LeaseRule) {
 			r.Source = "winner"
-			r.Duration = Duration{time.Minute}
+			r.Duration = Duration{Duration: time.Minute}
 		}),
 	)...)
 	if !entryRoute(t, result, "standard").Lease.RenewOnSuccess {
@@ -81,7 +82,7 @@ func TestLeaseRuleRejectsBadSource(t *testing.T) {
 	_, err := compileRules(leaseRulesPipeline(
 		leaseRule("standard", func(r *LeaseRule) {
 			r.Source = "loser"
-			r.Duration = Duration{time.Minute}
+			r.Duration = Duration{Duration: time.Minute}
 		}),
 	)...)
 	if err == nil || !strings.Contains(err.Error(), "lease source") {

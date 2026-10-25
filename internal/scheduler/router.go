@@ -3,18 +3,20 @@ package scheduler
 import (
 	"context"
 	"errors"
-	"github.com/mytecor/llm-gateway/internal/model"
-	"github.com/mytecor/llm-gateway/internal/policy"
-	"github.com/mytecor/llm-gateway/internal/subsystem"
-	"github.com/mytecor/llm-gateway/internal/telemetry"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mytecor/llm-gateway/internal/config"
+	"github.com/mytecor/llm-gateway/internal/model"
+	"github.com/mytecor/llm-gateway/internal/policy"
+	"github.com/mytecor/llm-gateway/internal/subsystem"
+	"github.com/mytecor/llm-gateway/internal/telemetry"
 )
 
 type Runner struct {
-	config   *policy.CompiledConfig
+	config   *config.CompiledConfig
 	catalog  *subsystem.Catalog
 	executor model.Executor
 	logger   *slog.Logger
@@ -41,11 +43,11 @@ type cooldownKey struct {
 	model    string
 }
 
-func NewRunner(config *policy.CompiledConfig, catalog *subsystem.Catalog, executor model.Executor) *Runner {
+func NewRunner(config *config.CompiledConfig, catalog *subsystem.Catalog, executor model.Executor) *Runner {
 	return NewRunnerMetrics(config, catalog, executor, telemetry.NewMetrics())
 }
 
-func NewRunnerMetrics(config *policy.CompiledConfig, catalog *subsystem.Catalog, executor model.Executor, metrics *telemetry.Metrics) *Runner {
+func NewRunnerMetrics(config *config.CompiledConfig, catalog *subsystem.Catalog, executor model.Executor, metrics *telemetry.Metrics) *Runner {
 	if metrics == nil {
 		metrics = telemetry.NewMetrics()
 	}

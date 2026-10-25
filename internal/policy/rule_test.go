@@ -1,15 +1,17 @@
 package policy
 
 import (
-	"github.com/mytecor/llm-gateway/internal/model"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mytecor/llm-gateway/internal/model"
+	"github.com/mytecor/llm-gateway/internal/provider"
 )
 
 // testProviders is the shared provider registry used by compile-level unit
 // tests. Priorities order a > b > c.
-var testProviders = map[string]Provider{
+var testProviders = map[string]provider.Provider{
 	"a": {ID: "a", Priority: 20},
 	"b": {ID: "b", Priority: 10},
 	"c": {ID: "c", Priority: 5},
@@ -165,7 +167,7 @@ func fallbackRule(route, target string) Rule {
 func hedgeRule(route string, after time.Duration, target string) Rule {
 	r := &HedgeRule{}
 	r.setIdentity(route, "hedge")
-	r.After = Duration{after}
+	r.After = Duration{Duration: after}
 	r.Target = target
 	return r
 }
@@ -209,7 +211,7 @@ func semaphoreRule(route string, maxCalls, maxInFlight, maxCallsPerProvider int)
 func timeoutRule(route string, duration time.Duration) Rule {
 	r := &TimeoutRule{}
 	r.setIdentity(route, "timeout")
-	r.Duration = Duration{duration}
+	r.Duration = Duration{Duration: duration}
 	return r
 }
 

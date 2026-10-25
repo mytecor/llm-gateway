@@ -1,8 +1,6 @@
 package policy
 
 import (
-	"fmt"
-	"testing"
 	"time"
 )
 
@@ -175,37 +173,6 @@ func AdmissionRuleHelper(route string, maxInFlight, maxPending int, waitTimeout 
 	return r
 }
 
-func TestConfig() Config {
-	var cfg Config
-	cfg.Host = "127.0.0.1"
-	cfg.Port = 9208
-	cfg.LogLevel = "error"
-	cfg.Providers = []Provider{
-		{ID: "a", Priority: 20, Config: map[string]any{"inference_url": "https://a.invalid"}},
-		{ID: "b", Priority: 10, Config: map[string]any{"inference_url": "https://b.invalid"}},
-		{ID: "c", Priority: 5, Config: map[string]any{"inference_url": "https://c.invalid"}},
-	}
-	cfg.Rules = Rules{
-		FilterModel("standard", "standard"),
-		FilterProvider("standard", "a", "b"),
-		MapRuleHelper("standard", "native-model"),
-		RankRuleHelper("standard"),
-		RaceRuleHelper("standard", 2),
-		RetryRuleHelper("standard", "standard.retry", 1),
-		FilterError("standard.retry", "429", "5xx", "timeout", "connection_error"),
-		FilterProviderUnused("standard.retry", "a", "b", "c"),
-		MapRuleHelper("standard.retry", "native-model"),
-		RankRuleHelper("standard.retry"),
-		RaceRuleHelper("standard.retry", 1),
-	}
-	return cfg
-}
-
-func TestConfigWithRules(cfg Config, rules []Rule) Config {
-	cfg.Rules = rules
-	return cfg
-}
-
 func EntryRules(providers []string, raceCount int) []Rule {
 	return []Rule{
 		FilterModel("standard", "standard"),
@@ -214,34 +181,4 @@ func EntryRules(providers []string, raceCount int) []Rule {
 		RankRuleHelper("standard"),
 		RaceRuleHelper("standard", raceCount),
 	}
-}
-
-func RulesConfig(t testing.TB, n int, rules []Rule) *CompiledConfig {
-	t.Helper()
-	cfg := TestConfig()
-	providers := make([]Provider, 0, n)
-	for i := 0; i < n; i++ {
-		letter := rune('a' + i)
-		providers = append(providers, Provider{
-			ID:       string(letter),
-			Priority: 100 - i,
-			Config:   map[string]any{"inference_url": fmt.Sprintf("https://%c.invalid", letter)},
-		})
-	}
-	cfg.Providers = providers
-	cfg.Rules = rules
-	compiled, err := CompileConfig(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return compiled
-}
-
-func RaceOnlyConfig(t testing.TB) *CompiledConfig {
-	t.Helper()
-	compiled, err := CompileConfig(TestConfigWithRules(TestConfig(), EntryRules([]string{"a", "b"}, 2)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return compiled
 }

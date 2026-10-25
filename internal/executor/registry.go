@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/mytecor/llm-gateway/internal/config"
 	"github.com/mytecor/llm-gateway/internal/executor/external"
 	sessionexecutor "github.com/mytecor/llm-gateway/internal/executor/session"
 	"github.com/mytecor/llm-gateway/internal/model"
-	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/session"
 )
 
@@ -41,7 +41,7 @@ func NewRegistry(bindings map[string]Binding, middleware ...Middleware) *Registr
 	}
 	return &Registry{bindings: copy, middleware: append([]Middleware(nil), middleware...)}
 }
-func New(ctx context.Context, cfg *policy.CompiledConfig) (*Registry, error) {
+func New(ctx context.Context, cfg *config.CompiledConfig) (*Registry, error) {
 	registry := NewRegistry(nil)
 	fail := func(err error) (*Registry, error) { _ = registry.Close(); return nil, err }
 	var sessionStore *session.Store

@@ -146,7 +146,7 @@ func TestBalanceRuleRejectsWithLease(t *testing.T) {
 		rankRule("standard"),
 		leaseRule("standard", func(r *LeaseRule) {
 			r.Source = "winner"
-			r.Duration = Duration{time.Minute}
+			r.Duration = Duration{Duration: time.Minute}
 		}),
 		balanceRule("standard", func(r *BalanceRule) { r.Strategy = "adaptive" }),
 		raceRule("standard", 1),

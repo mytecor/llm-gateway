@@ -1,11 +1,6 @@
 package server
 
 import (
-	"github.com/mytecor/llm-gateway/internal/model"
-	"github.com/mytecor/llm-gateway/internal/policy"
-	"github.com/mytecor/llm-gateway/internal/scheduler"
-	"github.com/mytecor/llm-gateway/internal/subsystem"
-	"github.com/mytecor/llm-gateway/internal/telemetry"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -17,8 +12,14 @@ import (
 	"sync"
 	"testing"
 	"time"
-)
 
+	"github.com/mytecor/llm-gateway/internal/config"
+	"github.com/mytecor/llm-gateway/internal/model"
+	"github.com/mytecor/llm-gateway/internal/policy"
+	"github.com/mytecor/llm-gateway/internal/scheduler"
+	"github.com/mytecor/llm-gateway/internal/subsystem"
+	"github.com/mytecor/llm-gateway/internal/telemetry"
+)
 
 type fakeExecutor struct {
 	do     func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError)
@@ -44,7 +45,7 @@ func (*fakeExecutor) Close() error { return nil }
 func retryRuleBackoff(route, target string, attempts int, backoff *policy.BackoffConfig) policy.Rule {
 	r := &policy.RetryRule{
 		RuleBase: policy.RuleBase{Route: route, Action: policy.ActionRetry},
-		Target: target,
+		Target:   target,
 		Attempts: attempts,
 	}
 	if backoff != nil {
@@ -52,8 +53,6 @@ func retryRuleBackoff(route, target string, attempts int, backoff *policy.Backof
 	}
 	return r
 }
-
-
 
 // captureLogger returns a synchronous slog JSON logger writing into a mutex-
 // guarded buffer, plus a read function that returns the lines parsed as maps.
@@ -109,9 +108,9 @@ func slogLevel(level string) slog.Level {
 
 // eventsTestServer builds a compiled config, runner and server whose logger is
 // a captured in-memory logger, so structured events can be asserted.
-func eventsTestServer(t *testing.T, cfg policy.Config, executor model.Executor) (*httptest.Server, func() []map[string]any) {
+func eventsTestServer(t *testing.T, cfg config.Config, executor model.Executor) (*httptest.Server, func() []map[string]any) {
 	t.Helper()
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +137,7 @@ func postCompletion(t *testing.T, url, body string) (*http.Response, string) {
 }
 
 func TestRequestCompletedEventCarriesFullFields(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
@@ -191,7 +190,7 @@ func TestRequestCompletedEventCarriesFullFields(t *testing.T) {
 }
 
 func TestRequestFailedEventOnTimeout(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
@@ -236,7 +235,7 @@ func TestRequestFailedEventOnTimeout(t *testing.T) {
 }
 
 func TestRetryEmitsAttemptEvents(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:2]
 	// First provider always fails with 429; second succeeds. Entry route races
 	// provider a only (count=1) and retries into standard.retry which picks
@@ -298,7 +297,7 @@ func TestRetryEmitsAttemptEvents(t *testing.T) {
 }
 
 func TestFallbackEmitsFallbackEvent(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:2]
 	cfg.Rules = append([]policy.Rule{
 		policy.FilterModel("standard", "standard"),
@@ -338,7 +337,7 @@ func TestFallbackEmitsFallbackEvent(t *testing.T) {
 }
 
 func TestCooldownPutEventFiresOnRetryableFailure(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Providers[0].Cooldown = policy.Duration{Duration: 5 * time.Minute}
 	cfg.Rules = []policy.Rule{
@@ -384,7 +383,7 @@ func TestCooldownPutEventFiresOnRetryableFailure(t *testing.T) {
 }
 
 func TestEveryEventLineCarriesServiceAndEventName(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
@@ -418,10 +417,10 @@ func TestEveryEventLineCarriesServiceAndEventName(t *testing.T) {
 
 func TestEventsNeverContainSecrets(t *testing.T) {
 	secret := "sk-test-super-secret-123"
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Providers[0].Config["api_key"] = secret
-	cfg.ClientAPIKeys = []policy.ClientKey{{ID: "primary", Key: secret}}
+	cfg.ClientAPIKeys = []config.ClientKey{{ID: "primary", Key: secret}}
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a"),
@@ -461,7 +460,6 @@ func TestEventsNeverContainSecrets(t *testing.T) {
 		}
 	}
 }
-
 
 func fallbackRules(route string, on []string, providers []string) []policy.Rule {
 	return []policy.Rule{

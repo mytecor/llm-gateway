@@ -3,6 +3,8 @@ package policy
 import (
 	"strings"
 	"testing"
+
+	"github.com/mytecor/llm-gateway/internal/provider"
 )
 
 func TestRankRuleDecode(t *testing.T) {
@@ -65,18 +67,19 @@ func TestRankRuleRequiresPrecedingMap(t *testing.T) {
 }
 
 func TestRankRulePreservesTierOrder(t *testing.T) {
-	cfg := TestConfig()
+	providers := map[string]provider.Provider{
+		"a": {ID: "a", Priority: 10},
+		"b": {ID: "b", Priority: 100},
+	}
 	// Provider b has priority 100, provider a has priority 10
-	cfg.Providers[1].Priority = 100 // b
-	cfg.Providers[0].Priority = 10  // a
-	cfg.Rules = []Rule{
+	rules := Rules{
 		FilterModel("standard", "standard"),
 		mapRuleDirect("standard", []string{"a"}, "model-x", 0),
 		mapRuleDirect("standard", []string{"b"}, "model-y", 1),
 		RankRuleHelper("standard"),
 		RaceRuleHelper("standard", 1),
 	}
-	compiled, err := CompileConfig(cfg)
+	compiled, err := Compile(rules, providers)
 	if err != nil {
 		t.Fatal(err)
 	}

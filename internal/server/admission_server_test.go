@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mytecor/llm-gateway/internal/config"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/scheduler"
@@ -16,7 +17,7 @@ import (
 )
 
 func TestAdmissionContinuationReleaseHandoverNoLeak(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	maxPending := 4
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
@@ -33,7 +34,7 @@ func TestAdmissionContinuationReleaseHandoverNoLeak(t *testing.T) {
 		&policy.TimeoutRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionTimeout}, Duration: policy.Duration{Duration: 10 * time.Second}},
 		policy.ContinueRuleHelper("standard", 10*time.Second, "full"),
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +71,7 @@ func TestAdmissionContinuationReleaseHandoverNoLeak(t *testing.T) {
 }
 
 func TestInternalRetryHidesProviderErrorsFromClient(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.MapRuleDirect("standard", []string{"a", "b"}, "model-x", 0),
@@ -81,7 +82,7 @@ func TestInternalRetryHidesProviderErrorsFromClient(t *testing.T) {
 		&policy.RetryRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionRetry}},
 		&policy.TimeoutRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionTimeout}, Duration: policy.Duration{Duration: 10 * time.Second}},
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +126,7 @@ func TestInternalRetryHidesProviderErrorsFromClient(t *testing.T) {
 }
 
 func TestInternalRetryFallbackToSameProviderDifferentTier(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	// Provider a is in tier 0 with model-x (fails 404), and in tier 1 with model-y (succeeds)
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
@@ -136,7 +137,7 @@ func TestInternalRetryFallbackToSameProviderDifferentTier(t *testing.T) {
 		&policy.RetryRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionRetry}, Attempts: 2},
 		&policy.TimeoutRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionTimeout}, Duration: policy.Duration{Duration: 10 * time.Second}},
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

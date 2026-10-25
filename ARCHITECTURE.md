@@ -89,13 +89,21 @@ llm-gateway/
 │   ├── gateway/                # Daemon lifecycle, CLI commands (check, serve), signals
 │   ├── mcpbridge/              # Private stdio Model Context Protocol (MCP) bridge
 │   ├── model/                  # Domain types, capabilities, error taxonomy, token usage
-│   ├── policy/                 # Config schema, parser, DSL rules, compilation & graph validation
+│   ├── config/                 # Application JSON, secrets, defaults & startup configuration
+│   ├── provider/               # Provider schema, driver discovery & preparation
+│   ├── policy/                 # Routing DSL, compiled routes & graph validation
 │   ├── scheduler/              # Execution engine, branch orchestration, streaming state machine
 │   ├── server/                 # HTTP mux, authentication, SSE serialization, route handlers
 │   ├── session/                # Conversation state manager, history hashing, tool turns
 │   ├── subsystem/              # Independent stateful subsystems (Catalog, Admission, Scores, etc.)
 │   └── telemetry/              # Zero-allocation Prometheus metrics and structured slog
 ```
+
+Application configuration belongs to `internal/config`: it decodes JSON, resolves
+secrets, normalizes listener and storage settings, and assembles the startup
+configuration. `internal/provider` prepares drivers and their capabilities.
+`internal/policy` owns the routing DSL and compiles rules against prepared
+providers; it does not depend on the application config or load credentials.
 
 ---
 

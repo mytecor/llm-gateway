@@ -1,10 +1,6 @@
 package server
 
 import (
-	"github.com/mytecor/llm-gateway/internal/model"
-	"github.com/mytecor/llm-gateway/internal/policy"
-	"github.com/mytecor/llm-gateway/internal/scheduler"
-	"github.com/mytecor/llm-gateway/internal/subsystem"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -14,15 +10,21 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mytecor/llm-gateway/internal/config"
+	"github.com/mytecor/llm-gateway/internal/model"
+	"github.com/mytecor/llm-gateway/internal/policy"
+	"github.com/mytecor/llm-gateway/internal/scheduler"
+	"github.com/mytecor/llm-gateway/internal/subsystem"
 )
 
 // singleProviderStreamConfig compiles the canonical single-provider stream
 // entry route for logical model "standard": provider "a", race 1, the shared
 // retry transition (429/5xx/timeout/connection_error) and a retry subroute
 // over the same provider.
-func singleProviderStreamConfig(t *testing.T) *policy.CompiledConfig {
+func singleProviderStreamConfig(t *testing.T) *config.CompiledConfig {
 	t.Helper()
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
@@ -37,7 +39,7 @@ func singleProviderStreamConfig(t *testing.T) *policy.CompiledConfig {
 		policy.RankRuleHelper("standard.retry"),
 		policy.RaceRuleHelper("standard.retry", 1),
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +49,7 @@ func singleProviderStreamConfig(t *testing.T) *policy.CompiledConfig {
 // streamTestServer builds an httptest server plus its runner for the given
 // config and executor, so tests can post streaming requests and inspect both
 // the SSE body and the runner's health state.
-func streamTestServer(t *testing.T, compiled *policy.CompiledConfig, executor model.Executor) (*httptest.Server, *scheduler.Runner) {
+func streamTestServer(t *testing.T, compiled *config.CompiledConfig, executor model.Executor) (*httptest.Server, *scheduler.Runner) {
 	t.Helper()
 	catalog := subsystem.NewCatalog(compiled)
 	runner := scheduler.NewRunner(compiled, catalog, executor)
@@ -100,7 +102,7 @@ func sseErrorData(t *testing.T, body string) []byte {
 // health error, the branch attempt and stream break counters increment, and
 // cancellations stay health-neutral.
 func TestRecordStreamFailureCooldownHealthMetrics(t *testing.T) {
-	compiled := policy.RaceOnlyConfig(t)
+	compiled := config.RaceOnlyConfig(t)
 	runner := scheduler.NewRunner(compiled, subsystem.NewCatalog(compiled), &fakeExecutor{
 		do: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) {
 			return successBody("a"), nil
@@ -157,7 +159,7 @@ func TestRecordStreamFailureCooldownHealthMetrics(t *testing.T) {
 // an error admitted by the entry route's retry filter is retryable; one the
 // filter excludes is not, even though it is in the shared retryable class set.
 func TestStreamRetryableReflectsRouteErrorFilter(t *testing.T) {
-	compiled, err := policy.CompileConfig(policy.TestConfig())
+	compiled, err := config.CompileConfig(config.TestConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,7 +429,6 @@ func TestStreamEmptyCloseWithoutFinishReasonIsStructuredError(t *testing.T) {
 		t.Fatalf("provider a must cool down after an empty close, available: %#v", got)
 	}
 }
-
 
 func successBody(winner string) []byte {
 	return []byte(`{"winner":"` + winner + `"}`)

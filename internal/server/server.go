@@ -8,11 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/mytecor/llm-gateway/internal/model"
-	"github.com/mytecor/llm-gateway/internal/policy"
-	"github.com/mytecor/llm-gateway/internal/scheduler"
-	"github.com/mytecor/llm-gateway/internal/subsystem"
-	"github.com/mytecor/llm-gateway/internal/telemetry"
 	"io"
 	"log/slog"
 	"net/http"
@@ -22,12 +17,19 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+
+	"github.com/mytecor/llm-gateway/internal/config"
+	"github.com/mytecor/llm-gateway/internal/model"
+	"github.com/mytecor/llm-gateway/internal/policy"
+	"github.com/mytecor/llm-gateway/internal/scheduler"
+	"github.com/mytecor/llm-gateway/internal/subsystem"
+	"github.com/mytecor/llm-gateway/internal/telemetry"
 )
 
 const maxRequestBody = 16 << 20
 
 type Server struct {
-	config          *policy.CompiledConfig
+	config          *config.CompiledConfig
 	catalog         *subsystem.Catalog
 	runner          *scheduler.Runner
 	mux             *http.ServeMux
@@ -36,7 +38,7 @@ type Server struct {
 	requestSequence atomic.Uint64
 }
 
-func NewServer(config *policy.CompiledConfig, catalog *subsystem.Catalog, runner *scheduler.Runner) *Server {
+func NewServer(config *config.CompiledConfig, catalog *subsystem.Catalog, runner *scheduler.Runner) *Server {
 	server := &Server{
 		config: config, catalog: catalog, runner: runner, mux: http.NewServeMux(), logger: config.Logger,
 		metrics: runner.Metrics(),

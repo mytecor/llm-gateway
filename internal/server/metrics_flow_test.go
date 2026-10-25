@@ -1,10 +1,6 @@
 package server
 
 import (
-	"github.com/mytecor/llm-gateway/internal/model"
-	"github.com/mytecor/llm-gateway/internal/policy"
-	"github.com/mytecor/llm-gateway/internal/scheduler"
-	"github.com/mytecor/llm-gateway/internal/subsystem"
 	"bytes"
 	"context"
 	"io"
@@ -12,6 +8,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/mytecor/llm-gateway/internal/config"
+	"github.com/mytecor/llm-gateway/internal/model"
+	"github.com/mytecor/llm-gateway/internal/policy"
+	"github.com/mytecor/llm-gateway/internal/scheduler"
+	"github.com/mytecor/llm-gateway/internal/subsystem"
 )
 
 // withUsageBody returns a chat completion response carrying usage so the tokens
@@ -19,7 +21,7 @@ import (
 const withUsageBody = `{"id":"chat-1","model":"native-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`
 
 func TestMetricsFlowThroughServer(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
@@ -29,7 +31,7 @@ func TestMetricsFlowThroughServer(t *testing.T) {
 		&policy.BalanceRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionBalance}, Strategy: "adaptive"},
 		policy.RaceRuleHelper("standard", 1),
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,9 +113,9 @@ func TestMetricsFlowThroughServer(t *testing.T) {
 // named client keys configured, requests and token usage split into separate
 // api_key series (the non-secret key ID), and rejected keys stay unauthenticated.
 func TestMetricsPerClientKey(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
-	cfg.ClientAPIKeys = []policy.ClientKey{
+	cfg.ClientAPIKeys = []config.ClientKey{
 		{ID: "primary", Key: "key-a"},
 		{ID: "secondary", Key: "key-b"},
 	}
@@ -124,7 +126,7 @@ func TestMetricsPerClientKey(t *testing.T) {
 		policy.RankRuleHelper("standard"),
 		policy.RaceRuleHelper("standard", 1),
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

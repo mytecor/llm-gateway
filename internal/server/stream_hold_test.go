@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mytecor/llm-gateway/internal/config"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
 )
@@ -32,10 +33,10 @@ func TestServerHoldKeepsStreamOpenUntilRecovery(t *testing.T) {
 		policy.ContinueRecoveryKeepAlive = oldKeepAlive
 	})
 
-	// policy.Provider a: on its initial race (call #1) relays a partial and then
+	// Provider a: on its initial race (call #1) relays a partial and then
 	// closes without finish_reason, so it wins and breaks. On any later call
 	// it fails at selection (returns a model.CallError) so it can never win the
-	// hold's re-races. policy.Provider b: loses the initial race silently (call #1),
+	// hold's re-races. Provider b: loses the initial race silently (call #1),
 	// breaks on the takeover attempt (call #2) — exhausting the chain so the
 	// gateway enters the hold — then recovers (call #3) when the hold's
 	// recheck re-races the pool. The client sees partial + recovered answer +
@@ -215,7 +216,7 @@ func TestServerHoldRecoveryBoundedWhenProviderRepeatedlyBreaks(t *testing.T) {
 		close(ch)
 		return ch, nil
 	}}
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Providers[0].Cooldown = policy.Duration{Duration: 10 * time.Millisecond}
 	cfg.Rules = []policy.Rule{
@@ -236,7 +237,7 @@ func TestServerHoldRecoveryBoundedWhenProviderRepeatedlyBreaks(t *testing.T) {
 			Wait:     policy.Duration{Duration: time.Second},
 		},
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,9 +287,9 @@ func TestServerEmitsParsedKeepAliveDeltasDuringSlowSelectAndToolGeneration(t *te
 	}
 }
 
-func continueConfigRetriesWait(t *testing.T, retries int, wait time.Duration) *policy.CompiledConfig {
+func continueConfigRetriesWait(t *testing.T, retries int, wait time.Duration) *config.CompiledConfig {
 	t.Helper()
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:2] // a, b
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
@@ -298,7 +299,7 @@ func continueConfigRetriesWait(t *testing.T, retries int, wait time.Duration) *p
 		policy.RaceRuleHelper("standard", 2),
 		policy.ContinueRuleWait("standard", 90*time.Second, "full", retries, wait),
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +308,7 @@ func continueConfigRetriesWait(t *testing.T, retries int, wait time.Duration) *p
 
 // continueConfigWait is a continueConfigRetries variant with an explicit hold
 // horizon (wait) on the continue rule.
-func continueConfigWait(t *testing.T, retries int, wait time.Duration) *policy.CompiledConfig {
+func continueConfigWait(t *testing.T, retries int, wait time.Duration) *config.CompiledConfig {
 	t.Helper()
 	return continueConfigRetriesWait(t, retries, wait)
 }
@@ -319,9 +320,9 @@ func continueConfigWait(t *testing.T, retries int, wait time.Duration) *policy.C
 // production-default 15s cooldown a short test horizon would expire before
 // any provider became re-eligible, and the test could never exercise
 // recovery.
-func continueConfigHold(t *testing.T, retries int, wait, cooldown time.Duration) *policy.CompiledConfig {
+func continueConfigHold(t *testing.T, retries int, wait, cooldown time.Duration) *config.CompiledConfig {
 	t.Helper()
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	for i := range cfg.Providers {
 		cfg.Providers[i].Cooldown = policy.Duration{Duration: cooldown}
 	}
@@ -334,7 +335,7 @@ func continueConfigHold(t *testing.T, retries int, wait, cooldown time.Duration)
 		policy.RaceRuleHelper("standard", 2),
 		policy.ContinueRuleWait("standard", 90*time.Second, "full", retries, wait),
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

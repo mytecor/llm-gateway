@@ -7,14 +7,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mytecor/llm-gateway/internal/config"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/subsystem"
 )
 
-func continueConfig(t *testing.T) *policy.CompiledConfig {
+func continueConfig(t *testing.T) *config.CompiledConfig {
 	t.Helper()
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:2] // a, b
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
@@ -24,7 +25,7 @@ func continueConfig(t *testing.T) *policy.CompiledConfig {
 		policy.RaceRuleHelper("standard", 2),
 		policy.ContinueRuleWait("standard", 90*time.Second, "full", 0, 50*time.Millisecond),
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

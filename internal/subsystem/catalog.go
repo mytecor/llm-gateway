@@ -1,8 +1,6 @@
 package subsystem
 
 import (
-	"github.com/mytecor/llm-gateway/internal/model"
-	"github.com/mytecor/llm-gateway/internal/policy"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +11,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mytecor/llm-gateway/internal/config"
+	"github.com/mytecor/llm-gateway/internal/model"
 )
 
 // Catalog holds per-provider model discovery state. Catalogs, snapshots and
@@ -20,14 +21,14 @@ import (
 // last-known-good snapshot and its explicit or inferred source, so exact
 // native-model validation never depends on an unrelated provider.
 type Catalog struct {
-	sources map[string][]policy.CatalogSource
+	sources map[string][]config.CatalogSource
 	client  *http.Client
 	mu      sync.RWMutex
 	models  map[string][]string
 	updated map[string]time.Time
 }
 
-func NewCatalog(config *policy.CompiledConfig) *Catalog {
+func NewCatalog(config *config.CompiledConfig) *Catalog {
 	return &Catalog{
 		sources: config.CatalogSources,
 		client:  &http.Client{Timeout: 30 * time.Second},
@@ -73,7 +74,7 @@ func (c *Catalog) Refresh(ctx context.Context) map[string]error {
 	errorsByProvider := make(map[string]error)
 	for providerID, sources := range c.sources {
 		type fetchResult struct {
-			source policy.CatalogSource
+			source config.CatalogSource
 			models []string
 			err    error
 		}
@@ -116,7 +117,7 @@ func (c *Catalog) Refresh(ctx context.Context) map[string]error {
 	return errorsByProvider
 }
 
-func catalogRequired(sources []policy.CatalogSource) bool {
+func catalogRequired(sources []config.CatalogSource) bool {
 	for _, source := range sources {
 		if source.Explicit {
 			return true
@@ -125,7 +126,7 @@ func catalogRequired(sources []policy.CatalogSource) bool {
 	return false
 }
 
-func (c *Catalog) fetch(ctx context.Context, source policy.CatalogSource) ([]string, error) {
+func (c *Catalog) fetch(ctx context.Context, source config.CatalogSource) ([]string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source.URL, nil)
 	if err != nil {
 		return nil, err

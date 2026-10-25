@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mytecor/llm-gateway/internal/config"
 	"github.com/mytecor/llm-gateway/internal/executor"
-	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/scheduler"
 	"github.com/mytecor/llm-gateway/internal/server"
 	"github.com/mytecor/llm-gateway/internal/subsystem"
@@ -36,25 +36,13 @@ func Run(arguments []string) error {
 		return errors.New("usage: llm-gateway --config PATH <check|serve>")
 	}
 	if command == "check" {
-		cfg, err := policy.DecodeConfig(*configPath)
-		if err != nil {
-			return err
-		}
-		if *requireEnvSecrets {
-			if err := policy.ValidateEnvSecretReferences(cfg, policy.ParseAllowedEnv(*allowedEnv)); err != nil {
-				return fmt.Errorf("validate config: %w", err)
-			}
-		}
-		if _, err := policy.CompileConfig(cfg); err != nil {
-			return fmt.Errorf("validate config: %w", err)
-		}
-		return nil
+		return config.CheckConfig(*configPath, *requireEnvSecrets, *allowedEnv)
 	}
-	cfg, err := policy.LoadConfig(*configPath)
+	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
 		return err
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("validate config: %w", err)
 	}

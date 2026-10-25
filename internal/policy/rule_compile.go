@@ -1,10 +1,12 @@
 package policy
 
 import (
-	"github.com/mytecor/llm-gateway/internal/model"
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/mytecor/llm-gateway/internal/model"
+	"github.com/mytecor/llm-gateway/internal/provider"
 )
 
 // stageState tracks the per-route compilation of the provider selection and
@@ -38,7 +40,7 @@ type stageContext struct {
 	route     string
 	action    string
 	rank      int
-	providers map[string]Provider
+	providers map[string]provider.Provider
 	st        *stageState
 	plan      *CompiledRoute
 }
@@ -178,7 +180,7 @@ type routeCompileResult struct {
 // carrying the semantics of all actions. Target routes are resolved and the
 // whole graph (missing targets, orphan routes, duplicate entry models,
 // transition cycles) validated here, at compile stage.
-func compileRoutes(rules []Rule, providers map[string]Provider) (*routeCompileResult, error) {
+func compileRoutes(rules []Rule, providers map[string]provider.Provider) (*routeCompileResult, error) {
 	order := make([]string, 0, len(rules))
 	groups := make(map[string][]Rule)
 	indices := make(map[string][]int)

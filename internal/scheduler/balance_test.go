@@ -1,14 +1,16 @@
 package scheduler
 
 import (
-	"github.com/mytecor/llm-gateway/internal/model"
-	"github.com/mytecor/llm-gateway/internal/policy"
-	"github.com/mytecor/llm-gateway/internal/subsystem"
 	"context"
 	"encoding/json"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/mytecor/llm-gateway/internal/config"
+	"github.com/mytecor/llm-gateway/internal/model"
+	"github.com/mytecor/llm-gateway/internal/policy"
+	"github.com/mytecor/llm-gateway/internal/subsystem"
 )
 
 // --- balance runtime wiring -------------------------------------------------
@@ -30,7 +32,7 @@ func balanceEntryRules(providers []string) []policy.Rule {
 // the balance action's runtime choice is the only provider executed, and that
 // round_robin distributes consecutive requests over the healthy pool.
 func TestBalanceRequestServedByBalancedProvider(t *testing.T) {
-	compiled := policy.RulesConfig(t, 3, balanceEntryRules([]string{"a", "b", "c"}))
+	compiled := config.RulesConfig(t, 3, balanceEntryRules([]string{"a", "b", "c"}))
 	var mu sync.Mutex
 	called := []string{}
 	executor := &fakeExecutor{do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
@@ -66,7 +68,7 @@ func TestBalanceRequestServedByBalancedProvider(t *testing.T) {
 // TestBalanceExcludesUnhealthyProvider verifies that a provider over its error
 // budget is not balanced to the front while the adaptive strategy is active.
 func TestBalanceExcludesUnhealthyProvider(t *testing.T) {
-	compiled := policy.RulesConfig(t, 3, []policy.Rule{
+	compiled := config.RulesConfig(t, 3, []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.FilterProvider("standard", "a", "b", "c"),
 		policy.MapRuleHelper("standard", "native-model"),

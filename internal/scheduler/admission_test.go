@@ -7,13 +7,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mytecor/llm-gateway/internal/config"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/subsystem"
 )
 
 func TestProviderCapacityHeldForSelectedStreamLifetime(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Providers[0].MaxConcurrent = 1
 	cfg.Rules = []policy.Rule{
@@ -22,7 +23,7 @@ func TestProviderCapacityHeldForSelectedStreamLifetime(t *testing.T) {
 		policy.RankRuleHelper("standard"),
 		policy.RaceRuleHelper("standard", 1),
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +78,7 @@ func TestProviderCapacityHeldForSelectedStreamLifetime(t *testing.T) {
 }
 
 func TestInternalRetryExcludesEveryFailedRaceTarget(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.MapRuleDirect("standard", []string{"a", "b", "c"}, "model-x", 0),
@@ -85,7 +86,7 @@ func TestInternalRetryExcludesEveryFailedRaceTarget(t *testing.T) {
 		policy.RaceRuleHelper("standard", 2),
 		&policy.RetryRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionRetry}, Attempts: 1},
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +114,7 @@ func TestInternalRetryExcludesEveryFailedRaceTarget(t *testing.T) {
 }
 
 func TestInternalHedgeReevaluatesCapacityAtFireTime(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	for i := range cfg.Providers {
 		cfg.Providers[i].MaxConcurrent = 1
 	}
@@ -124,7 +125,7 @@ func TestInternalHedgeReevaluatesCapacityAtFireTime(t *testing.T) {
 		policy.RaceRuleHelper("standard", 1),
 		&policy.HedgeRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionHedge}, After: policy.Duration{Duration: 40 * time.Millisecond}},
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +174,7 @@ func TestScopedInvalidUpstreamFailureIsReschedulable(t *testing.T) {
 }
 
 func TestStreamingInternalRetryHidesPreWinnerFailure(t *testing.T) {
-	cfg := policy.TestConfig()
+	cfg := config.TestConfig()
 	cfg.Rules = []policy.Rule{
 		policy.FilterModel("standard", "standard"),
 		policy.MapRuleDirect("standard", []string{"a", "b"}, "model-x", 0),
@@ -182,7 +183,7 @@ func TestStreamingInternalRetryHidesPreWinnerFailure(t *testing.T) {
 		&policy.RetryRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionRetry}},
 		&policy.TimeoutRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionTimeout}, Duration: policy.Duration{Duration: 10 * time.Second}},
 	}
-	compiled, err := policy.CompileConfig(cfg)
+	compiled, err := config.CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

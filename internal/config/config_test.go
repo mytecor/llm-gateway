@@ -1,12 +1,15 @@
-package policy
+package config
 
 import (
-	"github.com/mytecor/llm-gateway/internal/model"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mytecor/llm-gateway/internal/model"
+	"github.com/mytecor/llm-gateway/internal/policy"
+	"github.com/mytecor/llm-gateway/internal/provider"
 )
 
 func testConfig() Config {
@@ -17,25 +20,25 @@ func testConfig() Config {
 
 // boundedPipeline returns the canonical bounded route graph for a model: the
 // entry route plus explicit retry and hedge subroutes.
-func boundedPipeline(model string) []Rule {
-	lease := leaseRule("standard", func(r *LeaseRule) {
+func boundedPipeline(model string) []policy.Rule {
+	lease := leaseRule("standard", func(r *policy.LeaseRule) {
 		r.Source = "winner"
-		r.Duration = Duration{10 * time.Minute}
+		r.Duration = Duration{Duration: 10 * time.Minute}
 		r.RenewOnSuccess = boolPtr(true)
 		r.ReleaseOn = []string{"429", "5xx", "timeout", "connection_error"}
 		r.ReleaseAfterSlowStarts = 3
-		r.SlowStart = Duration{3 * time.Second}
+		r.SlowStart = Duration{Duration: 3 * time.Second}
 	})
-	affinity := affinityRule("standard", func(r *AffinityRule) {
+	affinity := affinityRule("standard", func(r *policy.AffinityRule) {
 		r.Sources = []string{"responses.conversation", "responses.previous_response_id"}
-		r.TTL = Duration{24 * time.Hour}
+		r.TTL = Duration{Duration: 24 * time.Hour}
 		r.OnMissing = "ignore"
 		r.OnProviderFailure = "fail-closed"
 	})
-	backoff := &BackoffConfig{
-		Type: "exponential", Initial: Duration{200 * time.Millisecond}, Max: Duration{time.Second},
+	backoff := &policy.BackoffConfig{
+		Type: "exponential", Initial: Duration{Duration: 200 * time.Millisecond}, Max: Duration{Duration: time.Second},
 	}
-	return []Rule{
+	return []policy.Rule{
 		filterModel("standard", model),
 		filterProvider("standard", "a", "b"),
 		mapRule("standard", "native-model"),
@@ -61,7 +64,7 @@ func boundedPipeline(model string) []Rule {
 }
 
 func TestCompileConfigBuildsFlatPipeline(t *testing.T) {
-	compiled, err := compileConfig(testConfig())
+	compiled, err := CompileConfig(testConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +101,7 @@ func TestCompileConfigBuildsFlatPipeline(t *testing.T) {
 func TestCompileConfigBoundedPipeline(t *testing.T) {
 	cfg := testConfig()
 	cfg.Rules = boundedPipeline("standard")
-	compiled, err := compileConfig(cfg)
+	compiled, err := CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +137,7 @@ func TestCompileConfigBoundedPipeline(t *testing.T) {
 
 func TestCompileConfigConsecutiveMapsAccumulateAndDeduplicate(t *testing.T) {
 	cfg := testConfig()
-	cfg.Rules = []Rule{
+	cfg.Rules = []policy.Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "a"),
 		mapRule("standard", "native-model"),
@@ -143,7 +146,7 @@ func TestCompileConfigConsecutiveMapsAccumulateAndDeduplicate(t *testing.T) {
 		rankRule("standard"),
 		raceRule("standard", 2),
 	}
-	compiled, err := compileConfig(cfg)
+	compiled, err := CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +157,7 @@ func TestCompileConfigConsecutiveMapsAccumulateAndDeduplicate(t *testing.T) {
 
 func TestCompileConfigRejectsDuplicateProviderInPool(t *testing.T) {
 	cfg := testConfig()
-	cfg.Rules = []Rule{
+	cfg.Rules = []policy.Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "a"),
 		mapRule("standard", "native-x"),
@@ -163,7 +166,7 @@ func TestCompileConfigRejectsDuplicateProviderInPool(t *testing.T) {
 		rankRule("standard"),
 		raceRule("standard", 2),
 	}
-	_, err := compileConfig(cfg)
+	_, err := CompileConfig(cfg)
 	if err == nil || !strings.Contains(err.Error(), "more than once") {
 		t.Fatalf("expected duplicate provider error, got %v", err)
 	}
@@ -171,14 +174,14 @@ func TestCompileConfigRejectsDuplicateProviderInPool(t *testing.T) {
 
 func TestCompileConfigRejectsUnknownProvider(t *testing.T) {
 	cfg := testConfig()
-	cfg.Rules = []Rule{
+	cfg.Rules = []policy.Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "ghost"),
 		mapRule("standard", "native-model"),
 		rankRule("standard"),
 		raceRule("standard", 2),
 	}
-	_, err := compileConfig(cfg)
+	_, err := CompileConfig(cfg)
 	if err == nil || !strings.Contains(err.Error(), "unknown provider") {
 		t.Fatalf("expected unknown provider error, got %v", err)
 	}
@@ -194,7 +197,7 @@ func TestCompileConfigRejectsParameterlessHedge(t *testing.T) {
 		rankRule("standard.hedge"),
 		raceRule("standard.hedge", 1),
 	)
-	_, err := compileConfig(cfg)
+	_, err := CompileConfig(cfg)
 	if err == nil || !strings.Contains(err.Error(), "after") || !strings.Contains(err.Error(), "migration") {
 		t.Fatalf("expected precise hedge migration error, got %v", err)
 	}
@@ -202,7 +205,7 @@ func TestCompileConfigRejectsParameterlessHedge(t *testing.T) {
 
 func TestCompileConfigRejectsMapAfterRank(t *testing.T) {
 	cfg := testConfig()
-	cfg.Rules = []Rule{
+	cfg.Rules = []policy.Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "a", "b"),
 		mapRule("standard", "native-model"),
@@ -211,7 +214,7 @@ func TestCompileConfigRejectsMapAfterRank(t *testing.T) {
 		mapRule("standard", "native-model"),
 		raceRule("standard", 2),
 	}
-	_, err := compileConfig(cfg)
+	_, err := CompileConfig(cfg)
 	if err == nil || !strings.Contains(err.Error(), "map must precede rank") {
 		t.Fatalf("expected map-after-rank error, got %v", err)
 	}
@@ -219,12 +222,12 @@ func TestCompileConfigRejectsMapAfterRank(t *testing.T) {
 
 func TestCompileConfigRejectsRaceWithoutMap(t *testing.T) {
 	cfg := testConfig()
-	cfg.Rules = []Rule{
+	cfg.Rules = []policy.Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "a", "b"),
 		raceRule("standard", 2),
 	}
-	_, err := compileConfig(cfg)
+	_, err := CompileConfig(cfg)
 	if err == nil || !strings.Contains(err.Error(), "preceding map") {
 		t.Fatalf("expected map prerequisite error, got %v", err)
 	}
@@ -232,13 +235,13 @@ func TestCompileConfigRejectsRaceWithoutMap(t *testing.T) {
 
 func TestCompileConfigRejectsMissingRace(t *testing.T) {
 	cfg := testConfig()
-	cfg.Rules = []Rule{
+	cfg.Rules = []policy.Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "a", "b"),
 		mapRule("standard", "native-model"),
 		rankRule("standard"),
 	}
-	_, err := compileConfig(cfg)
+	_, err := CompileConfig(cfg)
 	if err == nil || !strings.Contains(err.Error(), "route-creating race") {
 		t.Fatalf("expected missing race error, got %v", err)
 	}
@@ -249,7 +252,7 @@ func TestCompileConfigRejectsMissingTargetRoute(t *testing.T) {
 	cfg.Rules = append(cfg.Rules[:5],
 		retryRule("standard", "does.not.exist", 2),
 	)
-	_, err := compileConfig(cfg)
+	_, err := CompileConfig(cfg)
 	if err == nil || !strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("expected missing target error, got %v", err)
 	}
@@ -263,7 +266,7 @@ func TestCompileConfigRejectsOrphanRoute(t *testing.T) {
 		rankRule("ghost.way"),
 		raceRule("ghost.way", 1),
 	)
-	_, err := compileConfig(cfg)
+	_, err := CompileConfig(cfg)
 	if err == nil || !strings.Contains(err.Error(), "not referenced by any transition") {
 		t.Fatalf("expected orphan route error, got %v", err)
 	}
@@ -271,7 +274,7 @@ func TestCompileConfigRejectsOrphanRoute(t *testing.T) {
 
 func TestCompileConfigRejectsRoutingCycle(t *testing.T) {
 	cfg := testConfig()
-	cfg.Rules = []Rule{
+	cfg.Rules = []policy.Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "a", "b"),
 		mapRule("standard", "native-model"),
@@ -285,7 +288,7 @@ func TestCompileConfigRejectsRoutingCycle(t *testing.T) {
 		raceRule("standard.retry", 1),
 		fallbackRule("standard.retry", "standard"),
 	}
-	_, err := compileConfig(cfg)
+	_, err := CompileConfig(cfg)
 	if err == nil || !strings.Contains(err.Error(), "routing cycle") {
 		t.Fatalf("expected routing cycle error, got %v", err)
 	}
@@ -300,7 +303,7 @@ func TestCompileConfigRejectsDuplicateEntryModel(t *testing.T) {
 		rankRule("second"),
 		raceRule("second", 1),
 	)
-	_, err := compileConfig(cfg)
+	_, err := CompileConfig(cfg)
 	if err == nil || !strings.Contains(err.Error(), "duplicate entry route") {
 		t.Fatalf("expected duplicate entry model error, got %v", err)
 	}
@@ -308,13 +311,13 @@ func TestCompileConfigRejectsDuplicateEntryModel(t *testing.T) {
 
 func TestCompileConfigRejectsMapWithoutSelection(t *testing.T) {
 	cfg := testConfig()
-	cfg.Rules = []Rule{
+	cfg.Rules = []policy.Rule{
 		filterModel("standard", "standard"),
 		mapRule("standard", "native-model"),
 		rankRule("standard"),
 		raceRule("standard", 1),
 	}
-	_, err := compileConfig(cfg)
+	_, err := CompileConfig(cfg)
 	if err == nil || !strings.Contains(err.Error(), "preceding filter provider") {
 		t.Fatalf("expected missing selection error, got %v", err)
 	}
@@ -324,25 +327,25 @@ func TestCompileConfigSubrouteInheritsRequestWideGuards(t *testing.T) {
 	cfg := testConfig()
 	// The retry subroute carries its own error filter/provider/map/race but no
 	// semaphore/timeout: those come request-wide from the entry route.
-	if _, err := compileConfig(cfg); err != nil {
+	if _, err := CompileConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestCompileConfigRejectsInvalidLease(t *testing.T) {
 	cfg := testConfig()
-	cfg.Rules = []Rule{
+	cfg.Rules = []policy.Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "a", "b"),
 		mapRule("standard", "native-model"),
 		rankRule("standard"),
-		leaseRule("standard", func(r *LeaseRule) {
+		leaseRule("standard", func(r *policy.LeaseRule) {
 			r.Source = "loser"
-			r.Duration = Duration{time.Minute}
+			r.Duration = Duration{Duration: time.Minute}
 		}),
 		raceRule("standard", 2),
 	}
-	_, err := compileConfig(cfg)
+	_, err := CompileConfig(cfg)
 	if err == nil || !strings.Contains(err.Error(), "lease source") {
 		t.Fatalf("expected lease source error, got %v", err)
 	}
@@ -350,20 +353,20 @@ func TestCompileConfigRejectsInvalidLease(t *testing.T) {
 
 func TestCompileConfigRejectsInvalidAffinity(t *testing.T) {
 	cfg := testConfig()
-	cfg.Rules = []Rule{
+	cfg.Rules = []policy.Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "a", "b"),
 		mapRule("standard", "native-model"),
 		rankRule("standard"),
-		affinityRule("standard", func(r *AffinityRule) {
+		affinityRule("standard", func(r *policy.AffinityRule) {
 			r.Sources = []string{"chat.messages"}
-			r.TTL = Duration{time.Hour}
+			r.TTL = Duration{Duration: time.Hour}
 			r.OnMissing = "ignore"
 			r.OnProviderFailure = "fail-closed"
 		}),
 		raceRule("standard", 2),
 	}
-	_, err := compileConfig(cfg)
+	_, err := CompileConfig(cfg)
 	if err == nil || !strings.Contains(err.Error(), "affinity source") {
 		t.Fatalf("expected affinity source error, got %v", err)
 	}
@@ -372,7 +375,7 @@ func TestCompileConfigRejectsInvalidAffinity(t *testing.T) {
 func TestCompileConfigRejectsInvalidSemaphore(t *testing.T) {
 	cfg := testConfig()
 	cfg.Rules = append(cfg.Rules[:5], semaphoreRule("standard", 0, 1, 1))
-	_, err := compileConfig(cfg)
+	_, err := CompileConfig(cfg)
 	if err == nil || !strings.Contains(err.Error(), "positive") {
 		t.Fatalf("expected semaphore error, got %v", err)
 	}
@@ -380,14 +383,14 @@ func TestCompileConfigRejectsInvalidSemaphore(t *testing.T) {
 
 func TestCompileConfigModifiersRequireRace(t *testing.T) {
 	cfg := testConfig()
-	cfg.Rules = []Rule{
+	cfg.Rules = []policy.Rule{
 		filterModel("standard", "standard"),
 		filterProvider("standard", "a", "b"),
 		mapRule("standard", "native-model"),
 		rankRule("standard"),
 		timeoutRule("standard", time.Second),
 	}
-	_, err := compileConfig(cfg)
+	_, err := CompileConfig(cfg)
 	if err == nil || !strings.Contains(err.Error(), "timeout requires a preceding race") {
 		t.Fatalf("expected race prerequisite error for modifiers, got %v", err)
 	}
@@ -403,7 +406,7 @@ func TestCompileConfigDerivesCatalogURLFromInferenceBase(t *testing.T) {
 		"inference_url": "https://edge.invalid/functions/v1/gonka",
 		"api_key":       "provider-b-key",
 	}
-	compiled, err := compileConfig(cfg)
+	compiled, err := CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,7 +430,7 @@ func TestCompileConfigPreservesExplicitCatalogURLAndCredential(t *testing.T) {
 	cfg := testConfig()
 	cfg.Providers[0].ModelsURL = "https://catalog.invalid/custom/models"
 	cfg.Providers[0].Config["api_key"] = "provider-key"
-	compiled, err := compileConfig(cfg)
+	compiled, err := CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +448,7 @@ func TestCompileConfigPreservesExplicitCatalogURLAndCredential(t *testing.T) {
 func TestCompileConfigDoesNotInferCatalogForNonOpenAIAdapter(t *testing.T) {
 	cfg := testConfig()
 	cfg.Providers[0].Config["base_provider"] = "anthropic"
-	compiled, err := compileConfig(cfg)
+	compiled, err := CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,12 +465,12 @@ func TestCompileConfigDoesNotInferCatalogForNonOpenAIAdapter(t *testing.T) {
 func TestCompileConfigRequiresVertexProjectAndRegion(t *testing.T) {
 	cfg := testConfig()
 	cfg.Providers[0].Config["base_provider"] = "vertex"
-	if _, err := compileConfig(cfg); err == nil || !strings.Contains(err.Error(), "vertex_project_id and vertex_region") {
+	if _, err := CompileConfig(cfg); err == nil || !strings.Contains(err.Error(), "vertex_project_id and vertex_region") {
 		t.Fatalf("expected missing Vertex resource configuration error, got %v", err)
 	}
 	cfg.Providers[0].Config["vertex_project_id"] = "mytecor"
 	cfg.Providers[0].Config["vertex_region"] = "global"
-	if _, err := compileConfig(cfg); err != nil {
+	if _, err := CompileConfig(cfg); err != nil {
 		t.Fatalf("valid Vertex provider was rejected: %v", err)
 	}
 }
@@ -475,14 +478,14 @@ func TestCompileConfigRequiresVertexProjectAndRegion(t *testing.T) {
 func TestCompileConfigRejectsUnsupportedBaseProvider(t *testing.T) {
 	cfg := testConfig()
 	cfg.Providers[0].Config["base_provider"] = "azure"
-	if _, err := compileConfig(cfg); err == nil || !strings.Contains(err.Error(), "unsupported") {
+	if _, err := CompileConfig(cfg); err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("expected unsupported base provider error, got %v", err)
 	}
 }
 
 func TestResolveConfigSecretsResolvesNestedConfigAndEnv(t *testing.T) {
 	t.Setenv("VERTEX_TEST_CREDENTIALS", `{"type":"service_account"}`)
-	cfg := Config{Providers: []Provider{{
+	cfg := Config{Providers: []provider.Provider{{
 		ID: "google-vertex",
 		Config: map[string]any{
 			"vertex_auth_credentials": "env.VERTEX_TEST_CREDENTIALS",
@@ -499,7 +502,7 @@ func TestResolveConfigSecretsResolvesNestedConfigAndEnv(t *testing.T) {
 func TestCompileConfigRejectsDuplicateProviderID(t *testing.T) {
 	cfg := testConfig()
 	cfg.Providers = append(cfg.Providers, cfg.Providers[0])
-	if _, err := compileConfig(cfg); err == nil || !strings.Contains(err.Error(), "duplicate provider id") {
+	if _, err := CompileConfig(cfg); err == nil || !strings.Contains(err.Error(), "duplicate provider id") {
 		t.Fatalf("expected duplicate provider error, got %v", err)
 	}
 }
@@ -519,7 +522,7 @@ func TestLoadConfigRejectsTrailingJSON(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{} {}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "trailing") {
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "trailing") {
 		t.Fatalf("expected trailing JSON error, got %v", err)
 	}
 }
@@ -546,7 +549,7 @@ func TestCheckConfigDoesNotResolveRuntimeSecrets(t *testing.T) {
 	if err := CheckConfig(path, true, "MISSING_CLIENT_KEY,MISSING_PROVIDER_KEY"); err != nil {
 		t.Fatalf("check must validate env references without resolving them: %v", err)
 	}
-	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "MISSING_CLIENT_KEY") {
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "MISSING_CLIENT_KEY") {
 		t.Fatalf("serve-time load must still require runtime secrets, got %v", err)
 	}
 }
@@ -554,11 +557,11 @@ func TestCheckConfigDoesNotResolveRuntimeSecrets(t *testing.T) {
 func TestCheckConfigRejectsLiteralSecrets(t *testing.T) {
 	cfg := testConfig()
 	cfg.Providers[0].Config["api_key"] = "plaintext"
-	if err := validateEnvSecretReferences(cfg, nil); err == nil || !strings.Contains(err.Error(), "literal secret") {
+	if err := ValidateEnvSecretReferences(cfg, nil); err == nil || !strings.Contains(err.Error(), "literal secret") {
 		t.Fatalf("expected literal secret rejection, got %v", err)
 	}
 	cfg.Providers[0].Config["api_key"] = "env.INVALID-NAME"
-	if err := validateEnvSecretReferences(cfg, nil); err == nil || !strings.Contains(err.Error(), "invalid environment") {
+	if err := ValidateEnvSecretReferences(cfg, nil); err == nil || !strings.Contains(err.Error(), "invalid environment") {
 		t.Fatalf("expected invalid environment reference rejection, got %v", err)
 	}
 }
@@ -566,10 +569,10 @@ func TestCheckConfigRejectsLiteralSecrets(t *testing.T) {
 func TestCheckConfigMatchesDeclaredEnvironment(t *testing.T) {
 	cfg := testConfig()
 	cfg.Providers[0].Config["api_key"] = "env.PROVIDER_A_KEY"
-	if err := validateEnvSecretReferences(cfg, map[string]bool{"PROVIDER_A_KEY": true}); err != nil {
+	if err := ValidateEnvSecretReferences(cfg, map[string]bool{"PROVIDER_A_KEY": true}); err != nil {
 		t.Fatalf("matching declaration was rejected: %v", err)
 	}
-	if err := validateEnvSecretReferences(cfg, map[string]bool{"OTHER_KEY": true}); err == nil || !strings.Contains(err.Error(), "not declared") {
+	if err := ValidateEnvSecretReferences(cfg, map[string]bool{"OTHER_KEY": true}); err == nil || !strings.Contains(err.Error(), "not declared") {
 		t.Fatalf("expected undeclared reference rejection, got %v", err)
 	}
 }
@@ -577,7 +580,7 @@ func TestCheckConfigMatchesDeclaredEnvironment(t *testing.T) {
 func TestCompileConfigRejectsCredentialsInURL(t *testing.T) {
 	cfg := testConfig()
 	cfg.Providers[0].Config["inference_url"] = "https://secret@example.invalid"
-	if _, err := compileConfig(cfg); err == nil || !strings.Contains(err.Error(), "credentials") {
+	if _, err := CompileConfig(cfg); err == nil || !strings.Contains(err.Error(), "credentials") {
 		t.Fatalf("expected credential URL rejection, got %v", err)
 	}
 }
@@ -585,7 +588,7 @@ func TestCompileConfigRejectsCredentialsInURL(t *testing.T) {
 func TestCompileConfigRejectsUnknownLogLevel(t *testing.T) {
 	cfg := testConfig()
 	cfg.LogLevel = "verbose"
-	if _, err := compileConfig(cfg); err == nil || !strings.Contains(err.Error(), "log_level") {
+	if _, err := CompileConfig(cfg); err == nil || !strings.Contains(err.Error(), "log_level") {
 		t.Fatalf("expected log level error, got %v", err)
 	}
 }
@@ -643,11 +646,11 @@ func TestCompileBoundedPipelineJSON(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := loadConfig(path)
+	cfg, err := LoadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compileConfig(cfg)
+	compiled, err := CompileConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -703,7 +706,7 @@ func TestCompileJSONRejectsUnknownPublicField(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "surprise") {
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "surprise") {
 		t.Fatalf("expected unknown public field rejection, got %v", err)
 	}
 }
@@ -730,7 +733,7 @@ func TestCompileJSONRejectsZeroValuedMisplacedField(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := loadConfig(path)
+	_, err := LoadConfig(path)
 	if err == nil || !strings.Contains(err.Error(), `unknown field "count"`) || !strings.Contains(err.Error(), `action "map"`) {
 		t.Fatalf("expected explicitly present zero foreign field rejection, got %v", err)
 	}
@@ -752,7 +755,7 @@ func TestCompileJSONRejectsUnknownAction(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := loadConfig(path)
+	_, err := LoadConfig(path)
 	if err == nil || !strings.Contains(err.Error(), "unsupported action") || !strings.Contains(err.Error(), "mystery") {
 		t.Fatalf("expected unknown action rejection, got %v", err)
 	}
@@ -779,11 +782,11 @@ func TestCompileJSONRejectsMissingRequiredRuleField(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := loadConfig(path)
+	cfg, err := LoadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := compileConfig(cfg); err == nil || !strings.Contains(err.Error(), "preceding filter provider") || !strings.Contains(err.Error(), `route "standard"`) {
+	if _, err := CompileConfig(cfg); err == nil || !strings.Contains(err.Error(), "preceding filter provider") || !strings.Contains(err.Error(), `route "standard"`) {
 		t.Fatalf("expected missing selection error with route context, got %v", err)
 	}
 }
@@ -791,27 +794,6 @@ func TestCompileJSONRejectsMissingRequiredRuleField(t *testing.T) {
 // TestCompileJSONRejectsLegacyFields proves the removed API fails fast with a
 // clear decode error instead of being silently migrated: match, map.providers,
 // retry.scope, retry.count, retry.on, fallback.on, fallback_strategy.
-func TestCompileJSONRejectsLegacyFields(t *testing.T) {
-	cases := map[string]string{
-		"match": `{"match":{"model":"standard"},"action":"filter","where":{"model":{"eq":"standard"}}}`,
-		"retry.scope": `{
-			"route":"standard","action":"retry","target":"standard.retry","attempts":1,"scope":"next"}`,
-		"retry.count": `{
-			"route":"standard","action":"retry","target":"standard.retry","attempts":1,"count":1}`,
-		"retry.on": `{
-			"route":"standard","action":"retry","target":"standard.retry","attempts":1,"on":["429"]}`,
-		"fallback.on": `{
-			"route":"standard","action":"fallback","target":"standard.fallback","on":["5xx"]}`,
-		"fallback_strategy": `{
-			"route":"standard","action":"fallback","target":"standard.fallback","fallback_strategy":"race"}`,
-	}
-	for name, rule := range cases {
-		if _, err := decodeRule([]byte(rule), 0); err == nil {
-			t.Fatalf("legacy field %q was silently accepted", name)
-		}
-	}
-}
-
 // TestValidateExternalGeneratedConfig compiles an externally generated runtime
 // JSON config (for example the one produced by the NixOS module) when
 // LATTICE_GATEWAY_CONFIG points at it. It is skipped otherwise.
@@ -820,11 +802,11 @@ func TestValidateExternalGeneratedConfig(t *testing.T) {
 	if path == "" {
 		t.Skip("LATTICE_GATEWAY_CONFIG not set")
 	}
-	cfg, err := loadConfig(path)
+	cfg, err := LoadConfig(path)
 	if err != nil {
 		t.Fatalf("load generated config: %v", err)
 	}
-	if _, err := compileConfig(cfg); err != nil {
+	if _, err := CompileConfig(cfg); err != nil {
 		t.Fatalf("compile generated config: %v", err)
 	}
 }

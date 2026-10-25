@@ -3,19 +3,12 @@ package policy
 import (
 	"fmt"
 
-	"github.com/mytecor/llm-gateway/internal/model"
+	"github.com/mytecor/llm-gateway/internal/provider"
 )
-
-func (p Provider) Capabilities() model.Capabilities {
-	if p.capabilities != (model.Capabilities{}) {
-		return p.capabilities
-	}
-	return model.Capabilities{Chat: true, Responses: true, Streaming: true, Tools: true, SafeReplay: true}
-}
 
 // Stateful work cannot be speculated or migrated without executor guarantees.
 // Check the entire graph, including transitions from otherwise stateless routes.
-func validateSessionRoutes(routes map[string]*CompiledRoute, providers map[string]Provider) error {
+func validateSessionRoutes(routes map[string]*CompiledRoute, providers map[string]provider.Provider) error {
 	for _, route := range routes {
 		for _, target := range route.Pool {
 			if providers[target.Provider].Capabilities().Stateful {
