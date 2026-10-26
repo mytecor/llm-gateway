@@ -72,8 +72,9 @@ const (
 // this registry plus the new implementation file; no central switch is
 // extended.
 type ruleDescriptor struct {
-	rank int
-	new  func() Rule
+	rank    int
+	new     func() Rule
+	aliases map[string][]string
 }
 
 // ruleRegistry is the action discriminator shared by the decoder and the
@@ -83,12 +84,12 @@ var ruleRegistry = map[string]ruleDescriptor{
 	ActionFilter:     {rank: 1, new: func() Rule { return &FilterRule{} }},
 	ActionMap:        {rank: 2, new: func() Rule { return &MapRule{} }},
 	ActionRank:       {rank: 3, new: func() Rule { return &RankRule{} }},
-	ActionAdmission:  {rank: 4, new: func() Rule { return &AdmissionRule{} }},
+	ActionAdmission:  {rank: 4, new: func() Rule { return &AdmissionRule{} }, aliases: map[string][]string{"max_in_flight": {"maxInFlight"}, "max_pending": {"maxPending"}, "wait_timeout": {"waitTimeout"}}},
 	ActionLease:      {rank: 5, new: func() Rule { return &LeaseRule{} }},
 	ActionBalance:    {rank: 5, new: func() Rule { return &BalanceRule{} }},
 	ActionAffinity:   {rank: 6, new: func() Rule { return &AffinityRule{} }},
 	ActionRace:       {rank: 7, new: func() Rule { return &RaceRule{} }},
-	ActionRetry:      {rank: 8, new: func() Rule { return &RetryRule{} }},
+	ActionRetry:      {rank: 8, new: func() Rule { return &RetryRule{} }, aliases: map[string][]string{"attempts": {"max_attempts", "maxAttempts"}}},
 	ActionHedge:      {rank: 9, new: func() Rule { return &HedgeRule{} }},
 	ActionSemaphore:  {rank: 10, new: func() Rule { return &SemaphoreRule{} }},
 	ActionTimeout:    {rank: 11, new: func() Rule { return &TimeoutRule{} }},

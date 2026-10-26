@@ -14,29 +14,20 @@ type AdmissionConfig struct {
 // It bounds concurrent in-flight requests and sets queueing limits for pending requests.
 type AdmissionRule struct {
 	RuleBase
-	MaxInFlight      int      `json:"max_in_flight,omitempty"`
-	MaxInFlightCamel int      `json:"maxInFlight,omitempty"`
-	MaxPending       *int     `json:"max_pending,omitempty"`
-	MaxPendingCamel  *int     `json:"maxPending,omitempty"`
-	WaitTimeout      Duration `json:"wait_timeout,omitempty"`
-	WaitTimeoutCamel Duration `json:"waitTimeout,omitempty"`
+	MaxInFlight int      `json:"max_in_flight,omitempty"`
+	MaxPending  *int     `json:"max_pending,omitempty"`
+	WaitTimeout Duration `json:"wait_timeout,omitempty"`
 }
 
 func (r *AdmissionRule) apply(ctx *stageContext) error {
 	maxInFlight := r.MaxInFlight
-	if maxInFlight == 0 && r.MaxInFlightCamel != 0 {
-		maxInFlight = r.MaxInFlightCamel
-	}
+
 	maxPending := -1
 	if r.MaxPending != nil {
 		maxPending = *r.MaxPending
-	} else if r.MaxPendingCamel != nil {
-		maxPending = *r.MaxPendingCamel
 	}
 	waitTimeout := r.WaitTimeout.Duration
-	if waitTimeout == 0 && r.WaitTimeoutCamel.Duration != 0 {
-		waitTimeout = r.WaitTimeoutCamel.Duration
-	}
+
 	if maxInFlight < 0 {
 		return ctx.errf("admission max_in_flight must not be negative")
 	}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/mytecor/llm-gateway/internal/model"
 	"time"
 )
 
@@ -21,13 +22,8 @@ type Session interface {
 }
 
 // ModelLister is optional; failure must leave the last known catalog intact.
-type ModelLister interface {
-	Models(context.Context) ([]ModelInfo, error)
-}
-type ModelInfo struct {
-	ID, Name         string
-	ReasoningEfforts []string
-}
+type ModelLister = model.ModelLister
+type ModelInfo = model.ModelInfo
 
 type Spec struct {
 	CWD, Model, System, ResumeID string

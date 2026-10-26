@@ -13,7 +13,7 @@ func CheckConfig(path string, requireEnvSecrets bool, allowedEnv string) error {
 			return fmt.Errorf("validate config: %w", err)
 		}
 	}
-	if _, err := CompileConfig(cfg); err != nil {
+	if _, err := PrepareAndCompile(cfg); err != nil {
 		return fmt.Errorf("validate config: %w", err)
 	}
 	return nil

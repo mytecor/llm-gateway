@@ -30,6 +30,7 @@ type Runner struct {
 	cooling   map[cooldownKey]time.Time
 	leases    *subsystem.LeaseStore
 	scores    *subsystem.ScoreStore
+	capacity  *subsystem.ProviderCapacity
 	affinity  *subsystem.AffinityStore
 	metrics   *telemetry.Metrics
 	admission *subsystem.AdmissionController
@@ -61,15 +62,20 @@ func NewRunnerMetrics(config *config.CompiledConfig, catalog *subsystem.Catalog,
 		metrics: metrics,
 	}
 	runner.leases = subsystem.NewLeaseStore(runner.now)
-	runner.scores = subsystem.NewScoreStore(runner.now)
+	runner.capacity = subsystem.NewProviderCapacity(runner.metrics)
+	runner.scores = subsystem.NewScoreStore(runner.now, runner.capacity)
 	runner.affinity = subsystem.NewAffinityStore(runner.now, config.Raw.AffinityFile, func(err error) {
 		telemetry.LogEvent(context.Background(), config.Logger, slog.LevelError, "affinity_persistence_failed", "detail", telemetry.SafeLogDetail(err.Error()))
 	})
 	runner.admission = subsystem.NewAdmissionController(runner.metrics, runner.now)
+	if registry, ok := executor.(interface {
+		UseCatalog(model.ProviderModelLister)
+	}); ok {
+		registry.UseCatalog(catalog)
+	}
 	if config != nil {
 		for id, p := range config.Providers {
-			runner.scores.SetMaxConcurrent(id, p.MaxConcurrent)
-			runner.metrics.ObserveProviderCapacity(id, p.MaxConcurrent)
+			runner.capacity.SetLimit(id, p.MaxConcurrent)
 			runner.metrics.ObserveProviderEWMATTFT(id, time.Duration(runner.scores.LatencyOf(id)*float64(time.Second)))
 		}
 	}
@@ -277,124 +283,31 @@ func (r *Runner) runPlan(ctx context.Context, logical string, request model.Exec
 	return r.executeRoute(ctx, logical, entry, request, streamMode, runtime)
 }
 
-// executeRoute runs one compiled route and applies its explicit transitions on
-// a terminal failure: retry is a bounded repeated transition into the retry
-// target (with backoff), fallback a one-shot alternate transition. The
-// destination owns its applicability through its own filter; a non-applicable
-// destination returns the current terminal failure unchanged, and a destination
-// with no available targets (empty) never masks the original failure. A
-// cancellation or a known affinity pin (fail-closed) terminates the graph.
+// executeRoute uses one bounded transition engine for retry and fallback.
+// Destination filters, request budgets and replay safety apply to every edge.
 func (r *Runner) executeRoute(ctx context.Context, logical string, route *policy.CompiledRoute, request model.ExecuteRequest, streamMode bool, runtime *routeRuntime) *routeOutcome {
 	outcome := r.raceRoute(ctx, logical, route, request, streamMode, runtime)
-	if outcome.err == nil || outcome.err.Class == model.ErrorCancelled || outcome.err.Replay == model.ReplayUnknown || outcome.pinned {
-		return outcome
-	}
-	if outcome.empty {
+	if terminalOutcome(outcome) || outcome.empty {
 		return outcome
 	}
 	original := outcome.err
-
-	if route.Retry.Attempts > 0 && route.Retry.Internal {
-		for attempt := 0; attempt < route.Retry.Attempts; attempt++ {
-			if !isReschedulableError(outcome.err) {
-				break
-			}
-			telemetry.LogEvent(ctx, r.logger, slog.LevelWarn, "llm_retry",
-				"route", route.Name,
-				"provider", outcome.failedProvider,
-				"error_type", string(outcome.err.Class),
-				"status_code", outcome.err.Status,
-				"attempt", attempt+1,
-			)
-			if callErr := runtime.waitBackoff(ctx, backoffDuration(route.Retry.Backoff, attempt), r.sleep); callErr != nil {
-				return &routeOutcome{err: callErr}
-			}
-			for target := range outcome.failedTargets {
-				runtime.excludeTargets[target] = true
-			}
-			if len(outcome.failedTargets) == 0 && outcome.failedProvider != "" {
-				runtime.exclude[outcome.failedProvider] = true
-			}
-			next := r.raceRoute(ctx, logical, route, request, streamMode, runtime)
-			if next.err == nil || next.err.Class == model.ErrorCancelled {
-				if next.err == nil {
-					telemetry.LogEvent(ctx, r.logger, slog.LevelInfo, "llm_attempt",
-						"route", route.Name,
-						"provider", next.provider,
-						"native_model", next.model,
-						"status", "success",
-						"attempt", attempt+1,
-					)
-				}
-				return next
-			}
-			if next.empty {
-				break
-			}
-			outcome = next
+	var transitions []routeTransition
+	if route.Retry.Attempts > 0 {
+		target := route.RetryTarget
+		if route.Retry.Internal {
+			target = route
+		}
+		if target != nil {
+			transitions = append(transitions, routeTransition{kind: "retry", target: target, attempts: route.Retry.Attempts, backoff: route.Retry.Backoff, internal: route.Retry.Internal})
 		}
 	}
-
-	if route.Retry.Attempts > 0 && route.RetryTarget != nil {
-		for attempt := 0; attempt < route.Retry.Attempts; attempt++ {
-			if !route.RetryTarget.Applicable(outcome.err, attempt) {
-				break
-			}
-			telemetry.LogEvent(ctx, r.logger, slog.LevelWarn, "llm_retry",
-				"route", route.Name,
-				"provider", outcome.failedProvider,
-				"error_type", string(outcome.err.Class),
-				"status_code", outcome.err.Status,
-				"attempt", attempt+1,
-			)
-			if callErr := runtime.waitBackoff(ctx, backoffDuration(route.Retry.Backoff, attempt), r.sleep); callErr != nil {
-				return &routeOutcome{err: callErr}
-			}
-			next := r.executeRoute(ctx, logical, route.RetryTarget, request, streamMode, runtime)
-			if next.err == nil || next.err.Class == model.ErrorCancelled {
-				if next.err == nil {
-					// The retried attempt succeeded: one attempt-level success line
-					// so a request_id reconstructs the retry→success path.
-					telemetry.LogEvent(ctx, r.logger, slog.LevelInfo, "llm_attempt",
-						"route", route.RetryTarget.Name,
-						"provider", next.provider,
-						"native_model", next.model,
-						"status", "success",
-						"attempt", attempt+1,
-					)
-				}
-				return next
-			}
-			if next.empty {
-				// The retry route has no available targets for this request:
-				// the transition is not usable, so restore the original failure
-				// and continue to any sibling fallback transition.
-				outcome = &routeOutcome{err: original}
-				break
-			}
-			outcome = next
-		}
+	if route.FallbackTarget != nil {
+		transitions = append(transitions, routeTransition{kind: "fallback", target: route.FallbackTarget, attempts: 1})
 	}
-	if route.FallbackTarget != nil && route.FallbackTarget.Applicable(outcome.err, 0) {
-		from := outcome.failedProvider
-		to := ""
-		if len(route.FallbackTarget.Pool) > 0 {
-			to = route.FallbackTarget.Pool[0].Provider
-		}
-		reason := ""
-		if outcome.err != nil {
-			reason = string(outcome.err.Class)
-		}
-		r.metrics.ObserveFallback(from, to, reason)
-		telemetry.LogEvent(ctx, r.logger, slog.LevelWarn, "llm_fallback",
-			"route", route.Name,
-			"from_provider", from,
-			"to_provider", to,
-			"reason", reason,
-		)
-		next := r.executeRoute(ctx, logical, route.FallbackTarget, request, streamMode, runtime)
-		if !next.empty {
-			return next
+	for _, transition := range transitions {
+		outcome = r.followTransition(ctx, logical, route, transition, request, streamMode, runtime, outcome, original)
+		if terminalOutcome(outcome) {
+			return outcome
 		}
 	}
 	return outcome
@@ -807,11 +720,14 @@ func (r *Runner) ModelDetails(ctx context.Context, logical string) (model.ModelI
 	if !ok || len(route.Pool) != 1 {
 		return model.ModelInfo{}, nil
 	}
-	source, ok := r.executor.(interface {
-		ModelDetails(context.Context, model.Target) (model.ModelInfo, error)
-	})
-	if !ok {
-		return model.ModelInfo{}, nil
+	models, err := r.catalog.Models(ctx, route.Pool[0].Provider)
+	if err != nil {
+		return model.ModelInfo{}, err
 	}
-	return source.ModelDetails(ctx, route.Pool[0])
+	for _, m := range models {
+		if m.ID == route.Pool[0].Model {
+			return m, nil
+		}
+	}
+	return model.ModelInfo{}, nil
 }

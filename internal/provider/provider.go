@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/mytecor/llm-gateway/internal/configcompat"
+	"github.com/mytecor/llm-gateway/internal/executor/external"
 	"github.com/mytecor/llm-gateway/internal/model"
+	"log/slog"
 )
 
 type Duration = model.Duration
@@ -19,22 +22,21 @@ type SessionSettings struct {
 }
 
 type Provider struct {
-	ID                 string            `json:"id"`
-	Driver             string            `json:"driver,omitempty"`
-	Command            []string          `json:"command,omitempty"`
-	Env                map[string]string `json:"env,omitempty"`
-	Priority           int               `json:"priority,omitempty"`
-	Weight             int               `json:"weight,omitempty"`
-	MaxConcurrent      int               `json:"max_concurrent,omitempty"`
-	MaxConcurrentCamel int               `json:"maxConcurrent,omitempty"`
-	Cooldown           Duration          `json:"cooldown,omitempty"`
-	RequestTimeout     Duration          `json:"request_timeout,omitempty"`
-	ModelsURL          string            `json:"models_url,omitempty"`
-	ToolStrategy       string            `json:"tool_strategy,omitempty"`
-	Session            *SessionSettings  `json:"session,omitempty"`
-	Config             map[string]any    `json:"config,omitempty"`
+	ID             string            `json:"id"`
+	Driver         string            `json:"driver,omitempty"`
+	Command        []string          `json:"command,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
+	Priority       int               `json:"priority,omitempty"`
+	Weight         int               `json:"weight,omitempty"`
+	MaxConcurrent  int               `json:"max_concurrent,omitempty"`
+	Cooldown       Duration          `json:"cooldown,omitempty"`
+	RequestTimeout Duration          `json:"request_timeout,omitempty"`
+	ModelsURL      string            `json:"models_url,omitempty"`
+	ToolStrategy   string            `json:"tool_strategy,omitempty"`
+	Session        *SessionSettings  `json:"session,omitempty"`
+	Config         map[string]any    `json:"config,omitempty"`
 
-	capabilities model.Capabilities
+	Description *external.Description `json:"-"`
 }
 
 var providerCoreKeys = map[string]bool{
@@ -45,7 +47,6 @@ var providerCoreKeys = map[string]bool{
 	"priority":        true,
 	"weight":          true,
 	"max_concurrent":  true,
-	"maxConcurrent":   true,
 	"cooldown":        true,
 	"request_timeout": true,
 	"models_url":      true,
@@ -54,89 +55,72 @@ var providerCoreKeys = map[string]bool{
 	"config":          true,
 }
 
-type providerCoreAlias struct {
-	ID                 string            `json:"id"`
-	Driver             string            `json:"driver,omitempty"`
-	Command            []string          `json:"command,omitempty"`
-	Env                map[string]string `json:"env,omitempty"`
-	Priority           int               `json:"priority,omitempty"`
-	Weight             int               `json:"weight,omitempty"`
-	MaxConcurrent      int               `json:"max_concurrent,omitempty"`
-	MaxConcurrentCamel int               `json:"maxConcurrent,omitempty"`
-	Cooldown           Duration          `json:"cooldown,omitempty"`
-	RequestTimeout     Duration          `json:"request_timeout,omitempty"`
-	ModelsURL          string            `json:"models_url,omitempty"`
-	ToolStrategy       string            `json:"tool_strategy,omitempty"`
-	Session            *SessionSettings  `json:"session,omitempty"`
-}
-
 func (p *Provider) UnmarshalJSON(data []byte) error {
-	var rawMap map[string]json.RawMessage
-	if err := json.Unmarshal(data, &rawMap); err != nil {
-		return err
-	}
-	coreMap := make(map[string]json.RawMessage, len(rawMap))
-	for k, v := range rawMap {
-		if providerCoreKeys[k] && k != "config" {
-			coreMap[k] = v
-		}
-	}
-	coreBytes, err := json.Marshal(coreMap)
+	data, err := configcompat.Aliases(data, map[string][]string{"max_concurrent": {"maxConcurrent"}})
 	if err != nil {
 		return err
 	}
-	var core providerCoreAlias
-	dec := json.NewDecoder(bytes.NewReader(coreBytes))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&core); err != nil {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
-
-	cfgMap := make(map[string]any)
-	if rawCfg, ok := rawMap["config"]; ok {
-		trimmed := bytes.TrimSpace(rawCfg)
-		if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) {
-			if err := json.Unmarshal(trimmed, &cfgMap); err != nil {
-				return fmt.Errorf("provider config must be a JSON object: %w", err)
-			}
+	var extras map[string]any
+	if raw, ok := fields["config"]; ok {
+		if err := json.Unmarshal(raw, &extras); err != nil {
+			return fmt.Errorf("provider config must be a JSON object: %w", err)
 		}
 	}
-	for k, v := range rawMap {
-		if providerCoreKeys[k] {
+	if extras == nil {
+		extras = make(map[string]any)
+	}
+	for key, raw := range fields {
+		if providerCoreKeys[key] {
 			continue
 		}
-		var val any
-		if err := json.Unmarshal(v, &val); err != nil {
+		var value any
+		if err := json.Unmarshal(raw, &value); err != nil {
 			return err
 		}
-		cfgMap[k] = val
+		extras[key] = value
+		delete(fields, key)
 	}
-	if len(cfgMap) == 0 {
-		cfgMap = nil
+	// The alias avoids recursive UnmarshalJSON while retaining strict decoding
+	// for gateway fields and nested session settings.
+	type plain Provider
+	raw, err := json.Marshal(fields)
+	if err != nil {
+		return err
 	}
-
-	*p = Provider{
-		ID:                 core.ID,
-		Driver:             core.Driver,
-		Command:            core.Command,
-		Env:                core.Env,
-		Priority:           core.Priority,
-		Weight:             core.Weight,
-		MaxConcurrent:      core.MaxConcurrent,
-		MaxConcurrentCamel: core.MaxConcurrentCamel,
-		Cooldown:           core.Cooldown,
-		RequestTimeout:     core.RequestTimeout,
-		ModelsURL:          core.ModelsURL,
-		ToolStrategy:       core.ToolStrategy,
-		Session:            core.Session,
-		Config:             cfgMap,
+	var result plain
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&result); err != nil {
+		return err
 	}
+	if len(extras) > 0 {
+		result.Config = extras
+	} else {
+		result.Config = nil
+	}
+	*p = Provider(result)
 	return nil
 }
 
 func (p Provider) Capabilities() model.Capabilities {
-	if p.capabilities != (model.Capabilities{}) {
-		return p.capabilities
+	if p.Description != nil {
+		return p.Description.Capabilities
 	}
-	return model.Capabilities{Chat: true, Responses: true, Streaming: true, Tools: true, SafeReplay: true}
+	return model.Capabilities{}
+}
+
+// DriverSettings is the single mapping from provider settings to driver startup.
+func (p Provider) DriverSettings(logger *slog.Logger) external.Config {
+	var cwd string
+	if p.Session != nil {
+		cwd = p.Session.DefaultCWD
+	}
+	return external.Config{ID: p.ID, Driver: p.Driver, Command: p.Command, Env: p.Env,
+		DefaultCWD: cwd, ToolStrategy: p.ToolStrategy, ModelsURL: p.ModelsURL,
+		HasSession: p.Session != nil, RequestTimeout: p.RequestTimeout.Duration,
+		DriverConfig: p.Config, Logger: logger, Description: p.Description}
 }

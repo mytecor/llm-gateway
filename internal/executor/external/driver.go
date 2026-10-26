@@ -17,100 +17,17 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/mytecor/llm-gateway/driverproto"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/session"
 	"github.com/mytecor/llm-gateway/internal/telemetry"
 )
 
-const catalogTTL = time.Minute
-
-var (
-	describeCacheMu sync.Mutex
-	describeCache   = make(map[string]Description)
-)
-
-type wireCapabilities struct {
-	Chat       bool `json:"chat,omitempty"`
-	Responses  bool `json:"responses,omitempty"`
-	Streaming  bool `json:"streaming,omitempty"`
-	Tools      bool `json:"tools,omitempty"`
-	Stateful   bool `json:"stateful,omitempty"`
-	Resume     bool `json:"resume,omitempty"`
-	SafeReplay bool `json:"safe_replay,omitempty"`
-}
-
-func (c wireCapabilities) toModel() model.Capabilities {
-	return model.Capabilities{
-		Chat:       c.Chat,
-		Responses:  c.Responses,
-		Streaming:  c.Streaming,
-		Tools:      c.Tools,
-		Stateful:   c.Stateful,
-		Resume:     c.Resume,
-		SafeReplay: c.SafeReplay,
-	}
-}
-
-type wireCallError struct {
-	Code   string `json:"code,omitempty"`
-	Class  string `json:"class"`
-	Status int    `json:"status"`
-	Scope  string `json:"scope,omitempty"`
-	Replay string `json:"replay,omitempty"`
-	Detail string `json:"detail,omitempty"`
-	Log    string `json:"log,omitempty"`
-}
-
-type wireModelInfo struct {
-	ID               string   `json:"id"`
-	Name             string   `json:"name,omitempty"`
-	ReasoningEfforts []string `json:"reasoning_efforts,omitempty"`
-}
-
-type wireInbound struct {
-	Type                string                 `json:"type"`
-	ID                  string                 `json:"id,omitempty"`
-	ToolStrategy        string                 `json:"tool_strategy,omitempty"`
-	ModelsURL           string                 `json:"models_url,omitempty"`
-	HasSession          bool                   `json:"has_session,omitempty"`
-	RequestTimeoutMs    int64                  `json:"request_timeout_ms,omitempty"`
-	Config              map[string]any         `json:"config,omitempty"`
-	CWD                 string                 `json:"cwd,omitempty"`
-	Provider            string                 `json:"provider,omitempty"`
-	Model               string                 `json:"model,omitempty"`
-	ReasoningEffort     string                 `json:"reasoning_effort,omitempty"`
-	System              string                 `json:"system,omitempty"`
-	ResumeID            string                 `json:"resume_id,omitempty"`
-	Tools               []session.FunctionTool `json:"tools,omitempty"`
-	Text                string                 `json:"text,omitempty"`
-	Content             string                 `json:"content,omitempty"`
-	Error               string                 `json:"error,omitempty"`
-	Kind                string                 `json:"kind,omitempty"`
-	Stream              bool                   `json:"stream,omitempty"`
-	StreamIdleTimeoutMs int64                  `json:"stream_idle_timeout_ms,omitempty"`
-	Body                json.RawMessage        `json:"body,omitempty"`
-}
-
-type wireEvent struct {
-	Type         string            `json:"type"`
-	ID           string            `json:"id,omitempty"`
-	Text         string            `json:"text,omitempty"`
-	Name         string            `json:"name,omitempty"`
-	Arguments    json.RawMessage   `json:"arguments,omitempty"`
-	ResumeID     string            `json:"resume_id,omitempty"`
-	Input        int64             `json:"input_tokens,omitempty"`
-	Output       int64             `json:"output_tokens,omitempty"`
-	Error        string            `json:"error,omitempty"`
-	Models       []wireModelInfo   `json:"models,omitempty"`
-	ToolStrategy string            `json:"tool_strategy,omitempty"`
-	Capabilities *wireCapabilities `json:"capabilities,omitempty"`
-	Catalog      *CatalogSource    `json:"catalog,omitempty"`
-	Config       map[string]any    `json:"config,omitempty"`
-	Data         json.RawMessage   `json:"data,omitempty"`
-	Event        string            `json:"event,omitempty"`
-	Meaningful   bool              `json:"meaningful,omitempty"`
-	CallError    *wireCallError    `json:"call_error,omitempty"`
-}
+type wireCapabilities = driverproto.Capabilities
+type wireCallError = driverproto.CallError
+type wireModelInfo = driverproto.ModelInfo
+type wireInbound = driverproto.Command[map[string]any]
+type wireEvent = driverproto.Event
 
 func effectiveDriverConfig(cfg Config) map[string]any {
 	out := make(map[string]any, len(cfg.DriverConfig)+1)
@@ -158,6 +75,7 @@ func Describe(ctx context.Context, cfg Config) (Description, error) {
 	}
 	initMsg := wireInbound{
 		Type:             "init",
+		ProtocolVersion:  driverproto.Version,
 		ID:               id,
 		ToolStrategy:     cfg.ToolStrategy,
 		ModelsURL:        cfg.ModelsURL,
@@ -169,15 +87,6 @@ func Describe(ctx context.Context, cfg Config) (Description, error) {
 	if err != nil {
 		return Description{}, err
 	}
-	cwd, _ := os.Getwd()
-	cacheKey := strings.Join(execCmd, "\x00") + "\x00" + cwd + "\x00" + string(initData)
-
-	describeCacheMu.Lock()
-	if cached, ok := describeCache[cacheKey]; ok {
-		describeCacheMu.Unlock()
-		return cloneDescription(cached), nil
-	}
-	describeCacheMu.Unlock()
 
 	initCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -230,22 +139,10 @@ func Describe(ctx context.Context, cfg Config) (Description, error) {
 	if ev.Type == "error" {
 		return Description{}, errors.New(ev.Error)
 	}
-	if ev.Type != "ready" {
-		return Description{}, fmt.Errorf("unexpected driver initialization event %q", ev.Type)
+	if err := driverproto.ValidateReady(ev); err != nil {
+		return Description{}, err
 	}
-
-	var caps model.Capabilities
-	if ev.Capabilities != nil {
-		caps = ev.Capabilities.toModel()
-	} else {
-		caps = model.Capabilities{
-			Chat:      true,
-			Streaming: true,
-			Tools:     true,
-			Stateful:  true,
-			Resume:    true,
-		}
-	}
+	caps := *ev.Capabilities
 
 	strategy := strings.ToLower(strings.TrimSpace(ev.ToolStrategy))
 	if caps.Stateful {
@@ -271,10 +168,6 @@ func Describe(ctx context.Context, cfg Config) (Description, error) {
 		Catalog:      ev.Catalog,
 		Config:       normalizedCfg,
 	}
-
-	describeCacheMu.Lock()
-	describeCache[cacheKey] = cloneDescription(desc)
-	describeCacheMu.Unlock()
 
 	return desc, nil
 }
@@ -311,11 +204,8 @@ type Driver struct {
 	description    Description
 	logger         *slog.Logger
 
-	// Stateful catalog cache
 	mu          sync.Mutex
-	catalog     []session.ModelInfo
-	discoveryMu sync.Mutex
-	catalogAt   time.Time
+	modelLister model.ModelLister
 
 	// Stateless multiplexed worker state
 	cmd      *exec.Cmd
@@ -341,9 +231,14 @@ func newDriver(ctx context.Context, cfg Config) (*Driver, error) {
 	if err != nil {
 		return nil, err
 	}
-	desc, err := Describe(ctx, cfg)
-	if err != nil {
-		return nil, err
+	var desc Description
+	if cfg.Description != nil {
+		desc = cloneDescription(*cfg.Description)
+	} else {
+		desc, err = Describe(ctx, cfg)
+		if err != nil {
+			return nil, err
+		}
 	}
 	d := &Driver{
 		id:             strings.TrimSpace(cfg.ID),
@@ -447,6 +342,7 @@ func (d *Driver) startMultiplexed(ctx context.Context) error {
 	}
 	if err := d.writeMultiplexed(wireInbound{
 		Type:             "start",
+		ProtocolVersion:  driverproto.Version,
 		ID:               id,
 		ModelsURL:        d.modelsURL,
 		RequestTimeoutMs: d.requestTimeout.Milliseconds(),
@@ -465,10 +361,15 @@ func (d *Driver) startMultiplexed(ctx context.Context) error {
 			_ = d.Close()
 			return errors.New(msg.Error)
 		}
-		if msg.Type != "ready" {
+		if err := driverproto.ValidateReady(msg); err != nil {
 			_ = d.Close()
-			return errors.New("external driver did not become ready")
+			return err
 		}
+		if *msg.Capabilities != d.capabilities {
+			_ = d.Close()
+			return errors.New("driver capabilities changed after preparation")
+		}
+
 		return nil
 	case <-d.readDone:
 		_ = d.Close()
@@ -745,31 +646,25 @@ func (d *Driver) logUpstreamSuccess(ctx context.Context, target model.Target, ki
 	)
 }
 
-func (d *Driver) Models(ctx context.Context) ([]session.ModelInfo, error) {
-	d.discoveryMu.Lock()
-	defer d.discoveryMu.Unlock()
-	d.mu.Lock()
-	cached := append([]session.ModelInfo(nil), d.catalog...)
-	fresh := !d.catalogAt.IsZero() && time.Since(d.catalogAt) < catalogTTL
-	d.mu.Unlock()
-	if fresh {
-		return cached, nil
-	}
-
-	discoveryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+// Models performs fresh transport discovery. The gateway Catalog owns snapshots.
+func (d *Driver) Models(ctx context.Context) ([]model.ModelInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	discovered, err := d.queryModels(discoveryCtx)
+	return d.queryModels(ctx)
+}
+
+// SetModelLister installs the shared catalog before serving requests.
+func (d *Driver) SetModelLister(lister model.ModelLister) { d.modelLister = lister }
+
+// DiscoverModels performs discovery without starting a runtime or handshaking.
+func DiscoverModels(ctx context.Context, cfg Config) ([]model.ModelInfo, error) {
+	command, err := ResolveDriverCommand(cfg.Driver, cfg.Command)
 	if err != nil {
-		if len(cached) > 0 {
-			return cached, nil
-		}
 		return nil, err
 	}
-	d.mu.Lock()
-	d.catalog = append([]session.ModelInfo(nil), discovered...)
-	d.catalogAt = time.Now()
-	d.mu.Unlock()
-	return discovered, nil
+	d := &Driver{id: cfg.ID, command: command, env: cfg.Env, defaultCWD: cfg.DefaultCWD,
+		modelsURL: cfg.ModelsURL, driverConfig: cfg.DriverConfig, requestTimeout: cfg.RequestTimeout}
+	return d.Models(ctx)
 }
 
 func (d *Driver) queryModels(ctx context.Context) ([]session.ModelInfo, error) {
@@ -802,9 +697,11 @@ func (d *Driver) queryModels(ctx context.Context) ([]session.ModelInfo, error) {
 	}()
 
 	reqData, _ := json.Marshal(wireInbound{
-		Type:   "models",
-		CWD:    d.defaultCWD,
-		Config: d.driverConfig,
+		Type: "models",
+		ID:   d.id, ModelsURL: d.modelsURL, ProtocolVersion: driverproto.Version,
+		RequestTimeoutMs: d.requestTimeout.Milliseconds(),
+		CWD:              d.defaultCWD,
+		Config:           d.driverConfig,
 	})
 	if _, err := stdin.Write(append(reqData, '\n')); err != nil {
 		return nil, err
@@ -829,15 +726,7 @@ func (d *Driver) queryModels(ctx context.Context) ([]session.ModelInfo, error) {
 	if ev.Type != "models" {
 		return nil, fmt.Errorf("unexpected driver response %q to models request", ev.Type)
 	}
-	result := make([]session.ModelInfo, 0, len(ev.Models))
-	for _, m := range ev.Models {
-		result = append(result, session.ModelInfo{
-			ID:               m.ID,
-			Name:             m.Name,
-			ReasoningEfforts: m.ReasoningEfforts,
-		})
-	}
-	return result, nil
+	return ev.Models, nil
 }
 
 func (d *Driver) Resolve(ctx context.Context, modelName, effort string) (string, error) {
@@ -851,21 +740,18 @@ func (d *Driver) Resolve(ctx context.Context, modelName, effort string) (string,
 		return "", nil
 	}
 
-	d.mu.Lock()
-	models := append([]session.ModelInfo(nil), d.catalog...)
-	d.mu.Unlock()
-	if len(models) == 0 {
-		discoveryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		discovered, err := d.Models(discoveryCtx)
-		cancel()
-		if err != nil {
-			if effort != "" {
-				return "", fmt.Errorf("reasoning effort discovery: %w", err)
-			}
-			return modelName, nil
-		}
-		models = discovered
+	lister := d.modelLister
+	if lister == nil {
+		lister = d
 	}
+	models, err := lister.Models(ctx)
+	if err != nil {
+		if effort != "" {
+			return "", fmt.Errorf("reasoning effort discovery: %w", err)
+		}
+		return modelName, nil
+	}
+
 	for _, m := range models {
 		if m.ID == modelName && len(m.ReasoningEfforts) > 0 {
 			if effort == "" {
@@ -967,13 +853,14 @@ func (d *Driver) Start(ctx context.Context, spec session.Spec) (session.Session,
 	}
 
 	startPayload := wireInbound{
-		Type:     "start",
-		Config:   d.driverConfig,
-		CWD:      spec.CWD,
-		Model:    spec.Model,
-		System:   system,
-		ResumeID: spec.ResumeID,
-		Tools:    spec.Tools,
+		Type:            "start",
+		ProtocolVersion: driverproto.Version,
+		Config:          d.driverConfig,
+		CWD:             spec.CWD,
+		Model:           spec.Model,
+		System:          system,
+		ResumeID:        spec.ResumeID,
+		Tools:           spec.Tools,
 	}
 
 	if err = s.write(ctx, startPayload); err != nil {
@@ -1177,3 +1064,5 @@ func (s *nativeSession) Close() error {
 func eWait(ch <-chan struct{}) <-chan struct{} {
 	return ch
 }
+
+func (d *Driver) ID() string { return d.id }

@@ -39,7 +39,7 @@ func singleProviderStreamConfig(t *testing.T) *config.CompiledConfig {
 		policy.RankRuleHelper("standard.retry"),
 		policy.RaceRuleHelper("standard.retry", 1),
 	}
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestRecordStreamFailureCooldownHealthMetrics(t *testing.T) {
 // an error admitted by the entry route's retry filter is retryable; one the
 // filter excludes is not, even though it is in the shared retryable class set.
 func TestStreamRetryableReflectsRouteErrorFilter(t *testing.T) {
-	compiled, err := config.CompileConfig(config.TestConfig())
+	compiled, err := config.PrepareAndCompile(config.TestConfig())
 	if err != nil {
 		t.Fatal(err)
 	}

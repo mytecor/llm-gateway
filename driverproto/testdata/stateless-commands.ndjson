@@ -1,0 +1,3 @@
+{"type":"start","protocol_version":1,"id":"example","request_timeout_ms":60000,"config":{"base_provider":"openai","inference_url":"https://example.invalid/v1"}}
+{"type":"request","id":"request-1","provider":"example","model":"native-model","kind":"chat","stream":true,"stream_idle_timeout_ms":5000,"body":{"messages":[{"role":"user","content":"hello"}]}}
+{"type":"cancel","id":"request-1"}

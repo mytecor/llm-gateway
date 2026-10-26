@@ -139,7 +139,7 @@ func TestServerContinueTakeoverExcludesJustBrokenProvider(t *testing.T) {
 		policy.RaceRuleHelper("standard", 2),
 		policy.ContinueRuleHelper("standard", 90*time.Second, "full"),
 	}
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

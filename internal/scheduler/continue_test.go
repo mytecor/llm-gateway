@@ -25,7 +25,7 @@ func continueConfig(t *testing.T) *config.CompiledConfig {
 		policy.RaceRuleHelper("standard", 2),
 		policy.ContinueRuleWait("standard", 90*time.Second, "full", 0, 50*time.Millisecond),
 	}
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,6 +97,8 @@ func TestRunnerChainRetryReracesWholePoolWithResharedPartial(t *testing.T) {
 	var callsA, callsB int
 	var bodies [][]byte
 	var mu sync.Mutex
+	initialBStarted := make(chan struct{})
+	retryBStarted := make(chan struct{})
 	executor := &fakeExecutor{
 		stream: func(ctx context.Context, target model.Target, request model.ExecuteRequest) (<-chan model.StreamEvent, *model.CallError) {
 			mu.Lock()
@@ -105,31 +107,42 @@ func TestRunnerChainRetryReracesWholePoolWithResharedPartial(t *testing.T) {
 			ch := make(chan model.StreamEvent, 3)
 			switch target.Provider {
 			case "a":
+				mu.Lock()
 				callsA++
-				if callsA == 1 {
+				n := callsA
+				mu.Unlock()
+				if n == 1 {
+					<-initialBStarted
 					ch <- model.StreamEvent{Data: []byte(`{"choices":[{"index":0,"delta":{"content":"from-a-part"}}]}`), Meaningful: true}
 					close(ch)
 					return ch, nil
 				}
+				// Wait for both race branches before inspecting the full-pool call count.
+				<-retryBStarted
 				// Chain-retry pass: answers for real.
 				ch <- model.StreamEvent{Data: []byte(`{"choices":[{"index":0,"delta":{"content":"final-answer"}}]}`), Meaningful: true}
 				ch <- model.StreamEvent{Data: []byte(`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`), Meaningful: false}
 				close(ch)
 				return ch, nil
 			case "b":
+				mu.Lock()
 				callsB++
-				if callsB == 1 {
+				n := callsB
+				mu.Unlock()
+				if n == 1 {
+					close(initialBStarted)
 					go func() {
 						<-ctx.Done()
 						close(ch)
 					}()
 					return ch, nil
 				}
-				if callsB == 2 {
+				if n == 2 {
 					ch <- model.StreamEvent{Data: []byte(`{"choices":[{"index":0,"delta":{"content":"from-b-part"}}]}`), Meaningful: true}
 					close(ch)
 					return ch, nil
 				}
+				close(retryBStarted)
 				go func() {
 					<-ctx.Done()
 					close(ch)
@@ -157,6 +170,7 @@ func TestRunnerChainRetryReracesWholePoolWithResharedPartial(t *testing.T) {
 	}
 	partial.GotText = true
 	sel.Cancel()
+	defer sel.Release()
 
 	// Wave 2: takeover to the one remaining provider — b wins then breaks.
 	next, callErr := runner.ContinueStream(ctx, "standard", request, partial, []string{"a"})
@@ -185,6 +199,9 @@ func TestRunnerChainRetryReracesWholePoolWithResharedPartial(t *testing.T) {
 	if retry.Provider != "a" {
 		t.Fatalf("chain retry provider = %q, want a", retry.Provider)
 	}
+	defer retry.Cancel()
+	mu.Lock()
+	defer mu.Unlock()
 	if callsA != 2 || callsB != 3 {
 		t.Fatalf("chain retry must re-race the whole pool: callsA=%d callsB=%d, want 2/3", callsA, callsB)
 	}

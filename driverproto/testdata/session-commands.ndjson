@@ -1,0 +1,5 @@
+{"type":"init","protocol_version":1,"id":"example","tool_strategy":"prompt","config":{"profile":"fixture.yaml"}}
+{"type":"models","protocol_version":1,"config":{"profile":"fixture.yaml"}}
+{"type":"start","protocol_version":1,"model":"native-model","reasoning_effort":"high","system":"instructions","resume_id":"session-1","tools":[{"type":"function","function":{"name":"lookup","description":"Find a value","parameters":{"type":"object"},"strict":true}}],"config":{"profile":"fixture.yaml"}}
+{"type":"prompt","text":"hello"}
+{"type":"tool_result","id":"call-1","content":"result"}

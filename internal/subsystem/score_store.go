@@ -30,14 +30,12 @@ import (
 // factor baseline. Cancellations are neutral (the scheduler never feeds
 // them), exactly like lease and cooldown state.
 type ScoreStore struct {
-	mu              sync.Mutex
-	now             func() time.Time
-	pick01          func() float64 // injected for deterministic weighted-random tests
-	providers       map[string]*providerScore
-	rrCursor        map[string]int // per-route round-robin cursor
-	inFlight        map[string]int // live in-flight branch count per provider (p2c signal)
-	maxConcurrent   map[string]int // hard capacity per provider
-	capacityChanged chan struct{}
+	mu        sync.Mutex
+	now       func() time.Time
+	pick01    func() float64 // injected for deterministic weighted-random tests
+	providers map[string]*providerScore
+	rrCursor  map[string]int // per-route round-robin cursor
+	capacity  *ProviderCapacity
 }
 
 type providerScore struct {
@@ -52,137 +50,25 @@ type scoreSample struct {
 	healthErr bool
 }
 
-func NewScoreStore(now func() time.Time) *ScoreStore {
+func NewScoreStore(now func() time.Time, capacity *ProviderCapacity) *ScoreStore {
 	if now == nil {
 		now = time.Now
 	}
 	return &ScoreStore{
-		now:             now,
-		pick01:          rand.Float64,
-		providers:       make(map[string]*providerScore),
-		rrCursor:        make(map[string]int),
-		inFlight:        make(map[string]int),
-		maxConcurrent:   make(map[string]int),
-		capacityChanged: make(chan struct{}),
+		now:       now,
+		pick01:    rand.Float64,
+		providers: make(map[string]*providerScore),
+		rrCursor:  make(map[string]int),
+		capacity:  capacity,
 	}
-}
-
-// IncrInFlight and DecrInFlight maintain the live in-flight branch count per
-// provider — the load signal behind the p2c strategy. They are called by the
-// scheduler at exactly the same points as the llm_requests_in_flight gauge
-// (branch launch and branch completion), so the balance signal and the
-// exported gauge always describe the same concurrency state. Scope: a
-// streamed winner keeps its slot through the full relayed stream lifetime;
-// failed probes and cancelled race losers release theirs on branch exit. A
-// decrement never drops below zero, so a stale release cannot poison the
-// signal.
-func (s *ScoreStore) IncrInFlight(provider string) {
-	if provider == "" {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.inFlight[provider]++
-}
-
-// TryAcquireProvider atomically reserves one global provider slot. The count
-// is shared by every route and logical model using the provider.
-func (s *ScoreStore) TryAcquireProvider(provider string) bool {
-	if provider == "" {
-		return false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	limit := s.maxConcurrent[provider]
-	if limit <= 0 {
-		limit = 16
-	}
-	if s.inFlight[provider] >= limit {
-		return false
-	}
-	s.inFlight[provider]++
-	return true
-}
-
-func (s *ScoreStore) DecrInFlight(provider string) {
-	if provider == "" {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if value := s.inFlight[provider]; value > 0 {
-		s.inFlight[provider] = value - 1
-		close(s.capacityChanged)
-		s.capacityChanged = make(chan struct{})
-	}
-}
-
-func (s *ScoreStore) capacitySignal() <-chan struct{} {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.capacityChanged
-}
-
-func (s *ScoreStore) targetsWithCapacity(targets []model.Target) []model.Target {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	available := make([]model.Target, 0, len(targets))
-	for _, target := range targets {
-		limit := s.maxConcurrent[target.Provider]
-		if limit <= 0 {
-			limit = 16
-		}
-		if s.inFlight[target.Provider] < limit {
-			available = append(available, target)
-		}
-	}
-	return available
-}
-
-// inFlightOf reports the current in-flight branch count of one provider.
-// Providers without any observed branch carry zero.
-func (s *ScoreStore) inFlightOf(provider string) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.inFlight[provider]
-}
-
-func (s *ScoreStore) SetMaxConcurrent(provider string, limit int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if limit <= 0 {
-		limit = 16
-	}
-	s.maxConcurrent[provider] = limit
-}
-
-func (s *ScoreStore) maxConcurrentOf(provider string) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if limit, ok := s.maxConcurrent[provider]; ok && limit > 0 {
-		return limit
-	}
-	return 16
 }
 
 func PromoteFront(targets []model.Target, provider string) []model.Target {
 	return promoteFront(targets, provider)
 }
 
-func (s *ScoreStore) CapacitySignal() <-chan struct{} {
-	return s.capacitySignal()
-}
-
-func (s *ScoreStore) TargetsWithCapacity(targets []model.Target) []model.Target {
-	return s.targetsWithCapacity(targets)
-}
-
 func (s *ScoreStore) LatencyOf(provider string) float64 {
 	return s.latencyOf(provider)
-}
-
-func (s *ScoreStore) InFlightOf(provider string) int {
-	return s.inFlightOf(provider)
 }
 
 func (s *ScoreStore) latencyOf(provider string) float64 {
@@ -440,7 +326,7 @@ func (s *ScoreStore) selectP2C(targets []model.Target, policy policy.BalanceConf
 		second++
 	}
 	a, b := healthy[first], healthy[second]
-	if s.inFlightOf(targets[a].Provider) <= s.inFlightOf(targets[b].Provider) {
+	if s.capacity.Count(targets[a].Provider) <= s.capacity.Count(targets[b].Provider) {
 		return promoteFront(targets, targets[a].Provider)
 	}
 	return promoteFront(targets, targets[b].Provider)
@@ -513,8 +399,8 @@ func (s *ScoreStore) selectExpectedTTFT(targets []model.Target, policy policy.Ba
 	}
 	scored := make([]scoredTarget, len(targets))
 	for i, target := range targets {
-		inFlight := s.inFlightOf(target.Provider)
-		maxConc := s.maxConcurrentOf(target.Provider)
+		inFlight := s.capacity.Count(target.Provider)
+		maxConc := s.capacity.Limit(target.Provider)
 		ewma := s.latencyOf(target.Provider)
 		health := s.health(target.Provider, policy.Window, policy.ErrorBudget)
 		isHealthy := health > 0

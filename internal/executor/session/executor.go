@@ -184,13 +184,5 @@ func (e *Executor) Models(ctx context.Context) ([]model.ModelInfo, error) {
 	if !ok {
 		return nil, nil
 	}
-	models, err := lister.Models(ctx)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]model.ModelInfo, 0, len(models))
-	for _, m := range models {
-		result = append(result, model.ModelInfo{ID: m.ID, Name: m.Name, ReasoningEfforts: m.ReasoningEfforts})
-	}
-	return result, nil
+	return lister.Models(ctx)
 }

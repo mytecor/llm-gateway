@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/mytecor/llm-gateway/internal/configcompat"
 	"strings"
 )
 
@@ -63,6 +64,13 @@ func decodeRule(data []byte, index int) (Rule, error) {
 	descriptor, ok := ruleRegistry[action]
 	if !ok {
 		return nil, fmt.Errorf("rule %d (route %q) has unsupported action %q", index, route, action)
+	}
+	if len(descriptor.aliases) > 0 {
+		normalized, err := configcompat.Aliases(data, descriptor.aliases)
+		if err != nil {
+			return nil, ruleErrf(index, route, action, "%v", err)
+		}
+		data = normalized
 	}
 	rule := descriptor.new()
 	decoder := json.NewDecoder(bytes.NewReader(data))

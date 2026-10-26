@@ -73,3 +73,7 @@ require (
 	golang.org/x/text v0.39.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+require github.com/mytecor/llm-gateway v0.0.0
+
+replace github.com/mytecor/llm-gateway => ../..

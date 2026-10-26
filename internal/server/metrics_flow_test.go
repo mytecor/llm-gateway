@@ -31,7 +31,7 @@ func TestMetricsFlowThroughServer(t *testing.T) {
 		&policy.BalanceRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionBalance}, Strategy: "adaptive"},
 		policy.RaceRuleHelper("standard", 1),
 	}
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestMetricsPerClientKey(t *testing.T) {
 		policy.RankRuleHelper("standard"),
 		policy.RaceRuleHelper("standard", 1),
 	}
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

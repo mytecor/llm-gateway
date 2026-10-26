@@ -10,11 +10,9 @@ import (
 // transition to another named route.
 type RetryRule struct {
 	RuleBase
-	Target           string         `json:"target,omitempty"`
-	Attempts         int            `json:"attempts,omitempty"`
-	MaxAttempts      int            `json:"max_attempts,omitempty"`
-	MaxAttemptsCamel int            `json:"maxAttempts,omitempty"`
-	Backoff          *BackoffConfig `json:"backoff,omitempty"`
+	Target   string         `json:"target,omitempty"`
+	Attempts int            `json:"attempts,omitempty"`
+	Backoff  *BackoffConfig `json:"backoff,omitempty"`
 }
 
 // apply validates the retry schedule and normalizes backoff defaults into the
@@ -31,12 +29,7 @@ func (r *RetryRule) apply(ctx *stageContext) error {
 		return ctx.errf("retry attempts must be at least 1")
 	}
 	attempts := r.Attempts
-	if attempts == 0 && r.MaxAttempts != 0 {
-		attempts = r.MaxAttempts
-	}
-	if attempts == 0 && r.MaxAttemptsCamel != 0 {
-		attempts = r.MaxAttemptsCamel
-	}
+
 	if attempts < 1 {
 		attempts = 3
 	}

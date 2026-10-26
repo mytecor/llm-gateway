@@ -28,6 +28,9 @@ pub struct DriverConfig {
 pub enum Input {
     #[serde(alias = "describe")]
     Init {
+        #[serde(default, deserialize_with = "protocol_version")]
+        #[allow(dead_code)]
+        protocol_version: u32,
         #[serde(default)]
         id: String,
         #[serde(default)]
@@ -66,11 +69,65 @@ pub enum Input {
         content: String,
     },
 }
+pub const PROTOCOL_VERSION: u32 = 1;
+
+fn protocol_version<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<u32, D::Error> {
+    let version = u32::deserialize(deserializer)?;
+    if version != 0 && version != PROTOCOL_VERSION {
+        return Err(serde::de::Error::custom(
+            "unsupported driver protocol version",
+        ));
+    }
+    Ok(version)
+}
+
+pub(crate) fn versioned(mut event: Value) -> Value {
+    if event.get("type").and_then(Value::as_str) == Some("ready") {
+        event["protocol_version"] = PROTOCOL_VERSION.into();
+    }
+    event
+}
+
 pub fn emit(event: Value) -> Result<()> {
+    let event = versioned(event);
     let stdout = io::stdout();
     let mut out = stdout.lock();
     serde_json::to_writer(&mut out, &event)?;
     out.write_all(b"\n")?;
     out.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    fn shared_gateway_session_fixtures_parse() {
+        for line in include_str!("../../../driverproto/testdata/session-commands.ndjson").lines() {
+            serde_json::from_str::<Input>(line).unwrap();
+        }
+    }
+
+    #[test]
+    fn ready_version_matches_shared_fixture() {
+        let line = include_str!("../../../driverproto/testdata/events.ndjson")
+            .lines()
+            .next()
+            .unwrap();
+        let expected: Value = serde_json::from_str(line).unwrap();
+        let mut without_version = expected.clone();
+        without_version
+            .as_object_mut()
+            .unwrap()
+            .remove("protocol_version");
+        assert_eq!(versioned(without_version), expected);
+    }
+
+    #[test]
+    fn rejects_unknown_protocol_version() {
+        assert!(serde_json::from_str::<Input>(r#"{"type":"init","protocol_version":99}"#).is_err());
+    }
 }

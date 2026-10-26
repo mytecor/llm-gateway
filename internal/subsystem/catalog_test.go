@@ -2,226 +2,155 @@ package subsystem
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
+	"errors"
 	"sync"
 	"testing"
 
-	"github.com/mytecor/llm-gateway/internal/config"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
-	"github.com/mytecor/llm-gateway/internal/provider"
 )
 
-func catalogForProvider(t *testing.T, source config.CatalogSource) *Catalog {
-	t.Helper()
-	compiled := config.RaceOnlyConfig(t)
-	compiled.CatalogSources = map[string][]config.CatalogSource{"a": {source}}
-	catalog := NewCatalog(compiled)
-	return catalog
+func TestCatalogExactValidationAndMetadataShareSnapshot(t *testing.T) {
+	calls := 0
+	catalog := NewCatalogWithSources(map[string]CatalogSource{"a": {
+		Required: true, Validate: true,
+		Lister: model.ModelListFunc(func(context.Context) ([]model.ModelInfo, error) {
+			calls++
+			return []model.ModelInfo{{ID: "zeta"}, {ID: "alpha", Name: "Alpha", ReasoningEfforts: []string{"low", "high"}}, {ID: "zeta"}}, nil
+		}),
+	}})
+	if err := catalog.Validate("a", "alpha"); err == nil || err.Status != 503 {
+		t.Fatal("explicit catalog must fail closed without snapshot", err)
+	}
+	if failures := catalog.Refresh(context.Background()); len(failures) != 0 {
+		t.Fatal(failures)
+	}
+	for _, id := range []string{"alpha", "zeta"} {
+		if err := catalog.Validate("a", id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := catalog.Validate("a", "missing"); err == nil || err.Class != model.ErrorModelNotFound {
+		t.Fatal("expected exact model rejection", err)
+	}
+	models, err := catalog.Models(context.Background(), "a")
+	if err != nil || len(models) != 2 || models[0].Name != "Alpha" || calls != 1 {
+		t.Fatalf("metadata did not reuse snapshot: %v %v calls=%d", models, err, calls)
+	}
+	models[0].ID = "corrupted"
+	models[0].ReasoningEfforts[0] = "corrupted"
+	again, _ := catalog.Models(context.Background(), "a")
+	if again[0].ID != "alpha" || again[0].ReasoningEfforts[0] != "low" {
+		t.Fatal("caller mutated catalog snapshot")
+	}
 }
 
-// exact-test helpers mirror the Validate contract: nil (valid or optimistic),
-// model.ErrorInvalid 503 (explicit catalog without a snapshot), or
-// model.ErrorModelNotFound (snapshot exists without the native ID).
-
-func TestCatalogExactMatchOnly(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		_, _ = writer.Write([]byte(`{"object":"list","data":[{"id":"deepseek-ai/DeepSeek-V4-Flash-0731"},{"id":"gonka/deepseek-ai/DeepSeek-V4-Flash-0731"}]}`))
-	}))
-	defer server.Close()
-	catalog := catalogForProvider(t, config.CatalogSource{URL: server.URL, Explicit: true})
+func TestCatalogLastKnownGoodAndProviderIsolation(t *testing.T) {
+	var mu sync.Mutex
+	failA := false
+	source := func(id string) CatalogSource {
+		return CatalogSource{Required: true, Validate: true,
+			Lister: model.ModelListFunc(func(context.Context) ([]model.ModelInfo, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				if id == "a" && failA {
+					return nil, errors.New("unavailable")
+				}
+				return []model.ModelInfo{{ID: id + "-model"}}, nil
+			})}
+	}
+	catalog := NewCatalogWithSources(map[string]CatalogSource{"a": source("a"), "b": source("b")})
 	if failures := catalog.Refresh(context.Background()); len(failures) != 0 {
-		t.Fatalf("initial refresh failed: %v", failures)
+		t.Fatal(failures)
 	}
-	if callErr := catalog.Validate("a", "deepseek-ai/DeepSeek-V4-Flash-0731"); callErr != nil {
-		t.Fatalf("exact match must be accepted, got %v", callErr)
-	}
-	if callErr := catalog.Validate("a", "gonka/deepseek-ai/DeepSeek-V4-Flash-0731"); callErr != nil {
-		t.Fatalf("second native alias accepted by the map must validate, got %v", callErr)
-	}
-	callErr := catalog.Validate("a", "some-arbitrary-id")
-	if callErr == nil || callErr.Class != model.ErrorModelNotFound {
-		t.Fatalf("a model outside the provider catalog must be rejected with model_not_found, got %v", callErr)
-	}
-}
-
-func TestCatalogLastKnownGoodSurvivesFailedRefresh(t *testing.T) {
-	var mu sync.RWMutex
-	status := http.StatusOK
-	body := `{"object":"list","data":[{"id":"alpha"},{"id":"alpha"}]}`
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		mu.RLock()
-		defer mu.RUnlock()
-		writer.WriteHeader(status)
-		_, _ = writer.Write([]byte(body))
-	}))
-	defer server.Close()
-
-	catalog := catalogForProvider(t, config.CatalogSource{URL: server.URL, Explicit: true})
-	if failures := catalog.Refresh(context.Background()); len(failures) != 0 {
-		t.Fatalf("initial refresh failed: %v", failures)
-	}
-	if callErr := catalog.Validate("a", "alpha"); callErr != nil {
-		t.Fatalf("known model rejected: %v", callErr)
-	}
-
 	mu.Lock()
-	status = http.StatusBadGateway
-	body = `{"error":"unavailable"}`
+	failA = true
 	mu.Unlock()
-	if failures := catalog.Refresh(context.Background()); len(failures) != 1 {
-		t.Fatalf("failed refresh was not reported: %v", failures)
+	if failures := catalog.Refresh(context.Background()); len(failures) != 1 || failures["a"] == nil {
+		t.Fatal(failures)
 	}
-	if callErr := catalog.Validate("a", "alpha"); callErr != nil {
-		t.Fatalf("last-known-good was lost after a failed refresh: %v", callErr)
+	for _, id := range []string{"a", "b"} {
+		if err := catalog.Validate(id, id+"-model"); err != nil {
+			t.Fatal("snapshot lost", err)
+		}
 	}
-}
-
-func TestCatalogPartialRefreshIsPerProviderIndependent(t *testing.T) {
-	// The first provider's explicit catalog fails; the second's succeeds. A
-	// per-provider snapshot must be retained for the successful provider while
-	// the failing one keeps its own last-known-good.
-	unavailable := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		writer.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer unavailable.Close()
-	available := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		_, _ = writer.Write([]byte(`{"data":[{"id":"ok-model"}]}`))
-	}))
-	defer available.Close()
-
-	compiled := config.RaceOnlyConfig(t)
-	compiled.CatalogSources = map[string][]config.CatalogSource{
-		"a": {{URL: unavailable.URL, Explicit: true}},
-		"b": {{URL: available.URL, Explicit: true}},
-	}
-	catalog := NewCatalog(compiled)
-	// Prime both providers with a healthy snapshot.
-	compiled.CatalogSources["a"] = []config.CatalogSource{{URL: available.URL, Explicit: true}}
-	catalog.Refresh(context.Background())
-	compiled.CatalogSources["a"] = []config.CatalogSource{{URL: unavailable.URL, Explicit: true}}
-	if failures := catalog.Refresh(context.Background()); len(failures) != 1 {
-		t.Fatalf("expected exactly one failing provider, got %v", failures)
-	}
-	if callErr := catalog.Validate("a", "ok-model"); callErr != nil {
-		t.Fatalf("last-known-good for provider a was destroyed by its own partial failure: %v", callErr)
-	}
-	if callErr := catalog.Validate("b", "ok-model"); callErr != nil {
-		t.Fatalf("successful provider b snapshot was lost: %v", callErr)
+	if err := catalog.Validate("a", "b-model"); err == nil {
+		t.Fatal("provider namespaces were merged")
 	}
 }
 
-func TestCatalogInferredOptimisticWithoutSnapshot(t *testing.T) {
-	// An inferred catalog (no explicit modelsUrl) that has not produced a
-	// snapshot yet must optimistically accept the configured native ID.
-	compiled := config.RaceOnlyConfig(t)
-	compiled.CatalogSources = map[string][]config.CatalogSource{
-		"a": {{URL: "https://catalog.invalid/v1/models"}}, // inferred, not Explicit
+func TestCatalogEmptyRefreshPreservesSnapshot(t *testing.T) {
+	models := []model.ModelInfo{{ID: "alpha"}}
+	c := NewCatalogWithSources(map[string]CatalogSource{"a": {Validate: true, Lister: model.ModelListFunc(func(context.Context) ([]model.ModelInfo, error) { return models, nil })}})
+	if failures := c.Refresh(context.Background()); len(failures) != 0 {
+		t.Fatal(failures)
 	}
-	catalog := NewCatalog(compiled)
-	if callErr := catalog.Validate("a", "native-model"); callErr != nil {
-		t.Fatalf("inferred catalog without a snapshot must stay optimistic: %v", callErr)
+	models = nil
+	if failures := c.Refresh(context.Background()); len(failures) != 1 {
+		t.Fatal("empty catalog refresh should report a failure")
 	}
-}
-
-func TestCatalogExplicitFailClosedWithoutSnapshot(t *testing.T) {
-	compiled := config.RaceOnlyConfig(t)
-	compiled.CatalogSources = map[string][]config.CatalogSource{
-		"a": {{URL: "https://catalog.invalid/v1/models", Explicit: true}},
-	}
-	catalog := NewCatalog(compiled)
-	callErr := catalog.Validate("a", "native-model")
-	if callErr == nil || callErr.Class != model.ErrorInvalid || callErr.Status != 503 {
-		t.Fatalf("explicit catalog without a snapshot must fail closed, got %v", callErr)
+	if err := c.Validate("a", "alpha"); err != nil {
+		t.Fatal("empty refresh destroyed last-known-good", err)
 	}
 }
 
-func TestCatalogNoDiscoveryProviderIsOptimistic(t *testing.T) {
-	compiled := config.RaceOnlyConfig(t)
-	compiled.CatalogSources = map[string][]config.CatalogSource{}
-	catalog := NewCatalog(compiled)
-	if callErr := catalog.Validate("a", "any-explicit-native"); callErr != nil {
-		t.Fatalf("provider without discovery must accept the explicit native: %v", callErr)
+func TestCatalogOptionalAndStatefulValidation(t *testing.T) {
+	c := NewCatalogWithSources(map[string]CatalogSource{
+		"optional": {Validate: true, Lister: model.ModelListFunc(func(context.Context) ([]model.ModelInfo, error) { return nil, errors.New("offline") })},
+		"session":  {Lister: model.ModelListFunc(func(context.Context) ([]model.ModelInfo, error) { return []model.ModelInfo{{ID: "agent-model"}}, nil })},
+	})
+	for _, id := range []string{"missing", "optional", "session"} {
+		if err := c.Validate(id, "default"); err != nil {
+			t.Fatal("unavailable optional discovery must stay optimistic", err)
+		}
+	}
+	if _, err := c.Models(context.Background(), "session"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Validate("session", "default"); err != nil {
+		t.Fatal("metadata must not reject native default session", err)
 	}
 }
 
-func TestCatalogMergesSourcesAndDetectsAbsence(t *testing.T) {
-	// After a refresh with an explicit catalog, a configured alias that is not
-	// present yields model_not_found; errors carry a stable class, never a
-	// fallback to an arbitrary first catalog id.
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		_, _ = writer.Write([]byte(`{"data":[{"id":"zeta"},{"id":"alpha"},{"id":"alpha"}]}`))
-	}))
-	defer server.Close()
-	catalog := catalogForProvider(t, config.CatalogSource{URL: server.URL, Explicit: true})
-	if failures := catalog.Refresh(context.Background()); len(failures) != 0 {
-		t.Fatalf("refresh failed: %v", failures)
+func TestCatalogLazyDiscoveryIsSharedByConcurrentReaders(t *testing.T) {
+	var calls int
+	c := NewCatalogWithSources(map[string]CatalogSource{"a": {Lister: model.ModelListFunc(func(context.Context) ([]model.ModelInfo, error) {
+		calls++
+		return []model.ModelInfo{{ID: "model"}}, nil
+	})}})
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Go(func() {
+			if _, err := c.Models(context.Background(), "a"); err != nil {
+				t.Error(err)
+			}
+		})
 	}
-	if callErr := catalog.Validate("a", "alpha"); callErr != nil {
-		t.Fatalf("present model rejected: %v", callErr)
+	wg.Wait()
+	if calls != 1 {
+		t.Fatalf("discovery ran %d times, want 1", calls)
 	}
-	callErr := catalog.Validate("a", "missing-primary")
-	if callErr == nil || callErr.Class != model.ErrorModelNotFound {
-		t.Fatalf("missing model must be classified model_not_found, got %v", callErr)
-	}
-	if callErr.Cause == nil {
-		t.Fatalf("model_not_found must carry a safe cause: %v", callErr)
-	}
+}
+
+func TestCatalogRefreshesProvidersConcurrently(t *testing.T) {
+	ready := make(chan struct{}, 2)
+	release := make(chan struct{})
+	source := CatalogSource{Lister: model.ModelListFunc(func(context.Context) ([]model.ModelInfo, error) {
+		ready <- struct{}{}
+		<-release
+		return []model.ModelInfo{{ID: "model"}}, nil
+	})}
+	c := NewCatalogWithSources(map[string]CatalogSource{"a": source, "b": source})
+	done := make(chan struct{})
+	go func() { c.Refresh(context.Background()); close(done) }()
+	<-ready
+	<-ready
+	close(release)
+	<-done
 }
 
 func TestCatalogModelNotFoundIsNotDefaultRetryable(t *testing.T) {
 	if policy.AllRetryableClasses()[model.ErrorModelNotFound] {
-		t.Fatalf("model_not_found must not be a default retryable class; it is opt-in via on")
-	}
-}
-
-func TestCatalogFetchesDerivedProviderPaths(t *testing.T) {
-	tests := []struct {
-		name     string
-		basePath string
-		wantPath string
-	}{
-		{name: "versioned base", basePath: "/v1", wantPath: "/v1/models"},
-		{name: "custom prefix", basePath: "/functions/v1/gonka", wantPath: "/functions/v1/gonka/models"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-				if request.URL.Path != test.wantPath {
-					t.Errorf("catalog path = %q, want %q", request.URL.Path, test.wantPath)
-				}
-				if request.Header.Get("Authorization") != "Bearer provider-key" {
-					t.Errorf("inferred catalog did not use provider credential")
-				}
-				_, _ = writer.Write([]byte(`{"data":[{"id":"native-model"}]}`))
-			}))
-			defer server.Close()
-
-			cfg := config.TestConfig()
-			cfg.Providers = []provider.Provider{cfg.Providers[0]}
-			cfg.Providers[0].Config = map[string]any{
-				"inference_url": server.URL + test.basePath,
-				"api_key":       "provider-key",
-			}
-			cfg.Rules = []policy.Rule{
-				policy.FilterModel("standard", "standard"),
-				policy.FilterProvider("standard", "a"),
-				policy.MapRuleHelper("standard", "native-model"),
-				policy.RankRuleHelper("standard"),
-				policy.RaceRuleHelper("standard", 1),
-			}
-			compiled, err := config.CompileConfig(cfg)
-			if err != nil {
-				t.Fatal(err)
-			}
-			catalog := NewCatalog(compiled)
-			if failures := catalog.Refresh(context.Background()); len(failures) != 0 {
-				t.Fatalf("derived catalog refresh failed: %v", failures)
-			}
-			if callErr := catalog.Validate("a", "native-model"); callErr != nil {
-				t.Fatalf("derived catalog rejected the configured native: %v", callErr)
-			}
-		})
+		t.Fatal("model_not_found must be opt-in")
 	}
 }

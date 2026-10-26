@@ -28,9 +28,15 @@ resolve against the gateway working directory at startup. `check` validates
 configuration without launching agents, browsers or MCP processes. Commands are
 argument arrays passed directly to exec; no shell interpretation is performed.
 
+The versioned wire contract and shared Go/Rust fixtures are documented in
+[driverproto/README.md](../driverproto/README.md). Initialization requires explicit
+capabilities. Unversioned peers remain supported; unknown protocol versions fail.
+
 ## Responsibilities
 
-- `internal/executor`: provider registry, capabilities and attempt middleware.
+- `internal/executor`: provider registry, prepared capabilities and attempt middleware.
+- `internal/subsystem/catalog`: shared native metadata and last-known-good snapshots;
+  drivers fetch current data through `models`, while catalog readers reuse the snapshot.
 - `internal/session`: engine-independent conversations, history checkpoints,
   native-session restore, pending tool calls, cancellation and turn deadlines.
 - `internal/executor/session`: OpenAI request/result and SSE adaptation.

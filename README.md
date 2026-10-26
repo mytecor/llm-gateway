@@ -85,6 +85,10 @@ make check-config
 
 Configuration is specified in JSON format (see [configs/config.example.json](configs/config.example.json) for a comprehensive example). Secret values support loading from environment variables using the `env.` prefix (e.g., `"api_key": "env.OPENAI_API_KEY"`).
 
+The canonical format uses `snake_case` gateway settings and a nested provider
+`config` object for driver-specific settings. Legacy top-level driver settings
+and camelCase aliases remain readable; conflicting alias values are rejected.
+
 ### Example Configuration
 
 ```json
@@ -104,43 +108,122 @@ Configuration is specified in JSON format (see [configs/config.example.json](con
   "providers": [
     {
       "id": "upstream-primary",
-      "base_provider": "openai",
-      "inference_url": "https://api.openai.com/v1",
-      "api_key": "env.OPENAI_API_KEY",
       "priority": 10,
       "cooldown": "15s",
-      "request_timeout": "60s"
+      "request_timeout": "60s",
+      "config": {
+        "base_provider": "openai",
+        "inference_url": "https://api.openai.com/v1",
+        "api_key": "env.OPENAI_API_KEY"
+      }
     },
     {
       "id": "upstream-backup",
-      "base_provider": "openai",
-      "inference_url": "https://api.backup-provider.com/v1",
-      "api_key": "env.BACKUP_API_KEY",
       "priority": 5,
       "cooldown": "15s",
-      "request_timeout": "60s"
+      "request_timeout": "60s",
+      "config": {
+        "base_provider": "openai",
+        "inference_url": "https://api.backup-provider.com/v1",
+        "api_key": "env.BACKUP_API_KEY"
+      }
     }
   ],
   "rules": [
-    { "route": "standard", "action": "filter", "where": { "model": { "eq": "standard" } } },
-    { "route": "standard", "action": "filter", "where": { "provider": { "in": ["upstream-primary", "upstream-backup"] } } },
-    { "route": "standard", "action": "map", "native": "gpt-4o" },
-    { "route": "standard", "action": "rank", "strategy": "priority" },
-    { "route": "standard", "action": "race", "count": 1 },
+    {
+      "route": "standard",
+      "action": "filter",
+      "where": {
+        "model": {
+          "eq": "standard"
+        }
+      }
+    },
+    {
+      "route": "standard",
+      "action": "filter",
+      "where": {
+        "provider": {
+          "in": [
+            "upstream-primary",
+            "upstream-backup"
+          ]
+        }
+      }
+    },
+    {
+      "route": "standard",
+      "action": "map",
+      "native": "gpt-4o"
+    },
+    {
+      "route": "standard",
+      "action": "rank",
+      "strategy": "priority"
+    },
+    {
+      "route": "standard",
+      "action": "race",
+      "count": 1
+    },
     {
       "route": "standard",
       "action": "retry",
       "target": "standard.retry",
       "attempts": 2,
-      "backoff": { "type": "exponential", "initial": "200ms", "max": "1s" }
+      "backoff": {
+        "type": "exponential",
+        "initial": "200ms",
+        "max": "1s"
+      }
     },
-    { "route": "standard", "action": "timeout", "duration": "60s" },
-
-    { "route": "standard.retry", "action": "filter", "where": { "error": { "in": ["429", "5xx", "timeout", "connection_error"] } } },
-    { "route": "standard.retry", "action": "filter", "where": { "provider": { "in": ["upstream-primary", "upstream-backup"], "unused": true } } },
-    { "route": "standard.retry", "action": "map", "native": "gpt-4o" },
-    { "route": "standard.retry", "action": "rank", "strategy": "priority" },
-    { "route": "standard.retry", "action": "race", "count": 1 }
+    {
+      "route": "standard",
+      "action": "timeout",
+      "duration": "60s"
+    },
+    {
+      "route": "standard.retry",
+      "action": "filter",
+      "where": {
+        "error": {
+          "in": [
+            "429",
+            "5xx",
+            "timeout",
+            "connection_error"
+          ]
+        }
+      }
+    },
+    {
+      "route": "standard.retry",
+      "action": "filter",
+      "where": {
+        "provider": {
+          "in": [
+            "upstream-primary",
+            "upstream-backup"
+          ],
+          "unused": true
+        }
+      }
+    },
+    {
+      "route": "standard.retry",
+      "action": "map",
+      "native": "gpt-4o"
+    },
+    {
+      "route": "standard.retry",
+      "action": "rank",
+      "strategy": "priority"
+    },
+    {
+      "route": "standard.retry",
+      "action": "race",
+      "count": 1
+    }
   ]
 }
 ```
@@ -157,7 +240,7 @@ filter → map → admission → balance → affinity → race → retry → hed
 
 - **`filter`**: Filters requests by logical model name (`where.model.eq`), provider list (`where.provider.in`), error class (`where.error.in`), or usage status (`unused: true`).
 - **`map`**: Maps a virtual model to a provider's native model name (`native`), with optional tier assignment (`tier`).
-- **`admission`**: Enforces concurrency and queue bounds (`maxInFlight`, `maxPending`, `waitTimeout`).
+- **`admission`**: Enforces concurrency and queue bounds (`max_in_flight`, `max_pending`, `wait_timeout`).
 - **`balance`**: Selects targets dynamically (e.g., predicted Time to First Token: `expected-ttft` with $\epsilon$-greedy exploration).
 - **`affinity`**: Binds Responses API sequences to the winning provider using a session identifier.
 - **`race`**: Executes parallel requests (`count`) across top-ranked providers (first successful response wins).

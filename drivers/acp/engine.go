@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/mytecor/llm-gateway/driverproto"
 	"io"
 	"strings"
 	"sync"
@@ -20,11 +21,7 @@ const catalogTTL = time.Minute
 
 var errSessionNotFound = errors.New("native session not found")
 
-type ModelInfo struct {
-	ID               string   `json:"id"`
-	Name             string   `json:"name,omitempty"`
-	ReasoningEfforts []string `json:"reasoning_efforts,omitempty"`
-}
+type ModelInfo = driverproto.ModelInfo
 
 type Spec struct {
 	CWD      string
@@ -35,31 +32,9 @@ type Spec struct {
 	Emit     func(Event) error
 }
 
-type Capabilities struct {
-	Chat       bool `json:"chat,omitempty"`
-	Responses  bool `json:"responses,omitempty"`
-	Streaming  bool `json:"streaming,omitempty"`
-	Tools      bool `json:"tools,omitempty"`
-	Stateful   bool `json:"stateful,omitempty"`
-	Resume     bool `json:"resume,omitempty"`
-	SafeReplay bool `json:"safe_replay,omitempty"`
-}
+type Capabilities = driverproto.Capabilities
 
-type Event struct {
-	Type         string          `json:"type"`
-	ID           string          `json:"id,omitempty"`
-	Name         string          `json:"name,omitempty"`
-	Arguments    json.RawMessage `json:"arguments,omitempty"`
-	Text         string          `json:"text,omitempty"`
-	ResumeID     string          `json:"resume_id,omitempty"`
-	Input        int64           `json:"input_tokens,omitempty"`
-	Output       int64           `json:"output_tokens,omitempty"`
-	Error        string          `json:"error,omitempty"`
-	Models       []ModelInfo     `json:"models,omitempty"`
-	ToolStrategy string          `json:"tool_strategy,omitempty"`
-	Capabilities *Capabilities   `json:"capabilities,omitempty"`
-	Config       map[string]any  `json:"config,omitempty"`
-}
+type Event = driverproto.Event
 
 type Engine struct {
 	engine      agentrun.Engine

@@ -65,11 +65,11 @@ func sessionConfig(t *testing.T, driver string) Config {
 func TestSessionDriversCompileWithoutHTTPSettings(t *testing.T) {
 	for _, driver := range []string{"acp", "web", ""} {
 		cfg := sessionConfig(t, driver)
-		compiled, err := CompileConfig(cfg)
+		compiled, err := PrepareAndCompile(cfg)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !compiled.Models["agent"].Stateful || len(compiled.CatalogSources) != 0 || compiled.Providers["p"].Session.TurnTimeout.Duration <= 0 {
+		if !compiled.Models["agent"].Stateful || compiled.Providers["p"].Description.Catalog != nil || compiled.Providers["p"].Session.TurnTimeout.Duration <= 0 {
 			t.Fatalf("bad compiled config: %+v", compiled)
 		}
 		if !compiled.Providers["p"].Capabilities().Resume {
@@ -86,7 +86,7 @@ func TestWebDriverAcceptsDeclarativeProfileWithoutCommand(t *testing.T) {
 		"cdp_url": "http://127.0.0.1:19222",
 		"account": "main",
 	}
-	compiled, err := CompileConfig(cfg)
+	compiled, err := PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,34 +100,34 @@ func TestDriverToolStrategies(t *testing.T) {
 	// ACP driver with mcp tool strategy
 	cfg := sessionConfig(t, "acp")
 	cfg.Providers[0].ToolStrategy = "mcp"
-	if _, err := CompileConfig(cfg); err != nil {
+	if _, err := PrepareAndCompile(cfg); err != nil {
 		t.Fatal(err)
 	}
 
 	// Custom command driver with prompt tool strategy
 	cfg = sessionConfig(t, "")
 	cfg.Providers[0].ToolStrategy = "prompt"
-	if _, err := CompileConfig(cfg); err != nil {
+	if _, err := PrepareAndCompile(cfg); err != nil {
 		t.Fatal(err)
 	}
 
 	// Web driver with wire tool strategy
 	cfg = sessionConfig(t, "web")
 	cfg.Providers[0].ToolStrategy = "wire"
-	if _, err := CompileConfig(cfg); err != nil {
+	if _, err := PrepareAndCompile(cfg); err != nil {
 		t.Fatal(err)
 	}
 
 	// Reject unknown driver
 	cfg = sessionConfig(t, "unknown")
-	if _, err := CompileConfig(cfg); err == nil {
+	if _, err := PrepareAndCompile(cfg); err == nil {
 		t.Fatal("expected error on unknown driver")
 	}
 
 	// Reject unknown tool strategy
 	cfg = sessionConfig(t, "")
 	cfg.Providers[0].ToolStrategy = "magic"
-	if _, err := CompileConfig(cfg); err == nil {
+	if _, err := PrepareAndCompile(cfg); err == nil {
 		t.Fatal("expected error on unknown tool strategy")
 	}
 
@@ -137,7 +137,7 @@ func TestDriverToolStrategies(t *testing.T) {
 	httpCfg.Providers[0].Session = nil
 	httpCfg.Providers[0].Config = map[string]any{"inference_url": "https://api.openai.com/v1"}
 	httpCfg.Providers[0].ToolStrategy = "mcp"
-	if _, err := CompileConfig(httpCfg); err == nil {
+	if _, err := PrepareAndCompile(httpCfg); err == nil {
 		t.Fatal("expected error on tool_strategy with http driver")
 	}
 }
@@ -147,7 +147,7 @@ func TestACPToolStrategies(t *testing.T) {
 		t.Run(strategy, func(t *testing.T) {
 			cfg := sessionConfig(t, "acp")
 			cfg.Providers[0].ToolStrategy = strategy
-			_, err := CompileConfig(cfg)
+			_, err := PrepareAndCompile(cfg)
 			switch strings.ToLower(strings.TrimSpace(strategy)) {
 			case "", "auto", "mcp":
 				if err != nil {
@@ -176,7 +176,7 @@ func TestSessionDriverRejectsInvalidSettings(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := sessionConfig(t, "acp")
 			tc.change(&cfg.Providers[0])
-			if _, err := CompileConfig(cfg); err == nil {
+			if _, err := PrepareAndCompile(cfg); err == nil {
 				t.Fatal("accepted invalid provider")
 			}
 		})
@@ -196,13 +196,13 @@ func TestSessionRoutesRejectSpeculationAndReplay(t *testing.T) {
 			t.Fatal(err)
 		}
 		cfg.Rules = append(cfg.Rules, rules...)
-		if _, err := CompileConfig(cfg); err == nil {
+		if _, err := PrepareAndCompile(cfg); err == nil {
 			t.Fatalf("accepted %s", action)
 		}
 	}
 	cfg := sessionConfig(t, "acp")
 	cfg.Rules[len(cfg.Rules)-1].(*policy.RaceRule).Count = 0
-	if _, err := CompileConfig(cfg); err == nil || !strings.Contains(err.Error(), "stateful") {
+	if _, err := PrepareAndCompile(cfg); err == nil || !strings.Contains(err.Error(), "stateful") {
 		t.Fatal("accepted implicit stateful race", err)
 	}
 }
@@ -224,7 +224,7 @@ func TestSessionPathsResolveFromWorkingDirectory(t *testing.T) {
 	cfg.SessionFile = "state/sessions.json"
 	cfg.Providers[0].Session.DefaultCWD = "."
 	cfg.Providers[0].Session.AllowedRoots = []string{".", "../other"}
-	compiled, err := CompileConfig(cfg)
+	compiled, err := PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

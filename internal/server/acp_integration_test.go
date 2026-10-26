@@ -369,7 +369,7 @@ func newNativeServer(t *testing.T, kind, mode string, timeout time.Duration, sto
 	if err = json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

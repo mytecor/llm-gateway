@@ -6,20 +6,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/mytecor/llm-gateway/driverproto"
 	"regexp"
 	"sort"
 )
 
-type functionTool struct {
-	Type     string             `json:"type"`
-	Function functionDefinition `json:"function"`
-}
-type functionDefinition struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters"`
-	Strict      *bool           `json:"strict,omitempty"`
-}
+type functionTool = driverproto.FunctionTool
+type functionDefinition = driverproto.FunctionDefinition
 type toolCall struct {
 	ID       string         `json:"id"`
 	Type     string         `json:"type"`

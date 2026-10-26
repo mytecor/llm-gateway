@@ -23,7 +23,7 @@ func TestProviderCapacityHeldForSelectedStreamLifetime(t *testing.T) {
 		policy.RankRuleHelper("standard"),
 		policy.RaceRuleHelper("standard", 1),
 	}
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestInternalRetryExcludesEveryFailedRaceTarget(t *testing.T) {
 		policy.RaceRuleHelper("standard", 2),
 		&policy.RetryRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionRetry}, Attempts: 1},
 	}
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestInternalHedgeReevaluatesCapacityAtFireTime(t *testing.T) {
 		policy.RaceRuleHelper("standard", 1),
 		&policy.HedgeRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionHedge}, After: policy.Duration{Duration: 40 * time.Millisecond}},
 	}
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,10 +149,11 @@ func TestInternalHedgeReevaluatesCapacityAtFireTime(t *testing.T) {
 		done <- callErr
 	}()
 	<-startedA
-	if !runner.Scores().TryAcquireProvider("b") {
+	permit := runner.capacity.Acquire("b")
+	if permit == nil {
 		t.Fatal("failed to occupy provider b before hedge fired")
 	}
-	defer runner.Scores().DecrInFlight("b")
+	defer permit.Release()
 
 	select {
 	case callErr := <-done:
@@ -183,7 +184,7 @@ func TestStreamingInternalRetryHidesPreWinnerFailure(t *testing.T) {
 		&policy.RetryRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionRetry}},
 		&policy.TimeoutRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionTimeout}, Duration: policy.Duration{Duration: 10 * time.Second}},
 	}
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

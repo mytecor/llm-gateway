@@ -81,16 +81,22 @@ When `llm-gateway` resolves a provider with `"driver": "acp"`, [`external.Resolv
   "id": "acp-codex",
   "driver": "acp",
   "tool_strategy": "mcp",
-  "command": ["codex-acp"],
   "env": {
     "OPENAI_API_KEY": "env.OPENAI_API_KEY"
   },
   "session": {
     "default_cwd": ".",
-    "allowed_roots": ["."],
+    "allowed_roots": [
+      "."
+    ],
     "ttl": "10m",
     "turn_timeout": "30m",
     "heartbeat": "20s"
+  },
+  "config": {
+    "command": [
+      "codex-acp"
+    ]
   }
 }
 ```

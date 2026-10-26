@@ -25,7 +25,7 @@ func runWebWorker() {
 			if !strings.Contains(input.System, "Available client function tools") {
 				return
 			}
-			_ = enc.Encode(map[string]string{"type": "ready"})
+			_ = enc.Encode(map[string]any{"type": "ready", "capabilities": map[string]bool{"chat": true, "streaming": true, "tools": true, "stateful": true, "resume": true}})
 		case "prompt":
 			_ = enc.Encode(map[string]string{"type": "heartbeat"})
 			if input.Text == "no-call" {

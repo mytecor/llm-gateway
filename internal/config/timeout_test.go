@@ -27,7 +27,7 @@ func TestTimeoutRuleExplicitIdleAndContinuePolicy(t *testing.T) {
 		&policy.RetryRule{RuleBase: policy.RuleBase{Route: "smart", Action: policy.ActionRetry}, Attempts: 2},
 		timeouted,
 	}
-	compiled, err := CompileConfig(cfg)
+	compiled, err := PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestTimeoutRuleExplicitIdleAndContinuePolicy(t *testing.T) {
 		Retries:  2,
 		Wait:     Duration{Duration: 5 * time.Minute},
 	})
-	compiled, err = CompileConfig(cfg)
+	compiled, err = PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

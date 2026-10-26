@@ -110,7 +110,7 @@ func slogLevel(level string) slog.Level {
 // a captured in-memory logger, so structured events can be asserted.
 func eventsTestServer(t *testing.T, cfg config.Config, executor model.Executor) (*httptest.Server, func() []map[string]any) {
 	t.Helper()
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

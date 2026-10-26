@@ -12,13 +12,15 @@ import (
 // storeWithClock returns a ScoreStore with an injectable clock and a way to
 // advance it, so tests can age the sliding window deterministically.
 type storeClock struct {
-	store *ScoreStore
-	now   time.Time
+	store     *ScoreStore
+	now       time.Time
+	permitsMu sync.Mutex
+	permits   map[string][]*Permit
 }
 
 func newStoreAt(now time.Time) *storeClock {
-	inst := &storeClock{now: now}
-	inst.store = NewScoreStore(func() time.Time { return inst.now })
+	inst := &storeClock{now: now, permits: make(map[string][]*Permit)}
+	inst.store = NewScoreStore(func() time.Time { return inst.now }, NewProviderCapacity(nil))
 	return inst
 }
 
@@ -221,21 +223,21 @@ func TestScoreStoreConcurrentObserveAndSelect(t *testing.T) {
 // decrement never drops the count below zero.
 func TestInFlightTracking(t *testing.T) {
 	clock := newStoreAt(time.Now())
-	if got := clock.store.inFlightOf("a"); got != 0 {
+	if got := clock.store.capacity.Count("a"); got != 0 {
 		t.Fatalf("fresh provider in-flight = %d, want 0", got)
 	}
-	clock.store.IncrInFlight("a")
-	clock.store.IncrInFlight("a")
-	if got := clock.store.inFlightOf("a"); got != 2 {
+	clock.acquire("a")
+	clock.acquire("a")
+	if got := clock.store.capacity.Count("a"); got != 2 {
 		t.Fatalf("after two launches in-flight = %d, want 2", got)
 	}
-	clock.store.DecrInFlight("a")
-	if got := clock.store.inFlightOf("a"); got != 1 {
+	clock.release("a")
+	if got := clock.store.capacity.Count("a"); got != 1 {
 		t.Fatalf("after one completion in-flight = %d, want 1", got)
 	}
-	clock.store.DecrInFlight("a")
-	clock.store.DecrInFlight("a") // stale decrement: floor at zero
-	if got := clock.store.inFlightOf("a"); got != 0 {
+	clock.release("a")
+	clock.release("a") // stale decrement: floor at zero
+	if got := clock.store.capacity.Count("a"); got != 0 {
 		t.Fatalf("stale decrement must not drop below zero, got %d", got)
 	}
 }
@@ -246,7 +248,7 @@ func TestSelectP2CPrefersLowerInFlight(t *testing.T) {
 	policy := policy.BalanceConfig{Enabled: true, Strategy: "p2c", Window: 5 * time.Minute, ErrorBudget: 0.2}
 	// b carries three live branches; a carries none.
 	for range 3 {
-		clock.store.IncrInFlight("b")
+		clock.acquire("b")
 	}
 	// Both draw orders must converge on the less-loaded provider: the second
 	// draw maps over the remaining candidates, so (0, 0) draws (a, b) and
@@ -404,23 +406,23 @@ func TestScoreStoreInFlightConcurrentSelect(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range 200 {
-				clock.store.IncrInFlight("a")
+				clock.acquire("a")
 				clock.store.Select("r", targets, policy)
-				clock.store.DecrInFlight("a")
-				clock.store.DecrInFlight("b")
+				clock.release("a")
+				clock.release("b")
 			}
 		}()
 	}
 	wg.Wait()
-	if got := clock.store.inFlightOf("a"); got != 0 {
+	if got := clock.store.capacity.Count("a"); got != 0 {
 		t.Fatalf("in-flight must return to zero after balanced inc/dec, got %d", got)
 	}
 }
 
 func TestExpectedTTFTHealthyBeatsUnhealthyRegardlessOfInitialLatency(t *testing.T) {
 	clock := newStoreAt(time.Now())
-	clock.store.SetMaxConcurrent("proven-slow", 4)
-	clock.store.SetMaxConcurrent("broken-new", 4)
+	clock.store.capacity.SetLimit("proven-slow", 4)
+	clock.store.capacity.SetLimit("broken-new", 4)
 
 	// proven-slow has high latency (5s), but is healthy
 	clock.store.Observe("proven-slow", nil, 5*time.Second)
@@ -447,8 +449,8 @@ func TestExpectedTTFTHealthyBeatsUnhealthyRegardlessOfInitialLatency(t *testing.
 
 func TestExpectedTTFTBalancingShiftsLoadWhenFastProviderIsBusy(t *testing.T) {
 	clock := newStoreAt(time.Now())
-	clock.store.SetMaxConcurrent("fast", 4)
-	clock.store.SetMaxConcurrent("slow", 4)
+	clock.store.capacity.SetLimit("fast", 4)
+	clock.store.capacity.SetLimit("slow", 4)
 
 	// fast has EWMA TTFT 100ms, slow has EWMA TTFT 200ms
 	clock.store.Observe("fast", nil, 100*time.Millisecond)
@@ -474,7 +476,7 @@ func TestExpectedTTFTBalancingShiftsLoadWhenFastProviderIsBusy(t *testing.T) {
 	// 2. Put 4 in-flight on fast (reaches capacity limit):
 	// fast gets over-capacity penalty -> score spikes -> slow wins!
 	for range 4 {
-		clock.store.IncrInFlight("fast")
+		clock.acquire("fast")
 	}
 	selected = clock.store.Select("standard", targets, balPolicy)
 	if selected[0].Provider != "slow" {
@@ -484,8 +486,8 @@ func TestExpectedTTFTBalancingShiftsLoadWhenFastProviderIsBusy(t *testing.T) {
 
 func TestExpectedTTFTSelectWithAllUnhealthyProviders(t *testing.T) {
 	clock := newStoreAt(time.Now())
-	clock.store.SetMaxConcurrent("a", 4)
-	clock.store.SetMaxConcurrent("b", 4)
+	clock.store.capacity.SetLimit("a", 4)
+	clock.store.capacity.SetLimit("b", 4)
 
 	// Both providers fail repeatedly -> health drops to 0
 	for range 10 {
@@ -513,8 +515,8 @@ func TestExpectedTTFTSelectWithAllUnhealthyProviders(t *testing.T) {
 
 func TestExpectedTTFTEpsilonGreedyExploration(t *testing.T) {
 	clock := newStoreAt(time.Now())
-	clock.store.SetMaxConcurrent("fast", 4)
-	clock.store.SetMaxConcurrent("slow", 4)
+	clock.store.capacity.SetLimit("fast", 4)
+	clock.store.capacity.SetLimit("slow", 4)
 
 	clock.store.Observe("fast", nil, 1*time.Second)
 	clock.store.Observe("slow", nil, 5*time.Second)
@@ -553,8 +555,8 @@ func TestExpectedTTFTEpsilonGreedyExploration(t *testing.T) {
 
 func TestExpectedTTFTExplorationPreservesTiers(t *testing.T) {
 	clock := newStoreAt(time.Now())
-	clock.store.SetMaxConcurrent("t0-a", 4)
-	clock.store.SetMaxConcurrent("t1-b", 4)
+	clock.store.capacity.SetLimit("t0-a", 4)
+	clock.store.capacity.SetLimit("t1-b", 4)
 
 	clock.store.Observe("t0-a", nil, 2*time.Second)
 	clock.store.Observe("t1-b", nil, 1*time.Second)
@@ -576,5 +578,22 @@ func TestExpectedTTFTExplorationPreservesTiers(t *testing.T) {
 	selected := clock.store.Select("standard", targets, policy)
 	if selected[0].Provider != "t0-a" || selected[0].Tier != 0 {
 		t.Fatalf("exploration must stay within top tier, got %#v", selected[0])
+	}
+}
+
+func (s *storeClock) acquire(provider string) {
+	s.permitsMu.Lock()
+	defer s.permitsMu.Unlock()
+	if permit := s.store.capacity.Acquire(provider); permit != nil {
+		s.permits[provider] = append(s.permits[provider], permit)
+	}
+}
+func (s *storeClock) release(provider string) {
+	s.permitsMu.Lock()
+	defer s.permitsMu.Unlock()
+	stack := s.permits[provider]
+	if len(stack) > 0 {
+		stack[len(stack)-1].Release()
+		s.permits[provider] = stack[:len(stack)-1]
 	}
 }

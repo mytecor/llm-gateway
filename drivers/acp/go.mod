@@ -17,3 +17,7 @@ require (
 )
 
 replace github.com/dmora/agentrun => github.com/mytecor/agentrun v0.9.1-0.20261006200631-e07f67cf8aca
+
+require github.com/mytecor/llm-gateway v0.0.0
+
+replace github.com/mytecor/llm-gateway => ../..

@@ -29,6 +29,7 @@ type Binding struct {
 type Registry struct {
 	bindings   map[string]Binding
 	owned      []model.Executor
+	drivers    []*external.Driver
 	middleware []Middleware
 	close      sync.Once
 	closeErr   error
@@ -46,26 +47,14 @@ func New(ctx context.Context, cfg *config.CompiledConfig) (*Registry, error) {
 	fail := func(err error) (*Registry, error) { _ = registry.Close(); return nil, err }
 	var sessionStore *session.Store
 	for id, p := range cfg.Providers {
-		var defaultCWD string
-		if p.Session != nil {
-			defaultCWD = p.Session.DefaultCWD
+		if p.Description == nil {
+			return fail(fmt.Errorf("provider %q: missing prepared driver description", id))
 		}
-		drv, err := external.New(ctx, external.Config{
-			ID:             p.ID,
-			Driver:         p.Driver,
-			Command:        p.Command,
-			Env:            p.Env,
-			DefaultCWD:     defaultCWD,
-			ToolStrategy:   p.ToolStrategy,
-			ModelsURL:      p.ModelsURL,
-			HasSession:     p.Session != nil,
-			RequestTimeout: p.RequestTimeout.Duration,
-			DriverConfig:   p.Config,
-			Logger:         cfg.Logger,
-		})
+		drv, err := external.New(ctx, p.DriverSettings(cfg.Logger))
 		if err != nil {
 			return fail(fmt.Errorf("provider %q: %w", id, err))
 		}
+		registry.drivers = append(registry.drivers, drv)
 		caps := drv.Capabilities()
 		if caps.Stateful {
 			if sessionStore == nil {
@@ -202,25 +191,11 @@ func (r *Registry) Close() error {
 	return r.closeErr
 }
 
-func (r *Registry) ModelDetails(ctx context.Context, target model.Target) (model.ModelInfo, error) {
-	binding, ok := r.bindings[target.Provider]
-	if !ok {
-		return model.ModelInfo{}, nil
+// UseCatalog installs one cached model view for every stateful resolver.
+// Call before serving requests. Fresh discovery continues to use Driver.Models.
+func (r *Registry) UseCatalog(catalog model.ProviderModelLister) {
+	for _, d := range r.drivers {
+		provider := d.ID()
+		d.SetModelLister(model.ModelListFunc(func(ctx context.Context) ([]model.ModelInfo, error) { return catalog.Models(ctx, provider) }))
 	}
-	lister, ok := binding.Executor.(interface {
-		Models(context.Context) ([]model.ModelInfo, error)
-	})
-	if !ok {
-		return model.ModelInfo{}, nil
-	}
-	models, err := lister.Models(ctx)
-	if err != nil {
-		return model.ModelInfo{}, err
-	}
-	for _, m := range models {
-		if m.ID == target.Model {
-			return m, nil
-		}
-	}
-	return model.ModelInfo{}, nil
 }

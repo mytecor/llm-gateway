@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/mytecor/llm-gateway/driverproto"
 	"io"
 	"net/url"
 	"strings"
@@ -34,15 +35,7 @@ type ProviderConfig struct {
 	SetParams             map[string]json.RawMessage `json:"set_params,omitempty"`
 }
 
-type CallError struct {
-	Code   string `json:"code,omitempty"`
-	Class  string `json:"class"`
-	Status int    `json:"status"`
-	Scope  string `json:"scope,omitempty"`
-	Replay string `json:"replay,omitempty"`
-	Detail string `json:"detail,omitempty"`
-	Log    string `json:"log,omitempty"`
-}
+type CallError = driverproto.CallError
 
 type StreamChunk struct {
 	Data       json.RawMessage

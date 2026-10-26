@@ -5,10 +5,10 @@ import (
 	"errors"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
+	"github.com/mytecor/llm-gateway/internal/subsystem"
 	"github.com/mytecor/llm-gateway/internal/telemetry"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -356,7 +356,8 @@ func (sc *schedule) launch(g int) bool {
 			launchedN++
 			continue
 		}
-		if !sc.r.scores.TryAcquireProvider(target.Provider) {
+		permit := sc.r.capacity.Acquire(target.Provider)
+		if permit == nil {
 			sc.capacityDenied = true
 			telemetry.LogEvent(sc.ctx, sc.r.logger, slog.LevelDebug, "provider_capacity_denied",
 				"route", sc.route.Name,
@@ -367,7 +368,7 @@ func (sc *schedule) launch(g int) bool {
 			continue
 		}
 		if !sc.sem.acquire(target.Provider, sc.active) {
-			sc.r.scores.DecrInFlight(target.Provider)
+			permit.Release()
 			telemetry.LogEvent(sc.ctx, sc.r.logger, slog.LevelDebug, "semaphore_denied",
 				"route", sc.route.Name,
 				"provider", target.Provider,
@@ -385,12 +386,9 @@ func (sc *schedule) launch(g int) bool {
 		sc.runtime.used[target.Provider] = true
 		branchCtx, cancel := context.WithCancel(sc.ctx)
 		sc.cancels[id] = cancel
-		sc.r.metrics.IncrInFlight(target.Provider)
-		// The score store keeps its own live in-flight count per provider: it is
-		// the load signal behind the p2c balance strategy, fed at the same
-		// launch/completion points as the exported gauge so both describe the
-		// same concurrency state.
-		go sc.runBranch(branchCtx, id, cancel, target)
+		// The permit owns the slot, the balancing load signal and its metric
+		// through the branch and any selected stream handed to the caller.
+		go sc.runBranch(branchCtx, id, cancel, target, permit)
 	}
 	if allStarted {
 		sc.launched[g] = true
@@ -461,19 +459,13 @@ func (sc *schedule) cancelAll() {
 
 // runBranch performs one upstream call and delivers exactly one terminal
 // result. The send never blocks the caller past cancellation.
-func (sc *schedule) runBranch(ctx context.Context, id int, cancel context.CancelFunc, target model.Target) {
+func (sc *schedule) runBranch(ctx context.Context, id int, cancel context.CancelFunc, target model.Target, permit *subsystem.Permit) {
 	// Failed probes, non-streaming calls and cancelled losers release their
 	// provider slot on branch exit. A streaming winner transfers that release to
 	// SelectedStream.Cancel because its upstream call remains active after the
 	// first meaningful event.
-	var releaseOnce sync.Once
 	handedOff := false
-	releaseProvider := func() {
-		releaseOnce.Do(func() {
-			sc.r.metrics.DecrInFlight(target.Provider)
-			sc.r.scores.DecrInFlight(target.Provider)
-		})
-	}
+	releaseProvider := permit.Release
 	defer func() {
 		if !handedOff {
 			releaseProvider()
@@ -487,6 +479,10 @@ func (sc *schedule) runBranch(ctx context.Context, id int, cancel context.Cancel
 		request.Attempt = model.Attempt{ID: id, Target: target}
 		res = sc.r.probeStream(ctx, target, request)
 		if res.selected != nil {
+			// A selected result can lose the race or be abandoned before its
+			// caller accepts ownership. Parent cancellation must release its
+			// slot even when nobody reaches SelectedStream.Cancel.
+			context.AfterFunc(ctx, releaseProvider)
 			res.selected.Provider = target.Provider
 			res.selected.Model = target.Model
 			res.selected.Cancel = func() {
@@ -541,7 +537,7 @@ func (sc *schedule) drainPrefailed(failures *failureAggregate, retryable func(mo
 // explicit transitions owned by the caller (see executeRoute).
 func (r *Runner) raceRoute(ctx context.Context, logical string, route *policy.CompiledRoute, request model.ExecuteRequest, streamMode bool, runtime *routeRuntime) *routeOutcome {
 	for {
-		capacityChanged := r.scores.CapacitySignal()
+		capacityChanged := r.capacity.Changed()
 		outcome := r.raceRouteOnce(ctx, logical, route, request, streamMode, runtime)
 		if !outcome.capacityBlocked {
 			return outcome
@@ -569,7 +565,7 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 	if len(pool) == 0 {
 		return &routeOutcome{err: emptyPoolError(), empty: true}
 	}
-	pool = r.scores.TargetsWithCapacity(pool)
+	pool = r.capacity.Available(pool)
 	if len(pool) == 0 {
 		return &routeOutcome{capacityBlocked: true}
 	}
@@ -751,7 +747,7 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 				if route.Hedge.Internal && route.HedgeTarget == nil {
 					pool, _, hedgeErr := r.buildPool(logical, route, request, runtime)
 					if hedgeErr == nil {
-						pool = r.scores.TargetsWithCapacity(pool)
+						pool = r.capacity.Available(pool)
 						pool = r.applyLease(logical, route, pool)
 						pool = r.applyBalance(route.Name, route, pool)
 						unused := make([]model.Target, 0, len(pool))

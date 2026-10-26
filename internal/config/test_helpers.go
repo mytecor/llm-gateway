@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"github.com/mytecor/llm-gateway/internal/executor/external"
 	"testing"
 
 	"github.com/mytecor/llm-gateway/internal/policy"
@@ -53,7 +54,7 @@ func RulesConfig(t testing.TB, n int, rules []policy.Rule) *CompiledConfig {
 	}
 	cfg.Providers = providers
 	cfg.Rules = rules
-	compiled, err := CompileConfig(cfg)
+	compiled, err := PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,9 +63,16 @@ func RulesConfig(t testing.TB, n int, rules []policy.Rule) *CompiledConfig {
 
 func RaceOnlyConfig(t testing.TB) *CompiledConfig {
 	t.Helper()
-	compiled, err := CompileConfig(TestConfigWithRules(TestConfig(), policy.EntryRules([]string{"a", "b"}, 2)))
+	compiled, err := PrepareAndCompile(TestConfigWithRules(TestConfig(), policy.EntryRules([]string{"a", "b"}, 2)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return compiled
+}
+
+func catalogSources(cfg *CompiledConfig, id string) []*external.CatalogSource {
+	if desc := cfg.Providers[id].Description; desc != nil && desc.Catalog != nil {
+		return []*external.CatalogSource{desc.Catalog}
+	}
+	return nil
 }

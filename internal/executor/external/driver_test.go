@@ -75,7 +75,7 @@ func TestDriverSessionUpdateProcess(t *testing.T) {
 		os.Exit(2)
 	}
 	encoder := json.NewEncoder(os.Stdout)
-	_ = encoder.Encode(wireEvent{Type: "ready"})
+	_ = encoder.Encode(wireEvent{Type: "ready", Capabilities: &wireCapabilities{Chat: true, Streaming: true, Tools: true, Stateful: true, Resume: true}})
 	if decoder.Decode(&input) != nil {
 		os.Exit(0)
 	}
@@ -249,4 +249,39 @@ func TestStatelessDriverProcess(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestPreparedDriverStartsWithoutRepeatingDiscovery(t *testing.T) {
+	t.Setenv("PREPARED_DRIVER_TEST_PROCESS", "1")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := New(context.Background(), Config{
+		ID: "p", Command: []string{executable, "-test.run=^TestPreparedDriverProcess$"},
+		Description: &Description{Capabilities: model.Capabilities{Chat: true, Streaming: true, SafeReplay: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+}
+
+func TestPreparedDriverProcess(t *testing.T) {
+	if os.Getenv("PREPARED_DRIVER_TEST_PROCESS") != "1" {
+		return
+	}
+	var input wireInbound
+	decoder := json.NewDecoder(os.Stdin)
+	encoder := json.NewEncoder(os.Stdout)
+	if decoder.Decode(&input) != nil {
+		os.Exit(2)
+	}
+	if input.Type != "start" {
+		_ = encoder.Encode(wireEvent{Type: "error", Error: "preparation was repeated at startup"})
+		os.Exit(0)
+	}
+	_ = encoder.Encode(wireEvent{Type: "ready", Capabilities: &wireCapabilities{Chat: true, Streaming: true, SafeReplay: true}})
+	_ = decoder.Decode(&input)
+	os.Exit(0)
 }

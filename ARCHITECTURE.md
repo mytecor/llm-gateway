@@ -64,7 +64,7 @@ flowchart TD
 2. **Unified Execution Runtime**: Standard REST APIs, native subprocess ACP agents, and headless browser drivers share the same OpenAI Chat Completions interface and tool-calling semantics.
 3. **Declarative Composable Pipeline**: Routing is defined via structured stages (`filter`, `map`, `rank`, `admission`, `balance`, `affinity`, `race`, `retry`, `hedge`, `timeout`, `fallback`, `continue`, `repetition`).
 4. **Resilience by Default**: First-class support for parallel racing, hedging, automatic health cooldowns (circuit breakers), mid-stream break recovery, and degenerative loop guards.
-5. **Zero-Trust Security & Operational Isolation**: Bearer tokens verified via constant-time comparisons, secrets sourced exclusively from environment variables, and telemetry exposed on an isolated loopback port.
+5. **Zero-Trust Security & Operational Isolation**: Bearer tokens verified via constant-time comparisons, secrets support environment references, with `--require-env-secrets` enforcing them during configuration checks, and telemetry exposed on an isolated loopback port.
 
 ---
 
@@ -75,7 +75,7 @@ The codebase follows standard Go project conventions:
 ```text
 llm-gateway/
 ├── cmd/
-│   └── llm-gateway/            # Application entrypoint (CLI bootstrap & mcp-bridge dispatch)
+│   └── llm-gateway/            # Application entrypoint (CLI bootstrap)
 ├── configs/                    # Example JSON deployment and session configurations
 ├── docs/                       # Subsystem-specific deep-dives (e.g. session-executors.md)
 ├── drivers/                    # Isolated external provider driver binaries (NDJSON over stdio)
@@ -87,7 +87,6 @@ llm-gateway/
 │   │   ├── session/            # Stateful session adaptation to OpenAI protocol
 │   │   └── external/           # Unified NDJSON driver engine (HTTP multiplexed & stateful session)
 │   ├── gateway/                # Daemon lifecycle, CLI commands (check, serve), signals
-│   ├── mcpbridge/              # Private stdio Model Context Protocol (MCP) bridge
 │   ├── model/                  # Domain types, capabilities, error taxonomy, token usage
 │   ├── config/                 # Application JSON, secrets, defaults & startup configuration
 │   ├── provider/               # Provider schema, driver discovery & preparation
@@ -99,11 +98,29 @@ llm-gateway/
 │   └── telemetry/              # Zero-allocation Prometheus metrics and structured slog
 ```
 
+The dependency-free [driver protocol contract](driverproto/README.md) is shared
+by the Go drivers and gateway. Rust validates the same session fixtures.
+
 Application configuration belongs to `internal/config`: it decodes JSON, resolves
 secrets, normalizes listener and storage settings, and assembles the startup
 configuration. `internal/provider` prepares drivers and their capabilities.
+Startup explicitly runs decode/secret resolution → `PrepareConfig(ctx, cfg)`
+(normalization and discovery) → `CompileConfig(prepared)` (no processes or
+network) → executor startup. Prepared driver descriptions are passed into the
+registry; startup never repeats capability discovery or consults a global cache.
+Legacy spellings are normalized at the JSON boundary; typed rules carry only
+canonical fields. Retry and fallback share the scheduler’s bounded transition
+engine, including applicability filters, backoff and replay-safety guards.
 `internal/policy` owns the routing DSL and compiles rules against prepared
 providers; it does not depend on the application config or load credentials.
+
+`internal/scheduler/stream_run.go` owns the full client-stream lifetime:
+selection, idle detection, repetition checks, continuation, bounded recovery,
+usage and request observations, and admission release. Its synchronous
+`StreamSink` interface reports output and transport keep-alives without depending
+on HTTP. `internal/server/stream.go` implements that interface for SSE, including
+headers, payload sanitization, keep-alive encoding and terminal error frames.
+Transport exit cancels selection and releases the selected provider's capacity.
 
 ---
 
@@ -113,9 +130,10 @@ The gateway delegates stateful operations to independent, thread-safe subsystems
 
 | Subsystem | Package | Responsibility |
 | --- | --- | --- |
-| **Catalog** | `internal/subsystem/catalog.go` | Discovers upstream models via periodic background polls. Caches capabilities and handles graceful degradations when upstreams fail. |
+| **Catalog** | `internal/subsystem/catalog.go` | Refreshes native models and metadata through driver `models` commands. Maintains one last-known-good snapshot per provider for validation, metadata and session resolution. |
 | **Score Store** | `internal/subsystem/score_store.go` | Tracks provider performance using Exponential Weighted Moving Average (EWMA) for Time To First Token (TTFT). Implements $\epsilon$-greedy exploration across candidate providers. |
-| **Admission** | `internal/subsystem/admission.go` | Enforces concurrency controls per route/target (`maxInFlight`, `maxPending`, `waitTimeout`) to prevent upstream starvation and bufferbloat. |
+| **Provider Capacity** | `internal/subsystem/capacity.go` | Owns global provider reservations. Idempotent permits update the live count and metrics together; balancing reads the same count. |
+| **Admission** | `internal/subsystem/admission.go` | Enforces concurrency controls per route/target (`max_in_flight`, `max_pending`, `wait_timeout`) to prevent upstream starvation and bufferbloat. |
 | **Lease Store** | `internal/subsystem/lease.go` | Manages target capacity leases with slow-start recovery to smoothly ramp up traffic after cold starts or outages. |
 | **Affinity Store** | `internal/subsystem/affinity.go` | Pins multi-turn client sessions or OpenAI Responses API chains to the winning upstream provider. |
 | **Continue** | `internal/subsystem/continue.go` | Coordinates mid-stream break continuation, patching already-streamed token deltas onto prompt history for seamless failover. |
@@ -145,7 +163,7 @@ flowchart TD
     end
 
     subgraph Stage3["3. Execution & Concurrency"]
-        Admission["Admission<br/>(maxInFlight, queuing)"]
+        Admission["Admission<br/>(max_in_flight, queuing)"]
         Lease["Lease<br/>(dynamic capacity & slow-start)"]
         Race["Race / Hedge<br/>(parallel dispatch & backup)"]
         Admission --> Lease --> Race
@@ -220,7 +238,7 @@ the shared [session NDJSON protocol](docs/session-executors.md#session-ndjson-dr
   - Unified, driver-agnostic NDJSON-over-stdio client (`external.Driver` and `external.Describe`) serving both stateless multiplexed drivers (`stateful: false`, such as `http-driver`) and stateful session drivers (`stateful: true`, such as `acp-driver`, `web-driver`, or custom drivers).
   - Resolves `<driver>-driver` binaries dynamically via `ResolveDriverBinary` (or runs an explicit `command`), delegates driver-specific config validation and `Capabilities` discovery via the `{"type":"init",...}` handshake, and wraps stateful drivers in `sessionexecutor.New(...)`.
   - Pluggable tool strategies (`tool_strategy`) for stateful session drivers:
-    - `mcp`: Bridges client tools into a private, session-scoped stdio MCP server (`internal/mcpbridge`).
+    - `mcp`: Delivers client tool schemas and results over the driver protocol; the ACP driver owns the private, session-scoped stdio MCP server.
     - `prompt`: Injects tool schemas into the system prompt and parses JSON responses (`DecodeToolResponse`) for text-only models.
     - `wire`: Uses direct line protocol events (`tool_call`, `tool_result`).
     - `both` / `auto`: Accepts both wire events and text prompt JSON (`acp` defaults `auto` to `mcp`).
@@ -228,8 +246,8 @@ the shared [session NDJSON protocol](docs/session-executors.md#session-ndjson-dr
   - [`drivers/http/README.md`](drivers/http/README.md) (`http-driver`): Standalone Go module wrapping Bifrost Core for stateless HTTP/API providers.
   - [`drivers/acp/README.md`](drivers/acp/README.md) (`acp-driver`): Standalone Go module wrapping `agentrun` ACP agents.
   - [`drivers/web/README.md`](drivers/web/README.md) (`web-driver`): Standalone Rust crate automating browser sessions over CDP using YAML site profiles.
-- **`internal/mcpbridge`**:
-  - Provides the private stdio MCP subprocess mode and the in-gateway session HTTP facade (`mcpbridge.Facade`).
+- **`drivers/acp/bridge.go` and `drivers/acp/facade.go`**:
+  - Provide the private stdio MCP subprocess mode and the session HTTP facade inside the ACP driver.
 
 ---
 

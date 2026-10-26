@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/mytecor/llm-gateway/driverproto"
 	"io"
 	"os"
 	"os/signal"
@@ -15,36 +16,10 @@ import (
 	"syscall"
 )
 
-type functionTool struct {
-	Type     string         `json:"type"`
-	Function toolDefinition `json:"function"`
-}
+type functionTool = driverproto.FunctionTool
+type toolDefinition = driverproto.FunctionDefinition
 
-type toolDefinition struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters"`
-}
-
-type inboundMessage struct {
-	Type             string          `json:"type"`
-	ID               string          `json:"id,omitempty"`
-	ToolStrategy     string          `json:"tool_strategy,omitempty"`
-	ModelsURL        string          `json:"models_url,omitempty"`
-	HasSession       bool            `json:"has_session,omitempty"`
-	RequestTimeoutMs int64           `json:"request_timeout_ms,omitempty"`
-	Config           json.RawMessage `json:"config,omitempty"`
-	Command          []string        `json:"command,omitempty"`
-	CWD              string          `json:"cwd,omitempty"`
-	Model            string          `json:"model,omitempty"`
-	ReasoningEffort  string          `json:"reasoning_effort,omitempty"`
-	System           string          `json:"system,omitempty"`
-	ResumeID         string          `json:"resume_id,omitempty"`
-	Text             string          `json:"text,omitempty"`
-	Content          string          `json:"content,omitempty"`
-	Error            string          `json:"error,omitempty"`
-	Tools            []functionTool  `json:"tools,omitempty"`
-}
+type inboundMessage = driverproto.Command[json.RawMessage]
 
 type rawACPConfig struct {
 	Command []string `json:"command,omitempty"`
@@ -113,6 +88,9 @@ func serve(ctx context.Context, defaultCommand []string, r io.Reader, w io.Write
 	emit := func(ev Event) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
+		if ev.Type == "ready" {
+			ev.ProtocolVersion = driverproto.Version
+		}
 		data, err := json.Marshal(ev)
 		if err != nil {
 			return err
@@ -205,6 +183,11 @@ func serve(ctx context.Context, defaultCommand []string, r io.Reader, w io.Write
 			_ = emit(Event{Type: "error", Error: "invalid inbound ACP driver message"})
 			return err
 		}
+		if err := driverproto.CheckVersion(msg.ProtocolVersion); err != nil {
+			_ = emit(Event{Type: "error", Error: err.Error()})
+			return nil
+		}
+
 		switch msg.Type {
 		case "init", "describe":
 			_, ts, normalizedCfg, err := validateACPConfig(msg, defaultCommand, true)

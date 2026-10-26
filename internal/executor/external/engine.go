@@ -2,6 +2,7 @@ package external
 
 import (
 	"context"
+	"github.com/mytecor/llm-gateway/driverproto"
 	"log/slog"
 	"time"
 
@@ -16,11 +17,7 @@ const (
 	ToolStrategyBoth   = "both"
 )
 
-type CatalogSource struct {
-	URL      string `json:"url"`
-	APIKey   string `json:"api_key,omitempty"`
-	Explicit bool   `json:"explicit,omitempty"`
-}
+type CatalogSource = driverproto.CatalogSource
 
 type Description struct {
 	Capabilities model.Capabilities `json:"capabilities"`
@@ -30,6 +27,7 @@ type Description struct {
 }
 
 type Config struct {
+	Description    *Description
 	ID             string
 	Driver         string
 	Command        []string

@@ -237,7 +237,7 @@ func TestServerHoldRecoveryBoundedWhenProviderRepeatedlyBreaks(t *testing.T) {
 			Wait:     policy.Duration{Duration: time.Second},
 		},
 	}
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func continueConfigRetriesWait(t *testing.T, retries int, wait time.Duration) *c
 		policy.RaceRuleHelper("standard", 2),
 		policy.ContinueRuleWait("standard", 90*time.Second, "full", retries, wait),
 	}
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func continueConfigHold(t *testing.T, retries int, wait, cooldown time.Duration)
 		policy.RaceRuleHelper("standard", 2),
 		policy.ContinueRuleWait("standard", 90*time.Second, "full", retries, wait),
 	}
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

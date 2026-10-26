@@ -8,33 +8,81 @@
       "id": "coding-agent",
       "driver": "acp",
       "tool_strategy": "mcp",
-      "command": ["claude-agent-acp"],
       "session": {
         "default_cwd": "/absolute/path/to/project",
-        "allowed_roots": ["/absolute/path/to/project"],
+        "allowed_roots": [
+          "/absolute/path/to/project"
+        ],
         "ttl": "10m",
         "turn_timeout": "30m"
+      },
+      "config": {
+        "command": [
+          "claude-agent-acp"
+        ]
       }
     },
     {
       "id": "browser-model",
       "driver": "web",
       "tool_strategy": "prompt",
-      "profile": "./drivers/web/sites/muse.yaml",
       "session": {
         "default_cwd": "/absolute/path/to/project",
-        "allowed_roots": ["/absolute/path/to/project"],
+        "allowed_roots": [
+          "/absolute/path/to/project"
+        ],
         "ttl": "10m",
         "turn_timeout": "30m"
+      },
+      "config": {
+        "profile": "./drivers/web/sites/muse.yaml"
       }
     }
   ],
   "rules": [
-    {"route": "agent", "action": "filter", "where": {"model": {"eq": "agent"}}},
-    {"route": "agent", "action": "map", "providers": ["coding-agent"], "native": "default"},
-    {"route": "agent", "action": "race", "count": 1},
-    {"route": "browser", "action": "filter", "where": {"model": {"eq": "browser"}}},
-    {"route": "browser", "action": "map", "providers": ["browser-model"], "native": "default"},
-    {"route": "browser", "action": "race", "count": 1}
+    {
+      "route": "agent",
+      "action": "filter",
+      "where": {
+        "model": {
+          "eq": "agent"
+        }
+      }
+    },
+    {
+      "route": "agent",
+      "action": "map",
+      "providers": [
+        "coding-agent"
+      ],
+      "native": "default"
+    },
+    {
+      "route": "agent",
+      "action": "race",
+      "count": 1
+    },
+    {
+      "route": "browser",
+      "action": "filter",
+      "where": {
+        "model": {
+          "eq": "browser"
+        }
+      }
+    },
+    {
+      "route": "browser",
+      "action": "map",
+      "providers": [
+        "browser-model"
+      ],
+      "native": "default"
+    },
+    {
+      "route": "browser",
+      "action": "race",
+      "count": 1
+    }
   ]
 }

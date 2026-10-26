@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/mytecor/llm-gateway/internal/telemetry"
 )
 
+// CompileConfig compiles prepared providers without launching processes or making network calls.
 func CompileConfig(cfg Config) (*CompiledConfig, error) {
 	var err error
 	cfg, err = normalizeSettings(cfg)
@@ -18,11 +20,10 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 	}
 
 	compiled := &CompiledConfig{
-		Raw:            cfg,
-		Logger:         telemetry.NewGatewayLogger(cfg.LogLevel),
-		Providers:      make(map[string]provider.Provider, len(cfg.Providers)),
-		CatalogSources: make(map[string][]CatalogSource),
-		ClientKeys:     make(map[string]string, len(cfg.ClientAPIKeys)),
+		Raw:        cfg,
+		Logger:     telemetry.NewGatewayLogger(cfg.LogLevel),
+		Providers:  make(map[string]provider.Provider, len(cfg.Providers)),
+		ClientKeys: make(map[string]string, len(cfg.ClientAPIKeys)),
 	}
 	for _, clientKey := range cfg.ClientAPIKeys {
 		id := strings.TrimSpace(clientKey.ID)
@@ -42,18 +43,12 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 		if _, exists := compiled.Providers[id]; exists {
 			return nil, fmt.Errorf("duplicate provider id %q", id)
 		}
-		prepared, catalog, err := provider.Prepare(rawProvider)
-		if err != nil {
-			return nil, err
+		prepared := rawProvider
+		if prepared.Description == nil {
+			return nil, fmt.Errorf("provider %q: prepare driver capabilities before compilation", id)
 		}
 
 		compiled.Providers[prepared.ID] = prepared
-		if catalog != nil && catalog.URL != "" {
-			compiled.CatalogSources[prepared.ID] = appendCatalogSource(
-				compiled.CatalogSources[prepared.ID],
-				CatalogSource{URL: catalog.URL, APIKey: catalog.APIKey, Explicit: catalog.Explicit},
-			)
-		}
 	}
 
 	result, err := policy.Compile(cfg.Rules, compiled.Providers)
@@ -75,15 +70,37 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 	return compiled, nil
 }
 
-func appendCatalogSource(sources []CatalogSource, candidate CatalogSource) []CatalogSource {
-	for index, source := range sources {
-		if source.URL != candidate.URL || source.APIKey != candidate.APIKey {
-			continue
-		}
-		if candidate.Explicit && !source.Explicit {
-			sources[index].Explicit = true
-		}
-		return sources
+// PrepareConfig performs environment-dependent normalization and driver discovery.
+// Its returned configuration contains explicit descriptions consumed by compilation
+// and startup, so neither phase needs a second discovery handshake.
+func PrepareConfig(ctx context.Context, cfg Config) (Config, error) {
+	cfg, err := normalizeSettings(cfg)
+	if err != nil {
+		return Config{}, err
 	}
-	return append(sources, candidate)
+	cfg.Providers = append([]provider.Provider(nil), cfg.Providers...)
+	seen := make(map[string]bool)
+	for i, p := range cfg.Providers {
+		id := strings.TrimSpace(p.ID)
+		if seen[id] {
+			return Config{}, fmt.Errorf("duplicate provider id %q", id)
+		}
+		seen[id] = true
+		prepared, err := provider.Prepare(ctx, p)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.Providers[i] = prepared
+	}
+	return cfg, nil
+}
+
+// PrepareAndCompile is a convenience for callers that need both phases.
+// Use PrepareConfig and CompileConfig separately when controlling startup context.
+func PrepareAndCompile(cfg Config) (*CompiledConfig, error) {
+	prepared, err := PrepareConfig(context.Background(), cfg)
+	if err != nil {
+		return nil, err
+	}
+	return CompileConfig(prepared)
 }

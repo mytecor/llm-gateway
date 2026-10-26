@@ -43,20 +43,13 @@ type ClientKey struct {
 // combines normalized settings and credentials with prepared providers and the
 // routing graph compiled by policy.
 type CompiledConfig struct {
-	Raw            Config
-	Logger         *slog.Logger
-	Providers      map[string]provider.Provider
-	Routes         map[string]*policy.CompiledRoute
-	Models         map[string]*policy.CompiledRoute // logical model → entry route
-	LogicalIDs     []string
-	CatalogSources map[string][]CatalogSource
+	Raw        Config
+	Logger     *slog.Logger
+	Providers  map[string]provider.Provider
+	Routes     map[string]*policy.CompiledRoute
+	Models     map[string]*policy.CompiledRoute // logical model → entry route
+	LogicalIDs []string
 	// ClientKeys maps a client key ID (non-secret metrics label) to its
 	// resolved bearer secret. Empty means client authentication is disabled.
 	ClientKeys map[string]string
-}
-
-type CatalogSource struct {
-	URL      string
-	APIKey   string
-	Explicit bool
 }

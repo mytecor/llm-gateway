@@ -297,7 +297,7 @@ func TestEntryRouteSelectionByModel(t *testing.T) {
 		policy.RankRuleHelper("stupid"),
 		policy.RaceRuleHelper("stupid", 1),
 	)
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestDuplicateEntryModelRejected(t *testing.T) {
 		policy.RankRuleHelper("second"),
 		policy.RaceRuleHelper("second", 1),
 	)
-	if _, err := config.CompileConfig(cfg); err == nil || !strings.Contains(err.Error(), "duplicate entry route") {
+	if _, err := config.PrepareAndCompile(cfg); err == nil || !strings.Contains(err.Error(), "duplicate entry route") {
 		t.Fatalf("expected duplicate entry route rejection, got %v", err)
 	}
 }
@@ -1626,7 +1626,7 @@ func TestAffinityResolutionFailureRemainsPinned(t *testing.T) {
 	rules := policy.EntryRules([]string{"a", "b"}, 2)
 	rules = append(rules[:4], append([]policy.Rule{affinity}, rules[4:]...)...)
 	cfg.Rules = rules
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1719,17 +1719,21 @@ func compiledWithCatalogs(t *testing.T, rules []policy.Rule, catalogs map[string
 	t.Helper()
 	cfg := config.TestConfig()
 	cfg.Rules = rules
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	compiled.CatalogSources = make(map[string][]config.CatalogSource, len(catalogs))
+	sources := make(map[string]subsystem.CatalogSource, len(catalogs))
 	for providerID, ids := range catalogs {
-		server := catalogServer(t, ids...)
-		t.Cleanup(server.Close)
-		compiled.CatalogSources[providerID] = []config.CatalogSource{{URL: server.URL, Explicit: true}}
+		sources[providerID] = subsystem.CatalogSource{Required: true, Validate: true, Lister: model.ModelListFunc(func(context.Context) ([]model.ModelInfo, error) {
+			models := make([]model.ModelInfo, 0, len(ids))
+			for _, id := range ids {
+				models = append(models, model.ModelInfo{ID: id})
+			}
+			return models, nil
+		})}
 	}
-	catalog := subsystem.NewCatalog(compiled)
+	catalog := subsystem.NewCatalogWithSources(sources)
 	if failures := catalog.Refresh(context.Background()); len(failures) != 0 {
 		t.Fatalf("catalog refresh failed: %v", failures)
 	}

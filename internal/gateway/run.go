@@ -38,17 +38,21 @@ func Run(arguments []string) error {
 	if command == "check" {
 		return config.CheckConfig(*configPath, *requireEnvSecrets, *allowedEnv)
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
 		return err
 	}
-	compiled, err := config.CompileConfig(cfg)
+	prepared, err := config.PrepareConfig(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("prepare config: %w", err)
+	}
+	compiled, err := config.CompileConfig(prepared)
 	if err != nil {
 		return fmt.Errorf("validate config: %w", err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	catalog := subsystem.NewCatalog(compiled)
 	reportCatalogErrors(compiled.Logger, catalog.Refresh(ctx))
 	catalog.Start(ctx, compiled.Raw.CatalogRefreshInterval.Duration, func(errorsByGroup map[string]error) {

@@ -76,12 +76,16 @@ Providers default to `"driver": "http"` when `"driver"` is omitted:
 {
   "id": "openai-primary",
   "driver": "http",
-  "base_provider": "openai",
-  "inference_url": "https://api.openai.com/v1",
-  "api_key": "env.OPENAI_API_KEY",
-  "strip_params": ["service_tier"],
-  "set_params": {
-    "store": false
+  "config": {
+    "base_provider": "openai",
+    "inference_url": "https://api.openai.com/v1",
+    "api_key": "env.OPENAI_API_KEY",
+    "strip_params": [
+      "service_tier"
+    ],
+    "set_params": {
+      "store": false
+    }
   }
 }
 ```

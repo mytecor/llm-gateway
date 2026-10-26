@@ -1,0 +1,8 @@
+{"type":"ready","protocol_version":1,"tool_strategy":"prompt","capabilities":{"chat":true,"streaming":true,"tools":true,"stateful":true,"resume":true},"config":{"profile":"fixture.yaml"}}
+{"type":"models","models":[{"id":"native-model","name":"Native Model","reasoning_efforts":["low","high"]}]}
+{"type":"chunk","id":"request-1","data":{"choices":[{"delta":{"content":"hello"}}]},"meaningful":true}
+{"type":"text","text":"hello"}
+{"type":"tool_call","id":"call-1","name":"lookup","arguments":{"key":"value"}}
+{"type":"usage","input_tokens":12,"output_tokens":3}
+{"type":"error","id":"request-1","call_error":{"class":"429","status":429,"scope":"provider","replay":"not_sent","detail":"rate limited"}}
+{"type":"done","id":"request-1"}

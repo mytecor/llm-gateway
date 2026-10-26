@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -28,7 +29,7 @@ func TestServerAuthModelsAndLogicalRewrite(t *testing.T) {
 		policy.RankRuleHelper("standard"),
 		policy.RaceRuleHelper("standard", 1),
 	}
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +139,7 @@ func TestServerStreamsWinnerWithLogicalModel(t *testing.T) {
 		policy.RankRuleHelper("standard"),
 		policy.RaceRuleHelper("standard", 1),
 	}
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,10 +178,9 @@ func TestServerStreamsWinnerWithLogicalModel(t *testing.T) {
 func TestManualRefreshDoesNotExposeProviderNamespace(t *testing.T) {
 	compiled := config.RaceOnlyConfig(t)
 	compiled.ClientKeys = map[string]string{"primary": "client-secret"}
-	compiled.CatalogSources = map[string][]config.CatalogSource{
-		"internal-provider-id": {{URL: "://invalid"}},
-	}
-	catalog := subsystem.NewCatalog(compiled)
+	catalog := subsystem.NewCatalogWithSources(map[string]subsystem.CatalogSource{
+		"internal-provider-id": {Lister: model.ModelListFunc(func(context.Context) ([]model.ModelInfo, error) { return nil, errors.New("discovery unavailable") })},
+	})
 	executor := &fakeExecutor{
 		do: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) { return nil, nil },
 		stream: func(context.Context, model.Target, model.ExecuteRequest) (<-chan model.StreamEvent, *model.CallError) {
@@ -212,7 +212,7 @@ func TestServerReportsFailureAfterStreamingWinner(t *testing.T) {
 		policy.RankRuleHelper("standard"),
 		policy.RaceRuleHelper("standard", 1),
 	}
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +259,7 @@ func affinityServerConfig(t *testing.T) *config.CompiledConfig {
 		},
 		policy.RaceRuleHelper("standard", 1),
 	}
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"github.com/mytecor/llm-gateway/driverproto"
 	"io"
 	"os"
 	"os/signal"
@@ -12,53 +13,12 @@ import (
 	"time"
 )
 
-type Capabilities struct {
-	Chat       bool `json:"chat,omitempty"`
-	Responses  bool `json:"responses,omitempty"`
-	Streaming  bool `json:"streaming,omitempty"`
-	Tools      bool `json:"tools,omitempty"`
-	Stateful   bool `json:"stateful,omitempty"`
-	Resume     bool `json:"resume,omitempty"`
-	SafeReplay bool `json:"safe_replay,omitempty"`
-}
+type Capabilities = driverproto.Capabilities
+type CatalogSource = driverproto.CatalogSource
 
-type CatalogSource struct {
-	URL      string `json:"url"`
-	APIKey   string `json:"api_key,omitempty"`
-	Explicit bool   `json:"explicit,omitempty"`
-}
+type inboundMessage = driverproto.Command[json.RawMessage]
 
-type inboundMessage struct {
-	Type                string           `json:"type"`
-	ID                  string           `json:"id,omitempty"`
-	ToolStrategy        string           `json:"tool_strategy,omitempty"`
-	ModelsURL           string           `json:"models_url,omitempty"`
-	HasSession          bool             `json:"has_session,omitempty"`
-	RequestTimeoutMs    int64            `json:"request_timeout_ms,omitempty"`
-	Config              json.RawMessage  `json:"config,omitempty"`
-	Providers           []ProviderConfig `json:"providers,omitempty"`
-	Provider            string           `json:"provider,omitempty"`
-	Model               string           `json:"model,omitempty"`
-	Kind                string           `json:"kind,omitempty"`
-	Stream              bool             `json:"stream,omitempty"`
-	StreamIdleTimeoutMs int64            `json:"stream_idle_timeout_ms,omitempty"`
-	Body                json.RawMessage  `json:"body,omitempty"`
-}
-
-type outboundMessage struct {
-	Type         string          `json:"type"`
-	ID           string          `json:"id,omitempty"`
-	ToolStrategy string          `json:"tool_strategy,omitempty"`
-	Capabilities *Capabilities   `json:"capabilities,omitempty"`
-	Catalog      *CatalogSource  `json:"catalog,omitempty"`
-	Config       map[string]any  `json:"config,omitempty"`
-	Models       []string        `json:"models,omitempty"`
-	Data         json.RawMessage `json:"data,omitempty"`
-	Event        string          `json:"event,omitempty"`
-	Meaningful   bool            `json:"meaningful,omitempty"`
-	Error        string          `json:"error,omitempty"`
-	CallError    *CallError      `json:"call_error,omitempty"`
-}
+type outboundMessage = driverproto.Event
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -75,6 +35,9 @@ func serve(ctx context.Context, r io.Reader, w io.Writer) error {
 	emit := func(ev outboundMessage) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
+		if ev.Type == "ready" {
+			ev.ProtocolVersion = driverproto.Version
+		}
 		data, err := json.Marshal(ev)
 		if err != nil {
 			return err
@@ -144,6 +107,11 @@ func serve(ctx context.Context, r io.Reader, w io.Writer) error {
 			return err
 		}
 
+		if err := driverproto.CheckVersion(msg.ProtocolVersion); err != nil {
+			_ = emit(outboundMessage{Type: "error", Error: err.Error()})
+			return nil
+		}
+
 		switch msg.Type {
 		case "init", "describe":
 			_, catalog, normalizedCfg, err := ValidateProviderConfig(msg)
@@ -160,7 +128,12 @@ func serve(ctx context.Context, r io.Reader, w io.Writer) error {
 			return nil
 
 		case "models":
-			_ = emit(outboundMessage{Type: "models", Models: []string{}})
+			models, err := listModels(ctx, msg)
+			if err != nil {
+				_ = emit(outboundMessage{Type: "error", Error: err.Error()})
+			} else {
+				_ = emit(outboundMessage{Type: "models", Models: models})
+			}
 			return nil
 
 		case "start":
@@ -168,7 +141,14 @@ func serve(ctx context.Context, r io.Reader, w io.Writer) error {
 				_ = emit(outboundMessage{Type: "error", Error: "HTTP driver already started"})
 				continue
 			}
-			providers := msg.Providers
+			var providers []ProviderConfig
+			for _, raw := range msg.Providers {
+				var p ProviderConfig
+				if err := json.Unmarshal(raw, &p); err != nil {
+					return err
+				}
+				providers = append(providers, p)
+			}
 			var catalog *CatalogSource
 			var normalizedCfg map[string]any
 			if len(providers) == 0 {

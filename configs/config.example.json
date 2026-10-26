@@ -14,21 +14,25 @@
   "providers": [
     {
       "id": "upstream-primary",
-      "base_provider": "openai",
-      "inference_url": "https://api.openai.com/v1",
-      "api_key": "env.OPENAI_API_KEY",
       "priority": 10,
       "cooldown": "15s",
-      "request_timeout": "60s"
+      "request_timeout": "60s",
+      "config": {
+        "base_provider": "openai",
+        "inference_url": "https://api.openai.com/v1",
+        "api_key": "env.OPENAI_API_KEY"
+      }
     },
     {
       "id": "upstream-backup",
-      "base_provider": "openai",
-      "inference_url": "https://api.openai.com/v1",
-      "api_key": "env.BACKUP_API_KEY",
       "priority": 5,
       "cooldown": "15s",
-      "request_timeout": "60s"
+      "request_timeout": "60s",
+      "config": {
+        "base_provider": "openai",
+        "inference_url": "https://api.openai.com/v1",
+        "api_key": "env.BACKUP_API_KEY"
+      }
     }
   ],
   "rules": [
@@ -46,7 +50,10 @@
       "action": "filter",
       "where": {
         "provider": {
-          "in": ["upstream-primary", "upstream-backup"]
+          "in": [
+            "upstream-primary",
+            "upstream-backup"
+          ]
         }
       }
     },
@@ -81,7 +88,13 @@
       "action": "filter",
       "where": {
         "error": {
-          "in": ["429", "5xx", "timeout", "connection_error", "invalid_response"]
+          "in": [
+            "429",
+            "5xx",
+            "timeout",
+            "connection_error",
+            "invalid_response"
+          ]
         }
       }
     },
@@ -90,7 +103,10 @@
       "action": "filter",
       "where": {
         "provider": {
-          "in": ["upstream-primary", "upstream-backup"],
+          "in": [
+            "upstream-primary",
+            "upstream-backup"
+          ],
           "unused": true
         }
       }

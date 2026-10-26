@@ -41,7 +41,7 @@ func repetitionConfig(t *testing.T) *config.CompiledConfig {
 		policy.ContinueRuleWait("standard", 90*time.Second, "full", 0, 50*time.Millisecond),
 		policy.RepetitionRuleHelper("standard"),
 	}
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func repetitionSingleConfig(t *testing.T) *config.CompiledConfig {
 		policy.ContinueRuleWait("standard", 90*time.Second, "full", 0, 50*time.Millisecond),
 		policy.RepetitionRuleHelper("standard"),
 	}
-	compiled, err := config.CompileConfig(cfg)
+	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
