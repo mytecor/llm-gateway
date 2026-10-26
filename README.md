@@ -248,6 +248,20 @@ filter → map → admission → balance → affinity → race → retry → hed
 - **`hedge`**: Dispatches a parallel backup request if the primary target has not returned a response within the specified threshold (`after`).
 - **`timeout`**: Enforces request-wide deadlines (`duration`) and chunk idle timeouts (`idle`).
 
+Streaming rules use `policy.RuntimeRule.Evaluate(RuleContext, RuleEvent) RuleDecision`.
+Each client run creates its own rule instances from the compiled policy.
+`repetition` receives only the new content/reasoning delta and retains a bounded
+normalized tail; `continue` evaluates failures and missing tool-call finish
+markers. A provider takeover sends a stream-start event to reset detector state.
+Buffered and live chunks go through the same evaluation path.
+
+The context supplies request/provider metadata and an output summary. The original
+request is available through a read-only accessor when needed; message history is
+not copied or replayed on every chunk. Rules return decisions, while the scheduler
+owns cancellation, recovery budgets, history resharing and transport writes.
+Routing actions such as `filter`, `map` and `race` still compile into the route
+graph; they do not consume response deltas.
+
 ---
 
 ## Observability

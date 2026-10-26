@@ -107,6 +107,44 @@ func TestRunStreamContinuationWithoutHTTP(t *testing.T) {
 	assertStreamRunReleased(t, runner, cfg)
 }
 
+func TestRunStreamRulesInspectContinuationPrelude(t *testing.T) {
+	cfg := streamRunConfig(t, []string{"a", "b", "c"})
+	cfg.Models["standard"].Repetition = policy.RepetitionConfig{
+		Enabled: true, Repeats: 4, MinLen: 6, MaxLen: 256,
+	}
+	var calls atomic.Int32
+	executor := &fakeExecutor{stream: func(_ context.Context, target model.Target, _ model.ExecuteRequest) (<-chan model.StreamEvent, *model.CallError) {
+		calls.Add(1)
+		switch target.Provider {
+		case "a":
+			return completionStream("partial", false), nil
+		case "b":
+			// The first meaningful chunk is buffered by selection. It must go
+			// through the loop guard even though this is a continuation winner.
+			return completionStream("Tool call. Tool call. Tool call. Tool call.", true), nil
+		default:
+			return completionStream("recovered", true), nil
+		}
+	}}
+	runner := NewRunner(cfg, subsystem.NewCatalog(cfg), executor)
+	defer runner.Close()
+	sink := &recordingStreamSink{}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	runner.RunStream(ctx, "standard", streamRunRequest(), time.Now(), sink)
+	if !sink.completed || sink.failed || calls.Load() != 3 {
+		t.Fatalf("buffered continuation bypassed rules: complete=%v failed=%v calls=%d", sink.completed, sink.failed, calls.Load())
+	}
+	var text string
+	for _, event := range sink.events {
+		text += subsystem.StreamTextDelta(string(event.Data))
+	}
+	if text != "partialrecovered" {
+		t.Fatalf("loop or duplicate buffered output reached the client: %q", text)
+	}
+	assertStreamRunReleased(t, runner, cfg)
+}
+
 func TestRunStreamWriteFailureReleasesWinner(t *testing.T) {
 	for _, duringContinuation := range []bool{false, true} {
 		name := "initial"

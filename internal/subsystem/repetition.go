@@ -1,10 +1,13 @@
 package subsystem
 
 import (
-	"github.com/mytecor/llm-gateway/internal/policy"
 	"encoding/json"
+	"errors"
 	"strings"
 	"unicode"
+
+	"github.com/mytecor/llm-gateway/internal/model"
+	"github.com/mytecor/llm-gateway/internal/policy"
 )
 
 // streamTextDelta extracts the streamed text of one OpenAI chat-completion
@@ -88,12 +91,28 @@ func NewRepetitionDetector(cfg policy.RepetitionConfig) *RepetitionDetector {
 	}
 }
 
-// Reset clears the accumulated normalized state (a fresh lane starts clean;
-// the relay currently keeps one detector across a whole request, but a caller
-// that wants per-lane detection can Reset on adoption).
+// Reset clears the accumulated normalized state for a fresh provider stream.
 func (d *RepetitionDetector) Reset() {
 	d.norm = ""
 	d.spacePending = false
+}
+
+// Evaluate keeps only this provider stream's normalized tail. Request history
+// is deliberately not consulted, even when it contains repeated text.
+func (d *RepetitionDetector) Evaluate(ctx policy.RuleContext, event policy.RuleEvent) policy.RuleDecision {
+	if event.Kind == policy.RuleStreamStart {
+		d.Reset()
+		return policy.RuleDecision{}
+	}
+	if ctx.Kind == model.RequestChat && event.Kind == policy.RuleDelta && event.Delta != "" && d.Detect(event.Delta) {
+		return policy.RuleDecision{
+			Action: policy.RuleStop,
+			Rule:   policy.ActionRepetition,
+			Error: &model.CallError{Class: model.ErrorUpstream, Status: 502,
+				Cause: errors.New("repetition loop detected in stream")},
+		}
+	}
+	return policy.RuleDecision{}
 }
 
 // appendNormalized folds one raw chunk into the normalized accumulator,
