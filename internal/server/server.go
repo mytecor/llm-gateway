@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -41,7 +40,6 @@ func NewServer(config *config.CompiledConfig, catalog *subsystem.Catalog, runner
 		metrics: runner.Metrics(),
 	}
 	server.mux.HandleFunc("GET /healthz", server.health)
-	server.mux.HandleFunc("GET /metrics", server.metricsHandler)
 	server.mux.HandleFunc("GET /v1/models", server.auth(server.models))
 	server.mux.HandleFunc("POST /v1/chat/completions", server.auth(server.chat))
 	server.mux.HandleFunc("POST /v1/responses", server.auth(server.responses))
@@ -108,17 +106,6 @@ func (s *Server) routeOf(logical string) string {
 		return entry.Name
 	}
 	return ""
-}
-
-// metricsHandler handles GET /metrics without client authentication: the
-// endpoint is deliberately non-public (its own loopback listener, see config)
-// and must not require the client API key.
-func (s *Server) metricsHandler(writer http.ResponseWriter, _ *http.Request) {
-	writer.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	writer.WriteHeader(http.StatusOK)
-	if err := s.metrics.WriteExposition(writer); err != nil {
-		telemetry.LogEvent(context.Background(), s.logger, slog.LevelError, "metrics_exposition_failed", "detail", telemetry.SafeLogDetail(err.Error()))
-	}
 }
 
 // observeRequest records the request-level observation: counter, histogram and

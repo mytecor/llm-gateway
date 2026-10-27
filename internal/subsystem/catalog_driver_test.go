@@ -1,6 +1,9 @@
 package subsystem
 
 import (
+	"github.com/mytecor/llm-gateway/internal/testsupport/configtest"
+	"github.com/mytecor/llm-gateway/internal/testsupport/policytest"
+
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -8,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/mytecor/llm-gateway/internal/config"
-	"github.com/mytecor/llm-gateway/internal/policy"
 )
 
 // Exercise the real HTTP driver subprocess: the core only knows ModelInfo,
@@ -28,10 +30,10 @@ func TestCatalogDiscoversThroughDriverAndSharesMetadata(t *testing.T) {
 		_, _ = w.Write([]byte(`{"data":[{"id":"native-model","name":"Native Model","reasoning_efforts":["low","high"]}]}`))
 	}))
 	defer server.Close()
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Providers[0].Config = map[string]any{"base_provider": "openai", "inference_url": server.URL + "/prefix/v1", "api_key": "provider-key"}
-	cfg.Rules = policy.EntryRules([]string{"a"}, 1)
+	cfg.Rules = policytest.EntryRules([]string{"a"}, 1)
 	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)

@@ -1,6 +1,9 @@
 package scheduler
 
 import (
+	"github.com/mytecor/llm-gateway/internal/testsupport/configtest"
+	"github.com/mytecor/llm-gateway/internal/testsupport/policytest"
+
 	"context"
 	"strings"
 	"sync"
@@ -15,15 +18,15 @@ import (
 
 func continueConfig(t *testing.T) *config.CompiledConfig {
 	t.Helper()
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:2] // a, b
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "a", "b"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 2),
-		policy.ContinueRuleWait("standard", 90*time.Second, "full", 0, 50*time.Millisecond),
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a", "b"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 2),
+		policytest.ContinueRuleWait("standard", 90*time.Second, "full", 0, 50*time.Millisecond),
 	}
 	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
@@ -46,7 +49,7 @@ func TestContinueStreamExcludesUsedProviderAndResharesPartial(t *testing.T) {
 			return ev, nil
 		},
 	}
-	runner := NewRunner(compiled, subsystem.NewCatalog(compiled), executor)
+	runner := NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), executor)
 	request := model.ExecuteRequest{
 		Kind: model.RequestChat,
 		Body: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
@@ -84,7 +87,7 @@ func TestContinueStreamTerminalFailureAfterAllProvidersUsed(t *testing.T) {
 			return ev, nil
 		},
 	}
-	runner := NewRunner(compiled, subsystem.NewCatalog(compiled), executor)
+	runner := NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), executor)
 	request := model.ExecuteRequest{Kind: model.RequestChat, Body: []byte(`{"messages":[{"role":"user","content":"hi"}]}`)}
 	partial := &subsystem.PartialStreamOutput{Content: "x", GotText: true}
 	if _, callErr := runner.ContinueStream(context.Background(), "standard", request, partial, []string{"a", "b"}); callErr == nil {
@@ -152,7 +155,7 @@ func TestRunnerChainRetryReracesWholePoolWithResharedPartial(t *testing.T) {
 			panic("unknown provider")
 		},
 	}
-	runner := NewRunner(compiled, subsystem.NewCatalog(compiled), executor)
+	runner := NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), executor)
 	request := model.ExecuteRequest{Kind: model.RequestChat, Body: []byte(`{"messages":[{"role":"user","content":"hi"}]}`)}
 	ctx := context.Background()
 	partial := &subsystem.PartialStreamOutput{}
@@ -222,7 +225,7 @@ func TestRunnerContinuationFleesCoolingProviderUntilCooldownExpires(t *testing.T
 			return ch, nil
 		},
 	}
-	runner := NewRunner(compiled, subsystem.NewCatalog(compiled), executor)
+	runner := NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), executor)
 	runner.now = func() time.Time { return current }
 	request := model.ExecuteRequest{Kind: model.RequestChat, Body: []byte(`{"messages":[{"role":"user","content":"hi"}]}`)}
 	ctx := context.Background()

@@ -58,7 +58,10 @@ func New(ctx context.Context, cfg *config.CompiledConfig) (*Registry, error) {
 		caps := drv.Capabilities()
 		if caps.Stateful {
 			if sessionStore == nil {
-				sessionStore, err = session.NewStore(cfg.Raw.SessionFile)
+				sessionStore, err = session.NewStoreWithOptions(cfg.Raw.SessionFile, session.StoreOptions{
+					Retention:  cfg.Raw.SessionCheckpointRetention.Duration,
+					MaxRecords: cfg.Raw.SessionCheckpointLimit,
+				})
 				if err != nil {
 					_ = drv.Close()
 					return fail(fmt.Errorf("session_file: %w", err))

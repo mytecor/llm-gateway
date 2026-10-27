@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"path/filepath"
 	"strings"
 	"time"
@@ -61,6 +62,12 @@ func normalizeSettings(cfg Config) (Config, error) {
 	if len(cfg.Providers) == 0 {
 		return Config{}, errors.New("at least one provider is required")
 	}
+	if cfg.SessionCheckpointRetention.Duration < 0 {
+		return Config{}, errors.New("session_checkpoint_retention must not be negative")
+	}
+	if cfg.SessionCheckpointLimit < 0 {
+		return Config{}, errors.New("session_checkpoint_limit must not be negative")
+	}
 	cfg.SessionFile = strings.TrimSpace(cfg.SessionFile)
 	if cfg.SessionFile != "" {
 		path, err := filepath.Abs(cfg.SessionFile)
@@ -77,7 +84,13 @@ func normalizeSettings(cfg Config) (Config, error) {
 // The metrics endpoint is deliberately non-public: it defaults to a dedicated
 // loopback interface (127.0.0.1:9209) distinct from the API port and must not
 // share a port with the API listener.
-func validateMetricsBind(_ string, port int) error {
+func validateMetricsBind(host string, port int) error {
+	if host != "" {
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			return errors.New("metrics_host must be a numeric loopback address")
+		}
+	}
 	if port == 0 {
 		port = 9209
 	}

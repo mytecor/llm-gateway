@@ -21,13 +21,15 @@ type Config struct {
 	// non-secret label) in the request/usage metrics; an empty list disables
 	// client authentication entirely (keyless loopback mode). Key values are
 	// literal secrets or "env.VARNAME" references resolved at load time.
-	ClientAPIKeys          []ClientKey         `json:"client_api_keys"`
-	CatalogRefreshInterval Duration            `json:"catalog_refresh_interval"`
-	StreamIdleTimeout      Duration            `json:"stream_idle_timeout"`
-	AffinityFile           string              `json:"affinity_file,omitempty"`
-	SessionFile            string              `json:"session_file,omitempty"`
-	Providers              []provider.Provider `json:"providers"`
-	Rules                  policy.Rules        `json:"rules"`
+	ClientAPIKeys              []ClientKey         `json:"client_api_keys"`
+	CatalogRefreshInterval     Duration            `json:"catalog_refresh_interval"`
+	StreamIdleTimeout          Duration            `json:"stream_idle_timeout"`
+	AffinityFile               string              `json:"affinity_file,omitempty"`
+	SessionFile                string              `json:"session_file,omitempty"`
+	SessionCheckpointRetention Duration            `json:"session_checkpoint_retention,omitempty"`
+	SessionCheckpointLimit     int                 `json:"session_checkpoint_limit,omitempty"`
+	Providers                  []provider.Provider `json:"providers"`
+	Rules                      policy.Rules        `json:"rules"`
 }
 
 // ClientKey is one named client credential. ID is the non-secret identity
@@ -37,6 +39,13 @@ type Config struct {
 type ClientKey struct {
 	ID  string `json:"id"`
 	Key string `json:"key"`
+}
+
+// PreparedConfig can only be produced by PrepareConfig after normalization and
+// capability discovery. Compilation accepts this type to keep raw specs out of
+// startup and never repeats environment-dependent preparation.
+type PreparedConfig struct {
+	config Config
 }
 
 // CompiledConfig is the application configuration prepared for startup. It
@@ -52,4 +61,24 @@ type CompiledConfig struct {
 	// ClientKeys maps a client key ID (non-secret metrics label) to its
 	// resolved bearer secret. Empty means client authentication is disabled.
 	ClientKeys map[string]string
+}
+
+// RoutingPlan strips startup-only provider settings and credentials from the
+// scheduler input. Compiled routes are immutable after startup.
+func (c *CompiledConfig) RoutingPlan() policy.RuntimePlan {
+	providers := make(map[string]policy.RuntimeProvider, len(c.Providers))
+	for id, p := range c.Providers {
+		providers[id] = policy.RuntimeProvider{
+			Cooldown:      p.Cooldown.Duration,
+			MaxConcurrent: p.MaxConcurrent,
+		}
+	}
+	models := make(map[string]*policy.CompiledRoute, len(c.Models))
+	for id, route := range c.Models {
+		models[id] = route
+	}
+	return policy.RuntimePlan{
+		Models: models, Providers: providers,
+		StreamIdleTimeout: c.Raw.StreamIdleTimeout.Duration,
+	}
 }

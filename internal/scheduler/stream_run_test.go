@@ -1,6 +1,9 @@
 package scheduler
 
 import (
+	"github.com/mytecor/llm-gateway/internal/testsupport/configtest"
+	"github.com/mytecor/llm-gateway/internal/testsupport/policytest"
+
 	"context"
 	"strings"
 	"sync/atomic"
@@ -14,6 +17,7 @@ import (
 )
 
 type recordingStreamSink struct {
+	failure                  *model.CallError
 	events                   []model.StreamEvent
 	begun, completed, failed bool
 	write                    func(model.StreamEvent) bool
@@ -28,12 +32,12 @@ func (s *recordingStreamSink) Write(event model.StreamEvent) bool {
 func (s *recordingStreamSink) KeepAlive(h StreamHeartbeat) bool {
 	return s.keepAlive == nil || s.keepAlive(h)
 }
-func (s *recordingStreamSink) Complete()                   { s.completed = true }
-func (s *recordingStreamSink) Fail(*model.CallError, bool) { s.failed = true }
+func (s *recordingStreamSink) Complete()                         { s.completed = true }
+func (s *recordingStreamSink) Fail(err *model.CallError, _ bool) { s.failed = true; s.failure = err }
 
 func streamRunConfig(t *testing.T, providers []string) *config.CompiledConfig {
 	t.Helper()
-	cfg := config.RulesConfig(t, len(providers), policy.EntryRules(providers, 1))
+	cfg := configtest.RulesConfig(t, len(providers), policytest.EntryRules(providers, 1))
 	cfg.Models["standard"].Admission = policy.AdmissionConfig{MaxInFlight: 1, MaxPending: 1, WaitTimeout: time.Second}
 	cfg.Models["standard"].Continue = policy.ContinueConfig{Enabled: true, Idle: time.Second, Wait: time.Millisecond}
 	return cfg
@@ -90,7 +94,7 @@ func TestRunStreamContinuationWithoutHTTP(t *testing.T) {
 		}
 		return completionStream("recovered", true), nil
 	}}
-	runner := NewRunner(cfg, subsystem.NewCatalog(cfg), executor)
+	runner := NewRunner(cfg.RoutingPlan(), subsystem.NewCatalog(cfg), executor)
 	defer runner.Close()
 	sink := &recordingStreamSink{}
 	runner.RunStream(context.Background(), "standard", streamRunRequest(), time.Now(), sink)
@@ -126,7 +130,7 @@ func TestRunStreamRulesInspectContinuationPrelude(t *testing.T) {
 			return completionStream("recovered", true), nil
 		}
 	}}
-	runner := NewRunner(cfg, subsystem.NewCatalog(cfg), executor)
+	runner := NewRunner(cfg.RoutingPlan(), subsystem.NewCatalog(cfg), executor)
 	defer runner.Close()
 	sink := &recordingStreamSink{}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -158,7 +162,7 @@ func TestRunStreamWriteFailureReleasesWinner(t *testing.T) {
 				calls.Add(1)
 				return completionStream(target.Provider, target.Provider == "b"), nil
 			}}
-			runner := NewRunner(cfg, subsystem.NewCatalog(cfg), executor)
+			runner := NewRunner(cfg.RoutingPlan(), subsystem.NewCatalog(cfg), executor)
 			defer runner.Close()
 			sink := &recordingStreamSink{write: func(event model.StreamEvent) bool {
 				return duringContinuation && !strings.Contains(string(event.Data), `"content":"b"`)
@@ -187,7 +191,7 @@ func TestRunStreamKeepAliveFailureCancelsSelection(t *testing.T) {
 		go func() { <-ctx.Done(); close(upstreamCancelled); close(ch) }()
 		return ch, nil
 	}}
-	runner := NewRunner(cfg, subsystem.NewCatalog(cfg), executor)
+	runner := NewRunner(cfg.RoutingPlan(), subsystem.NewCatalog(cfg), executor)
 	defer runner.Close()
 	sink := &recordingStreamSink{keepAlive: func(StreamHeartbeat) bool { return false }}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -209,7 +213,7 @@ func TestRunStreamSelectionFailurePrecedesBegin(t *testing.T) {
 	executor := &fakeExecutor{stream: func(context.Context, model.Target, model.ExecuteRequest) (<-chan model.StreamEvent, *model.CallError) {
 		return nil, &model.CallError{Class: model.ErrorUpstream, Status: 502}
 	}}
-	runner := NewRunner(cfg, subsystem.NewCatalog(cfg), executor)
+	runner := NewRunner(cfg.RoutingPlan(), subsystem.NewCatalog(cfg), executor)
 	defer runner.Close()
 	sink := &recordingStreamSink{}
 	runner.RunStream(context.Background(), "standard", streamRunRequest(), time.Now(), sink)
@@ -226,7 +230,7 @@ func TestCancelledSelectedBranchReleasesCapacity(t *testing.T) {
 	executor := &fakeExecutor{stream: func(context.Context, model.Target, model.ExecuteRequest) (<-chan model.StreamEvent, *model.CallError) {
 		return completionStream("answer", true), nil
 	}}
-	runner := NewRunner(cfg, subsystem.NewCatalog(cfg), executor)
+	runner := NewRunner(cfg.RoutingPlan(), subsystem.NewCatalog(cfg), executor)
 	defer runner.Close()
 	permit := runner.capacity.Acquire("a")
 	if permit == nil {

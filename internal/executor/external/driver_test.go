@@ -148,8 +148,8 @@ func TestDriverModelsAndEffortResolution(t *testing.T) {
 		t.Fatal(models, err)
 	}
 	for _, tc := range []struct{ model, effort, want string }{
-		{"model", "high", "model[high]"},
-		{"model", "", "model[low]"},
+		{"model", "high", "model"},
+		{"model", "", "model"},
 		{"default", "", ""},
 	} {
 		got, err := engine.Resolve(context.Background(), tc.model, tc.effort)

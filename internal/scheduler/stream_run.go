@@ -41,7 +41,10 @@ type streamRun struct {
 	request                              model.ExecuteRequest
 	started                              time.Time
 	sink                                 StreamSink
-	begun, stopped                       bool
+	begun, stopped, observed             bool
+	runtime                              *routeRuntime
+	release                              func()
+	recoveryErr                          *model.CallError
 	current                              *SelectedStream
 	partial                              *subsystem.PartialStreamOutput
 	continuation                         policy.ContinueConfig
@@ -64,12 +67,13 @@ func (r *Runner) RunStream(ctx context.Context, logical string, request model.Ex
 	repetition, _ := r.RepetitionPolicy(logical)
 	x := &streamRun{
 		runner: r, ctx: ctx, logical: logical, request: request, started: started,
-		sink: sink, partial: &subsystem.PartialStreamOutput{},
+		sink: sink, partial: subsystem.NewPartialStreamOutput(continuation.Enabled, continuation.MaxBufferBytes),
+		runtime:      newRouteRuntime(r.plan.Models[logical]),
 		continuation: continuation, idleTimeout: r.StreamIdleTimeout(logical),
 		rules:            subsystem.NewRuntimeRules(continuation, repetition),
 		chainRetriesLeft: continuation.Retries, holdRecoveriesLeft: max(1, continuation.Retries),
 	}
-	defer x.closeCurrent()
+	defer x.finishRun()
 	if !x.selectWinner() {
 		return
 	}
@@ -93,7 +97,23 @@ func closeSelected(selected *SelectedStream) {
 	}
 }
 
-func (x *streamRun) closeCurrent() { closeSelected(x.current) }
+func (x *streamRun) finishRun() {
+	closeSelected(x.current)
+	if x.release != nil {
+		x.release()
+	}
+	if !x.observed {
+		provider, native := "", ""
+		if x.current != nil {
+			provider, native = x.current.Provider, x.current.Model
+		}
+		status := "failed"
+		if x.stopped || x.ctx.Err() != nil {
+			status = "cancelled"
+		}
+		x.observeRequest(provider, native, status)
+	}
+}
 
 func (x *streamRun) begin() {
 	if !x.begun {
@@ -136,7 +156,7 @@ func (x *streamRun) selectWinner() bool {
 	// this run accepts the winner. Early transport exit cancels and releases it.
 	results := make(chan result)
 	go func() {
-		selected, err := x.runner.SelectStream(x.ctx, x.logical, x.request)
+		selected, err := x.runner.selectAdmittedStream(x.ctx, x.logical, x.request, x.runtime)
 		select {
 		case results <- result{selected, err}:
 		case <-x.ctx.Done():
@@ -159,31 +179,38 @@ func (x *streamRun) selectWinner() bool {
 					"kind", x.request.Kind, "logical_model", x.logical, "stream", true,
 					"status_code", model.CallErrorStatus(result.err), "error_type", string(result.err.Class),
 					"duration_ms", time.Since(x.started).Milliseconds())
-				if x.begun {
-					x.observeRequest("", "", "failed")
-				}
+				x.observeRequest("", "", "failed")
 				x.fail(result.err)
 				return false
 			}
 			x.current = result.selected
+			x.release = x.current.Release
+			x.current.Release = nil
 			return true
 		}
 	}
 }
 
 func (x *streamRun) routeName() string {
-	if route := x.runner.config.Models[x.logical]; route != nil {
+	if route := x.runner.plan.Models[x.logical]; route != nil {
 		return route.Name
 	}
 	return ""
 }
 
 func (x *streamRun) observeRequest(provider, native, status string) {
+	if x.observed {
+		return
+	}
+	x.observed = true
 	x.runner.metrics.ObserveRequest(x.routeName(), x.logical, provider, native, status,
 		telemetry.ClientKeyFrom(x.ctx), time.Since(x.started))
 }
 
 func (x *streamRun) fail(err *model.CallError) {
+	if x.recoveryErr != nil {
+		err = x.recoveryErr
+	}
 	if !x.stopped {
 		x.sink.Fail(err, x.runner.StreamRetryable(x.logical, err))
 	}
@@ -194,14 +221,6 @@ func (x *streamRun) bind(event model.StreamEvent) {
 		x.runner.BindResponsesAffinity(x.logical, x.current.Provider, event.Data, event.Event)
 	}
 }
-
-func (x *streamRun) markFinish(data []byte) {
-	if !x.sawFinishReason && x.request.Kind == model.RequestChat && model.ExtractFinishReason(data) {
-		x.sawFinishReason = true
-	}
-}
-
-func (x *streamRun) observePartial(data []byte) { subsystem.AccumulatePartial(data, x.partial) }
 
 func (x *streamRun) rearmIdle() {
 	if x.idleTimer == nil {
@@ -216,8 +235,8 @@ func (x *streamRun) rearmIdle() {
 	x.idleTimer.Reset(x.idleTimeout)
 }
 
-func (x *streamRun) observe(data []byte) {
-	if summary, ok := model.ExtractUsageFull(data); ok {
+func (x *streamRun) observe(delta model.StreamDelta) {
+	if summary, ok := delta.UsageSummary(); ok {
 		x.inTokens += summary.Input
 		x.outTokens += summary.Output
 		x.cachedTokens += summary.CachedTokens
@@ -229,16 +248,6 @@ func (x *streamRun) observe(data []byte) {
 func (x *streamRun) swapTo(next *SelectedStream) {
 	x.current.Cancel()
 	x.brokenProviders = append(x.brokenProviders, x.current.Provider)
-	// Admission belongs to the client run, so a takeover retains the same
-	// permit until the final winner ends or the transport disconnects.
-	if x.current.Release != nil {
-		if next.Release != nil {
-			next.Release()
-		}
-		next.Release = x.current.Release
-		x.current.Release = nil
-	}
-
 	x.current = next
 	x.sawFinishReason = false
 	x.evaluate(policy.RuleEvent{Kind: policy.RuleStreamStart})
@@ -256,13 +265,16 @@ func (x *streamRun) logContinue(event string, from string, next *SelectedStream)
 }
 
 func (x *streamRun) dispatchContinue(broken []string) *SelectedStream {
-	next, callErr := x.runner.ContinueStream(x.ctx, x.logical, x.request, x.partial, broken)
+	next, callErr := x.runner.continueStream(x.ctx, x.logical, x.request, x.partial, broken, x.runtime)
 	if callErr != nil {
+		if callErr.Class == model.ErrorTimeout && x.runtime.expired() {
+			x.recoveryErr = model.RouteTimeoutError()
+		}
 		telemetry.LogEvent(x.ctx, x.runner.logger, slog.LevelWarn, "llm_continue_failed",
 			"kind", x.request.Kind, "logical_model", x.logical, "stream", true,
 			"from_provider", x.current.Provider,
 			"status_code", model.CallErrorStatus(callErr), "error_type", string(callErr.Class),
-			"attempts", x.current.Attempts,
+			"attempts", x.runtime.attempts,
 		)
 		return nil
 	}
@@ -278,7 +290,7 @@ func (x *streamRun) evaluate(event policy.RuleEvent) policy.RuleDecision {
 	}
 	ctx := policy.RuleContext{
 		Kind: x.request.Kind, LogicalModel: x.logical,
-		Provider: x.current.Provider, Model: x.current.Model, Attempts: x.current.Attempts,
+		Provider: x.current.Provider, Model: x.current.Model, Attempts: x.runtime.attempts,
 		OriginalRequest: x.originalRequest,
 		Output: policy.RuleOutput{
 			Finished: x.sawFinishReason, HasText: x.partial.GotText,
@@ -294,12 +306,24 @@ func (x *streamRun) evaluate(event policy.RuleEvent) policy.RuleDecision {
 }
 
 func (x *streamRun) recoverStream(broken *model.CallError) bool {
-	if x.stopped || x.ctx.Err() != nil {
+	if x.stopped || x.ctx.Err() != nil || x.partial.Overflowed {
 		return false
 	}
 	if x.evaluate(policy.RuleEvent{Kind: policy.RuleFailure, Error: broken}).Action != policy.RuleRecover {
 		return false
 	}
+	x.recoveryErr = nil
+	if x.runtime.expired() {
+		x.recoveryErr = model.RouteTimeoutError()
+		return false
+	}
+	if !x.runtime.hasCallBudget(x.runner.plan.Models[x.logical]) {
+		return false
+	}
+	// The old upstream has failed. Retain route admission, but release its
+	// provider reservation before selecting a successor (possibly the same
+	// provider after cooldown). Cancel is idempotent across swap and cleanup.
+	x.current.Cancel()
 	return x.takeover() || x.holdForRecovery(broken)
 }
 
@@ -343,7 +367,7 @@ func (x *streamRun) takeover() bool {
 }
 
 func (x *streamRun) holdForRecovery(broken *model.CallError) bool {
-	if x.stopped || x.ctx.Err() != nil || x.holdRecoveriesLeft <= 0 {
+	if x.stopped || x.ctx.Err() != nil || x.holdRecoveriesLeft <= 0 || x.runtime.expired() || !x.runtime.hasCallBudget(x.runner.plan.Models[x.logical]) {
 		return false
 	}
 	wait := x.continuation.Wait
@@ -351,6 +375,8 @@ func (x *streamRun) holdForRecovery(broken *model.CallError) bool {
 		return false
 	}
 	x.holdRecoveriesLeft--
+	deadline, stopDeadline := x.runtime.deadlineTimer()
+	defer stopDeadline()
 	horizon := time.NewTimer(wait)
 	defer horizon.Stop()
 	recheck := time.NewTicker(policy.ContinueRecoveryRecheck)
@@ -363,12 +389,15 @@ func (x *streamRun) holdForRecovery(broken *model.CallError) bool {
 		"native_model", x.current.Model,
 		"status_code", model.CallErrorStatus(broken), "error_type", string(broken.Class),
 		"wait_ms", wait.Milliseconds(),
-		"attempts", x.current.Attempts,
+		"attempts", x.runtime.attempts,
 		"duration_ms", time.Since(x.started).Milliseconds(),
 	)
 	for {
 		select {
 		case <-x.ctx.Done():
+			return false
+		case <-deadline:
+			x.recoveryErr = model.RouteTimeoutError()
 			return false
 		case <-horizon.C:
 			telemetry.LogEvent(x.ctx, x.runner.logger, slog.LevelWarn, "llm_stream_hold_exhausted",
@@ -384,7 +413,7 @@ func (x *streamRun) holdForRecovery(broken *model.CallError) bool {
 			}
 			x.rearmIdle()
 		case <-recheck.C:
-			next, callErr := x.runner.ContinueStream(x.ctx, x.logical, x.request, x.partial, nil)
+			next, callErr := x.runner.continueStream(x.ctx, x.logical, x.request, x.partial, nil, x.runtime)
 			if callErr != nil {
 				continue
 			}
@@ -433,7 +462,7 @@ func (x *streamRun) completeStreamSuccess() {
 		"output_tokens", x.outTokens,
 		"cached_tokens", x.cachedTokens,
 		"has_usage", x.hasUsage,
-		"attempts", x.current.Attempts,
+		"attempts", x.runtime.attempts,
 	)
 	x.observeRequest(x.current.Provider, x.current.Model, "success")
 }
@@ -476,7 +505,7 @@ func (x *streamRun) handleStreamAbruptEnd(broken *model.CallError, reason string
 		"native_model", x.current.Model,
 		"status_code", model.CallErrorStatus(broken), "error_type", string(broken.Class),
 		"reason", reason,
-		"attempts", x.current.Attempts,
+		"attempts", x.runtime.attempts,
 		"duration_ms", time.Since(x.started).Milliseconds(),
 		"input_tokens", x.inTokens,
 		"output_tokens", x.outTokens,
@@ -514,7 +543,7 @@ func (x *streamRun) relay() {
 				"kind", x.request.Kind, "logical_model", x.logical, "stream", true,
 				"provider", x.current.Provider,
 				"native_model", x.current.Model,
-				"attempts", x.current.Attempts,
+				"attempts", x.runtime.attempts,
 				"duration_ms", time.Since(x.started).Milliseconds(),
 			)
 			x.observeRequest(x.current.Provider, x.current.Model, "cancelled")
@@ -526,7 +555,7 @@ func (x *streamRun) relay() {
 				"provider", x.current.Provider,
 				"native_model", x.current.Model,
 				"idle_ms", x.idleTimeout.Milliseconds(),
-				"attempts", x.current.Attempts,
+				"attempts", x.runtime.attempts,
 				"duration_ms", time.Since(x.started).Milliseconds(),
 			)
 			x.runner.RecordStreamFailure(x.ctx, x.logical, x.current.Provider, x.current.Model, stall)
@@ -584,7 +613,7 @@ func (x *streamRun) handleEvent(event model.StreamEvent) bool {
 			"provider", x.current.Provider,
 			"native_model", x.current.Model,
 			"status_code", model.CallErrorStatus(event.Err), "error_type", string(event.Err.Class),
-			"attempts", x.current.Attempts,
+			"attempts", x.runtime.attempts,
 			"duration_ms", time.Since(x.started).Milliseconds(),
 			"input_tokens", x.inTokens,
 			"output_tokens", x.outTokens,
@@ -603,15 +632,25 @@ func (x *streamRun) handleEvent(event model.StreamEvent) bool {
 		return false
 	}
 	x.rearmIdle()
-	x.observePartial(event.Data)
-	x.observe(event.Data)
-	x.markFinish(event.Data)
+	delta, err := model.DecodeStreamDelta(event.Data)
+	if err != nil {
+		broken := &model.CallError{Class: model.ErrorInvalid, Status: 502, Cause: err}
+		x.runner.RecordStreamFailure(x.ctx, x.logical, x.current.Provider, x.current.Model, broken)
+		x.observeRequest(x.current.Provider, x.current.Model, "failed")
+		x.fail(broken)
+		return false
+	}
+	if x.request.Kind == model.RequestChat {
+		x.partial.Accumulate(delta)
+		x.sawFinishReason = x.sawFinishReason || delta.Finished()
+	}
+	x.observe(delta)
 	if len(x.rules) > 0 {
-		delta := ""
+		text := ""
 		if x.request.Kind == model.RequestChat {
-			delta = subsystem.StreamTextDelta(string(event.Data))
+			text = delta.Text()
 		}
-		decision := x.evaluate(policy.RuleEvent{Kind: policy.RuleDelta, Delta: delta})
+		decision := x.evaluate(policy.RuleEvent{Kind: policy.RuleDelta, Delta: text})
 		if decision.Action == policy.RuleStop {
 			return x.stopLoop(decision.Error)
 		}

@@ -1,6 +1,9 @@
 package server
 
 import (
+	"github.com/mytecor/llm-gateway/internal/testsupport/configtest"
+	"github.com/mytecor/llm-gateway/internal/testsupport/policytest"
+
 	"bytes"
 	"context"
 	"io"
@@ -21,15 +24,15 @@ import (
 const withUsageBody = `{"id":"chat-1","model":"native-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`
 
 func TestMetricsFlowThroughServer(t *testing.T) {
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "a"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
 		&policy.BalanceRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionBalance}, Strategy: "adaptive"},
-		policy.RaceRuleHelper("standard", 1),
+		policytest.RaceRuleHelper("standard", 1),
 	}
 	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
@@ -44,7 +47,7 @@ func TestMetricsFlowThroughServer(t *testing.T) {
 		},
 	}
 	catalog := subsystem.NewCatalog(compiled)
-	runner := scheduler.NewRunner(compiled, catalog, executor)
+	runner := scheduler.NewRunner(compiled.RoutingPlan(), catalog, executor)
 	api := httptest.NewServer(NewServer(compiled, catalog, runner))
 	defer api.Close()
 
@@ -93,19 +96,39 @@ func TestMetricsFlowThroughServer(t *testing.T) {
 	if !strings.Contains(text, `llm_balance_health{provider="a"}`) {
 		t.Errorf("balance health gauge missing:\n%s", text)
 	}
-	// Dedicated metrics endpoint also serves the same registry over the API
-	// mux without authentication.
+	// The API listener never exposes the operational metrics registry.
 	metricsResp, err := http.Get(api.URL + "/metrics")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer metricsResp.Body.Close()
-	scrapeMetrics, _ := io.ReadAll(metricsResp.Body)
-	if metricsResp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /metrics over API mux returned %d", metricsResp.StatusCode)
+	if metricsResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /metrics over API mux returned %d, want 404", metricsResp.StatusCode)
+	}
+
+	metricsAPI := httptest.NewServer(NewMetricsHandler(m))
+	defer metricsAPI.Close()
+	dedicatedResp, err := http.Get(metricsAPI.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dedicatedResp.Body.Close()
+	scrapeMetrics, _ := io.ReadAll(dedicatedResp.Body)
+	if dedicatedResp.StatusCode != http.StatusOK {
+		t.Fatalf("dedicated GET /metrics returned %d", dedicatedResp.StatusCode)
 	}
 	if !strings.Contains(string(scrapeMetrics), "llm_requests_total") {
-		t.Errorf("GET /metrics over API mux missing family")
+		t.Errorf("dedicated GET /metrics missing family")
+	}
+	for _, path := range []string{"/healthz", "/v1/models", "/admin/models/refresh"} {
+		resp, err := http.Get(metricsAPI.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("dedicated metrics listener exposes %s: %d", path, resp.StatusCode)
+		}
 	}
 }
 
@@ -113,18 +136,18 @@ func TestMetricsFlowThroughServer(t *testing.T) {
 // named client keys configured, requests and token usage split into separate
 // api_key series (the non-secret key ID), and rejected keys stay unauthenticated.
 func TestMetricsPerClientKey(t *testing.T) {
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.ClientAPIKeys = []config.ClientKey{
 		{ID: "primary", Key: "key-a"},
 		{ID: "secondary", Key: "key-b"},
 	}
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "a"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 1),
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 1),
 	}
 	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
@@ -139,7 +162,7 @@ func TestMetricsPerClientKey(t *testing.T) {
 		},
 	}
 	catalog := subsystem.NewCatalog(compiled)
-	runner := scheduler.NewRunner(compiled, catalog, executor)
+	runner := scheduler.NewRunner(compiled.RoutingPlan(), catalog, executor)
 	api := httptest.NewServer(NewServer(compiled, catalog, runner))
 	defer api.Close()
 

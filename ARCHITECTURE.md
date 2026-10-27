@@ -105,14 +105,21 @@ Application configuration belongs to `internal/config`: it decodes JSON, resolve
 secrets, normalizes listener and storage settings, and assembles the startup
 configuration. `internal/provider` prepares drivers and their capabilities.
 Startup explicitly runs decode/secret resolution → `PrepareConfig(ctx, cfg)`
-(normalization and discovery) → `CompileConfig(prepared)` (no processes or
-network) → executor startup. Prepared driver descriptions are passed into the
+(normalization and discovery, returning an opaque `PreparedConfig`) →
+`CompileConfig(prepared)` (no processes or network) → executor startup.
+The compiler cannot accept an unprepared public configuration. Prepared driver descriptions are passed into the
 registry; startup never repeats capability discovery or consults a global cache.
-Legacy spellings are normalized at the JSON boundary; typed rules carry only
-canonical fields. Retry and fallback share the scheduler’s bounded transition
+Known legacy spellings are normalized at the JSON boundary; typed rules carry
+only canonical fields. The provider envelope is strict: unknown options must be
+inside the opaque driver `config`, and conflicting top-level/nested legacy
+settings are rejected. Retry and fallback share the scheduler’s bounded transition
 engine, including applicability filters, backoff and replay-safety guards.
 `internal/policy` owns the routing DSL and compiles rules against prepared
 providers; it does not depend on the application config or load credentials.
+`CompiledConfig.RoutingPlan()` supplies the scheduler only with compiled models,
+provider concurrency/cooldown settings and stream idle timeout. Gateway startup
+owns store construction and persistence paths. Shared test builders and executor
+fakes live under `internal/testsupport`, outside the production dependency graph.
 
 `internal/scheduler/stream_run.go` owns the full client-stream lifetime:
 selection, idle detection, repetition checks, continuation, bounded recovery,
@@ -121,6 +128,9 @@ usage and request observations, and admission release. Its synchronous
 on HTTP. `internal/server/stream.go` implements that interface for SSE, including
 headers, payload sanitization, keep-alive encoding and terminal error frames.
 Transport exit cancels selection and releases the selected provider's capacity.
+The route deadline bounds selection and recovery dispatch, including continuation
+and held-stream recovery; a live selected stream may continue after that deadline
+and remains bounded by its idle timeout.
 
 ---
 
@@ -131,7 +141,7 @@ The gateway delegates stateful operations to independent, thread-safe subsystems
 | Subsystem | Package | Responsibility |
 | --- | --- | --- |
 | **Catalog** | `internal/subsystem/catalog.go` | Refreshes native models and metadata through driver `models` commands. Maintains one last-known-good snapshot per provider for validation, metadata and session resolution. |
-| **Score Store** | `internal/subsystem/score_store.go` | Tracks provider performance using Exponential Weighted Moving Average (EWMA) for Time To First Token (TTFT). Implements $\epsilon$-greedy exploration across candidate providers. |
+| **Score Store** | `internal/subsystem/score_store.go` | Tracks EWMA TTFT and health using at most 601 time buckets per provider. Retention covers the longest compiled balance window; reads of shorter windows never discard shared evidence. Buckets use one-second resolution by default and scale for longer windows. Implements $\epsilon$-greedy exploration across candidates. |
 | **Provider Capacity** | `internal/subsystem/capacity.go` | Owns global provider reservations. Idempotent permits update the live count and metrics together; balancing reads the same count. |
 | **Admission** | `internal/subsystem/admission.go` | Enforces concurrency controls per route/target (`max_in_flight`, `max_pending`, `wait_timeout`) to prevent upstream starvation and bufferbloat. |
 | **Lease Store** | `internal/subsystem/lease.go` | Manages target capacity leases with slow-start recovery to smoothly ramp up traffic after cold starts or outages. |
@@ -202,7 +212,7 @@ flowchart TD
    - **`admission` & `lease`**: Guards upstream providers against saturation via queuing and bounded in-flight requests.
    - **`race`**: Dispatches $N$ parallel requests to the top-ranked providers; the first meaningful byte or completion wins, while losing branches are immediately cancelled.
    - **`hedge`**: Spawns an auxiliary backup request if the primary branch has not returned a first token within the configured duration.
-   - **`timeout`**: Enforces total request duration and idle timeouts between stream chunks.
+   - **`timeout`**: Bounds admission, provider selection and recovery transitions with one deadline; an already selected live stream follows its separately configured idle timeout.
 4. **Error Recovery & Flow Control (`retry`, `fallback`, `continue`, `repetition`)**:
    - **`retry` & `fallback`**: On error (429, 5xx, network timeout), transitions execution to dedicated subroutes with exponential backoff.
    - **`continue`**: Recovers from mid-stream connection drops by feeding already delivered text back into a fallback target.
@@ -259,6 +269,9 @@ When an upstream provider drops a connection mid-stream:
 1. The gateway's stream reader detects the unexpected EOF or network error.
 2. The tokens already flushed to the client are retained in memory.
 3. If a `continue` rule is active, the scheduler activates the fallback route.
+   `continue.max_buffer_bytes` bounds the retained output used for recovery
+   (default 16 MiB). Exceeding the limit disables recovery for that response;
+   normal delivery of the current stream continues.
 4. The delivered partial output is appended as an assistant prefix in the continuation prompt.
 5. The fallback provider seamlessly completes the generation from where the broken stream terminated.
 
@@ -282,7 +295,7 @@ Degenerate models or recursive tool-call traps can trigger infinite output loops
 ### Dedicated Loopback Metrics Architecture
 
 Prometheus metrics are served over a physically separate HTTP listener:
-- **Default Listener (`127.0.0.1:9209`)**: Binds strictly to loopback by default.
+- **Listener (`127.0.0.1:9209` by default)**: Configuration accepts numeric loopback addresses only, including `::1`.
 - **Security Boundary**: The public API port (`:9208`) does **not** expose internal metrics. Scrapes cannot access client inference endpoints, and external clients cannot scrape internal operational telemetry.
 
 ```mermaid

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"sort"
 
 	"github.com/mytecor/llm-gateway/internal/configcompat"
 	"github.com/mytecor/llm-gateway/internal/executor/external"
@@ -55,6 +57,18 @@ var providerCoreKeys = map[string]bool{
 	"config":          true,
 }
 
+// Only these historical driver options are accepted outside config. New/custom
+// options must live inside config, so misspelled gateway settings fail decoding.
+var legacyDriverKeys = map[string]bool{
+	"base_provider": true, "inference_url": true, "api_key": true,
+	"vertex_project_id": true, "vertex_project_number": true,
+	"vertex_region": true, "vertex_auth_credentials": true,
+	"request_timeout_seconds": true, "bifrost_max_retries": true,
+	"allow_private_network": true, "headers": true, "strip_params": true,
+	"set_params": true, "profile": true, "cdp_url": true, "account": true,
+	"state_dir": true, "cdp_header_env": true, "heal": true,
+}
+
 func (p *Provider) UnmarshalJSON(data []byte) error {
 	data, err := configcompat.Aliases(data, map[string][]string{"max_concurrent": {"maxConcurrent"}})
 	if err != nil {
@@ -73,13 +87,25 @@ func (p *Provider) UnmarshalJSON(data []byte) error {
 	if extras == nil {
 		extras = make(map[string]any)
 	}
-	for key, raw := range fields {
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		raw := fields[key]
 		if providerCoreKeys[key] {
 			continue
+		}
+		if !legacyDriverKeys[key] {
+			return fmt.Errorf("unknown provider field %q; driver options belong in config", key)
 		}
 		var value any
 		if err := json.Unmarshal(raw, &value); err != nil {
 			return err
+		}
+		if existing, ok := extras[key]; ok && !reflect.DeepEqual(existing, value) {
+			return fmt.Errorf("conflicting settings %q and %q", "config."+key, key)
 		}
 		extras[key] = value
 		delete(fields, key)

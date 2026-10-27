@@ -34,6 +34,8 @@ type ContinueRule struct {
 	// ContinueConfig.Wait). 0 (default) enables the wait with the built-in
 	// default horizon continueDefaultWait; a negative value is rejected.
 	Wait Duration `json:"wait,omitempty"`
+	// MaxBufferBytes bounds retained output for continuation (default 16 MiB).
+	MaxBufferBytes int `json:"max_buffer_bytes,omitempty"`
 }
 
 // apply validates the takeover policy and stores it in the compiled entry
@@ -68,6 +70,9 @@ func (r *ContinueRule) apply(ctx *stageContext) error {
 	if r.Retries > maxContinueChainRetries {
 		return ctx.errf("continue retries exceeds the cap of %d, got %d", maxContinueChainRetries, r.Retries)
 	}
+	if r.MaxBufferBytes < 0 {
+		return ctx.errf("continue max_buffer_bytes must be non-negative")
+	}
 	wait := r.Wait.Duration
 	if wait < 0 {
 		return ctx.errf("continue wait must be non-negative, got %d", wait)
@@ -76,11 +81,12 @@ func (r *ContinueRule) apply(ctx *stageContext) error {
 		wait = continueDefaultWait
 	}
 	ctx.plan.Continue = ContinueConfig{
-		Enabled: true,
-		Idle:    idle,
-		Reshare: reshare,
-		Retries: r.Retries,
-		Wait:    wait,
+		Enabled:        true,
+		MaxBufferBytes: r.MaxBufferBytes,
+		Idle:           idle,
+		Reshare:        reshare,
+		Retries:        r.Retries,
+		Wait:           wait,
 	}
 	return nil
 }

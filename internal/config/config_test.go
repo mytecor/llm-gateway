@@ -13,7 +13,7 @@ import (
 )
 
 func testConfig() Config {
-	cfg := TestConfig()
+	cfg := defaultConfig()
 	cfg.LogLevel = ""
 	return cfg
 }

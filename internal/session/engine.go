@@ -27,6 +27,7 @@ type ModelInfo = model.ModelInfo
 
 type Spec struct {
 	CWD, Model, System, ResumeID string
+	ReasoningEffort              string
 	Tools                        []FunctionTool
 	CallTool                     func(context.Context, string, json.RawMessage) (string, error)
 }

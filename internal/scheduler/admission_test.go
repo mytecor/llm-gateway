@@ -1,6 +1,9 @@
 package scheduler
 
 import (
+	"github.com/mytecor/llm-gateway/internal/testsupport/configtest"
+	"github.com/mytecor/llm-gateway/internal/testsupport/policytest"
+
 	"context"
 	"sync"
 	"sync/atomic"
@@ -14,14 +17,14 @@ import (
 )
 
 func TestProviderCapacityHeldForSelectedStreamLifetime(t *testing.T) {
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Providers[0].MaxConcurrent = 1
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.MapRuleDirect("standard", []string{"a"}, "model-x", 0),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 1),
+		policytest.FilterModel("standard", "standard"),
+		policytest.MapRuleDirect("standard", []string{"a"}, "model-x", 0),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 1),
 	}
 	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
@@ -39,7 +42,7 @@ func TestProviderCapacityHeldForSelectedStreamLifetime(t *testing.T) {
 		}()
 		return stream, nil
 	}}
-	runner := NewRunner(compiled, subsystem.NewCatalog(compiled), executor)
+	runner := NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), executor)
 
 	first, callErr := runner.SelectStream(context.Background(), "standard", model.ExecuteRequest{Kind: model.RequestChat})
 	if callErr != nil {
@@ -78,12 +81,12 @@ func TestProviderCapacityHeldForSelectedStreamLifetime(t *testing.T) {
 }
 
 func TestInternalRetryExcludesEveryFailedRaceTarget(t *testing.T) {
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.MapRuleDirect("standard", []string{"a", "b", "c"}, "model-x", 0),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 2),
+		policytest.FilterModel("standard", "standard"),
+		policytest.MapRuleDirect("standard", []string{"a", "b", "c"}, "model-x", 0),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 2),
 		&policy.RetryRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionRetry}, Attempts: 1},
 	}
 	compiled, err := config.PrepareAndCompile(cfg)
@@ -102,7 +105,7 @@ func TestInternalRetryExcludesEveryFailedRaceTarget(t *testing.T) {
 		}
 		return nil, &model.CallError{Class: model.ErrorUpstream, Status: 503, Scope: model.FailureScopeProvider}
 	}}
-	runner := NewRunner(compiled, subsystem.NewCatalog(compiled), executor)
+	runner := NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), executor)
 	if _, callErr := runner.Run(context.Background(), "standard", model.ExecuteRequest{Kind: model.RequestChat}); callErr != nil {
 		t.Fatalf("retry did not reach unused target c: %v", callErr)
 	}
@@ -114,15 +117,15 @@ func TestInternalRetryExcludesEveryFailedRaceTarget(t *testing.T) {
 }
 
 func TestInternalHedgeReevaluatesCapacityAtFireTime(t *testing.T) {
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	for i := range cfg.Providers {
 		cfg.Providers[i].MaxConcurrent = 1
 	}
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.MapRuleDirect("standard", []string{"a", "b", "c"}, "model-x", 0),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 1),
+		policytest.FilterModel("standard", "standard"),
+		policytest.MapRuleDirect("standard", []string{"a", "b", "c"}, "model-x", 0),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 1),
 		&policy.HedgeRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionHedge}, After: policy.Duration{Duration: 40 * time.Millisecond}},
 	}
 	compiled, err := config.PrepareAndCompile(cfg)
@@ -142,7 +145,7 @@ func TestInternalHedgeReevaluatesCapacityAtFireTime(t *testing.T) {
 		}
 		return nil, &model.CallError{Class: model.ErrorUpstream, Status: 503, Scope: model.FailureScopeProvider}
 	}}
-	runner := NewRunner(compiled, subsystem.NewCatalog(compiled), executor)
+	runner := NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), executor)
 	done := make(chan *model.CallError, 1)
 	go func() {
 		_, callErr := runner.Run(context.Background(), "standard", model.ExecuteRequest{Kind: model.RequestChat})
@@ -175,12 +178,12 @@ func TestScopedInvalidUpstreamFailureIsReschedulable(t *testing.T) {
 }
 
 func TestStreamingInternalRetryHidesPreWinnerFailure(t *testing.T) {
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.MapRuleDirect("standard", []string{"a", "b"}, "model-x", 0),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 1),
+		policytest.FilterModel("standard", "standard"),
+		policytest.MapRuleDirect("standard", []string{"a", "b"}, "model-x", 0),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 1),
 		&policy.RetryRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionRetry}},
 		&policy.TimeoutRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionTimeout}, Duration: policy.Duration{Duration: 10 * time.Second}},
 	}
@@ -212,7 +215,7 @@ func TestStreamingInternalRetryHidesPreWinnerFailure(t *testing.T) {
 		},
 	}
 
-	runner := NewRunner(compiled, subsystem.NewCatalog(compiled), executor)
+	runner := NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), executor)
 	sel, callErr := runner.SelectStream(context.Background(), "standard", model.ExecuteRequest{Kind: model.RequestChat})
 	if callErr != nil {
 		t.Fatalf("expected SelectStream to succeed via retry, got: class=%q status=%d cause=%v", callErr.Class, callErr.Status, callErr.Cause)

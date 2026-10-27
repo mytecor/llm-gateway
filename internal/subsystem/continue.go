@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+
+	"github.com/mytecor/llm-gateway/internal/model"
 )
 
 // partialToolCall tracks one streamed tool-call entry by its choice delta
@@ -13,6 +15,7 @@ type partialToolCall struct {
 	ID        string
 	Name      string
 	Arguments string
+	arguments *strings.Builder
 }
 
 // partialStreamOutput accumulates the assistant side of a relayed chat
@@ -32,9 +35,43 @@ type PartialStreamOutput struct {
 	// reasoning-only, 3010 reasoning tokens, 0 content) and must not be relayed
 	// as a successful completion; a tool-call completion, by contrast, is a
 	// legitimate turn that must keep relaying as success.
-	GotToolCalls bool
-	ToolCalls    []partialToolCall
-	LastChunkID  string
+	GotToolCalls            bool
+	ToolCalls               []partialToolCall
+	LastChunkID             string
+	Overflowed              bool
+	metadataOnly            bool
+	maxBytes, retainedBytes int
+	content, reasoning      *strings.Builder
+}
+
+const DefaultContinuationBufferBytes = 16 << 20
+
+// NewPartialStreamOutput retains full output only when recovery needs it.
+// Overflow disables recovery while allowing the original stream to finish.
+func NewPartialStreamOutput(retain bool, maxBytes ...int) *PartialStreamOutput {
+	limit := DefaultContinuationBufferBytes
+	if len(maxBytes) > 0 && maxBytes[0] > 0 {
+		limit = maxBytes[0]
+	}
+	return &PartialStreamOutput{metadataOnly: !retain, maxBytes: limit}
+}
+
+func (out *PartialStreamOutput) reserve(n int) bool {
+	if out.metadataOnly || out.Overflowed {
+		return false
+	}
+	if out.maxBytes <= 0 {
+		out.maxBytes = DefaultContinuationBufferBytes
+	}
+	if n > out.maxBytes-out.retainedBytes {
+		out.Overflowed = true
+		out.Content, out.Reasoning = "", ""
+		out.content, out.reasoning = nil, nil
+		out.ToolCalls = nil
+		return false
+	}
+	out.retainedBytes += n
+	return true
 }
 
 type partialStreamOutput = PartialStreamOutput
@@ -50,7 +87,7 @@ type partialStreamOutput = PartialStreamOutput
 // arguments JSON was cut mid-stream (e.g. `{"path":"/tmp/x.go","`) returns
 // false so a truncated call is never marked complete.
 func (out *partialStreamOutput) HasCompleteToolCalls() bool {
-	if out == nil || !out.GotToolCalls || len(out.ToolCalls) == 0 {
+	if out == nil || out.Overflowed || !out.GotToolCalls || len(out.ToolCalls) == 0 {
 		return false
 	}
 	for _, tc := range out.ToolCalls {
@@ -95,79 +132,88 @@ func AccumulatePartial(body []byte, out *PartialStreamOutput) {
 }
 
 func accumulatePartial(body []byte, out *partialStreamOutput) {
-	if len(body) == 0 || out == nil {
+	delta, err := model.DecodeStreamDelta(body)
+	if err == nil && out != nil {
+		out.Accumulate(delta)
+	}
+}
+
+// Accumulate consumes the already decoded semantic event, without re-parsing
+// JSON. Builder.String exposes a snapshot without repeatedly copying prefixes.
+func (out *PartialStreamOutput) Accumulate(event model.StreamDelta) {
+	if event.ID != "" {
+		out.LastChunkID = event.ID
+	}
+	if len(event.Choices) == 0 {
 		return
 	}
-	var envelope struct {
-		ID      string `json:"id"`
-		Choices []struct {
-			Delta struct {
-				Content          string          `json:"content"`
-				Reasoning        string          `json:"reasoning"`
-				ReasoningContent string          `json:"reasoning_content"`
-				ToolCalls        json.RawMessage `json:"tool_calls"`
-			} `json:"delta"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return
-	}
-	if envelope.ID != "" {
-		out.LastChunkID = envelope.ID
-	}
-	if len(envelope.Choices) == 0 {
-		return
-	}
-	delta := envelope.Choices[0].Delta
+	delta := event.Choices[0].Delta
 	if delta.Content != "" {
-		out.Content += delta.Content
 		out.GotText = true
 	}
-	if len(delta.ToolCalls) > 0 && string(delta.ToolCalls) != "[]" && string(delta.ToolCalls) != "null" {
+	if len(delta.ToolCalls) > 0 {
 		out.GotToolCalls = true
-		var calls []struct {
-			Index    *int   `json:"index"`
-			ID       string `json:"id"`
-			Function struct {
-				Name      string `json:"name"`
-				Arguments string `json:"arguments"`
-			} `json:"function"`
+	}
+	if out.metadataOnly || out.Overflowed {
+		if len(delta.ToolCalls) > 0 {
+			out.ToolCalls = []partialToolCall{{Index: delta.ToolCalls[len(delta.ToolCalls)-1].Index}}
 		}
-		if err := json.Unmarshal(delta.ToolCalls, &calls); err == nil {
-			for _, tc := range calls {
-				idx := 0
-				if tc.Index != nil {
-					idx = *tc.Index
-				}
-				found := -1
-				for i := range out.ToolCalls {
-					if out.ToolCalls[i].Index == idx {
-						found = i
-						break
-					}
-				}
-				if found == -1 {
-					out.ToolCalls = append(out.ToolCalls, partialToolCall{Index: idx})
-					found = len(out.ToolCalls) - 1
-				}
-				if tc.ID != "" {
-					out.ToolCalls[found].ID = tc.ID
-				}
-				if tc.Function.Name != "" {
-					out.ToolCalls[found].Name = tc.Function.Name
-				}
-				if tc.Function.Arguments != "" {
-					out.ToolCalls[found].Arguments += tc.Function.Arguments
-				}
-			}
-		}
+		return
 	}
 	reasoning := delta.Reasoning
 	if reasoning == "" {
 		reasoning = delta.ReasoningContent
 	}
+	n := len(delta.Content) + len(reasoning)
+	for _, tc := range delta.ToolCalls {
+		n += len(tc.ID) + len(tc.Function.Name) + len(tc.Function.Arguments) + 64
+	}
+	if !out.reserve(n) {
+		return
+	}
+	if delta.Content != "" {
+		if out.content == nil {
+			out.content = &strings.Builder{}
+			out.content.WriteString(out.Content)
+		}
+		out.content.WriteString(delta.Content)
+		out.Content = out.content.String()
+	}
 	if reasoning != "" {
-		out.Reasoning += reasoning
+		if out.reasoning == nil {
+			out.reasoning = &strings.Builder{}
+			out.reasoning.WriteString(out.Reasoning)
+		}
+		out.reasoning.WriteString(reasoning)
+		out.Reasoning = out.reasoning.String()
+	}
+	for _, tc := range delta.ToolCalls {
+		found := -1
+		for i := range out.ToolCalls {
+			if out.ToolCalls[i].Index == tc.Index {
+				found = i
+				break
+			}
+		}
+		if found < 0 {
+			out.ToolCalls = append(out.ToolCalls, partialToolCall{Index: tc.Index})
+			found = len(out.ToolCalls) - 1
+		}
+		call := &out.ToolCalls[found]
+		if tc.ID != "" {
+			call.ID = tc.ID
+		}
+		if tc.Function.Name != "" {
+			call.Name = tc.Function.Name
+		}
+		if tc.Function.Arguments != "" {
+			if call.arguments == nil {
+				call.arguments = &strings.Builder{}
+				call.arguments.WriteString(call.Arguments)
+			}
+			call.arguments.WriteString(tc.Function.Arguments)
+			call.Arguments = call.arguments.String()
+		}
 	}
 }
 
@@ -193,7 +239,7 @@ func appendPartialChatHistory(body []byte, partial *partialStreamOutput) ([]byte
 	// into the text with an empty call block below" symptom (observed on
 	// `standard`). Leave the request untouched so the caller can surface a
 	// clean retryable error instead of a malformed continuation.
-	if partial == nil || (!partial.GotText && partial.Reasoning == "") || partial.GotToolCalls {
+	if partial == nil || partial.Overflowed || (!partial.GotText && partial.Reasoning == "") || partial.GotToolCalls {
 		return body, nil
 	}
 	var envelope struct {

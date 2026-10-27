@@ -1,7 +1,8 @@
 # Rust CDP web driver
 
 One binary executes YAML site profiles and embeds `universal-self-healing-parser`
-from the sibling checkout `../parser`. The driver and its browser integration
+from the pinned source snapshot in `vendor/universal-self-healing-parser`
+(see its `UPSTREAM.md` for the upstream revision). The driver and its browser integration
 harness are written in Rust; the harness launches an installed Chromium/Chrome
 directly. CDP transport and session dispatch use the native Rust
 `playwright-cdp` crate (pinned to 0.3.0). The adapter retains HTTP discovery with

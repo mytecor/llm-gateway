@@ -119,7 +119,8 @@ type SemaphoreConfig struct {
 // content as assistant context so the continuation preserves the work).
 // Enabled true means the action was declared on the entry route.
 type ContinueConfig struct {
-	Enabled bool
+	MaxBufferBytes int
+	Enabled        bool
 	// Idle is the stall threshold below which the takeover triggers. It
 	// replaces the route-wide stream idle timeout for the relayed winner.
 	Idle time.Duration

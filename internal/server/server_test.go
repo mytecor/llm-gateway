@@ -1,6 +1,9 @@
 package server
 
 import (
+	"github.com/mytecor/llm-gateway/internal/testsupport/configtest"
+	"github.com/mytecor/llm-gateway/internal/testsupport/policytest"
+
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,14 +23,14 @@ import (
 )
 
 func TestServerAuthModelsAndLogicalRewrite(t *testing.T) {
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "a"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 1),
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 1),
 	}
 	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
@@ -45,7 +48,7 @@ func TestServerAuthModelsAndLogicalRewrite(t *testing.T) {
 		},
 	}
 	catalog := subsystem.NewCatalog(compiled)
-	server := httptest.NewServer(NewServer(compiled, catalog, scheduler.NewRunner(compiled, catalog, executor)))
+	server := httptest.NewServer(NewServer(compiled, catalog, scheduler.NewRunner(compiled.RoutingPlan(), catalog, executor)))
 	defer server.Close()
 
 	unauthorized, err := http.Get(server.URL + "/v1/models")
@@ -104,7 +107,7 @@ func TestServerAuthModelsAndLogicalRewrite(t *testing.T) {
 }
 
 func TestUnknownModelFailsBeforeExecutor(t *testing.T) {
-	compiled := config.RaceOnlyConfig(t)
+	compiled := configtest.RaceOnlyConfig(t)
 	called := false
 	executor := &fakeExecutor{
 		do: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) {
@@ -117,7 +120,7 @@ func TestUnknownModelFailsBeforeExecutor(t *testing.T) {
 		},
 	}
 	catalog := subsystem.NewCatalog(compiled)
-	server := httptest.NewServer(NewServer(compiled, catalog, scheduler.NewRunner(compiled, catalog, executor)))
+	server := httptest.NewServer(NewServer(compiled, catalog, scheduler.NewRunner(compiled.RoutingPlan(), catalog, executor)))
 	defer server.Close()
 	response, err := http.Post(server.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"provider/model","messages":[{"role":"user","content":"hi"}]}`))
 	if err != nil {
@@ -130,14 +133,14 @@ func TestUnknownModelFailsBeforeExecutor(t *testing.T) {
 }
 
 func TestServerStreamsWinnerWithLogicalModel(t *testing.T) {
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "a"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 1),
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 1),
 	}
 	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
@@ -155,7 +158,7 @@ func TestServerStreamsWinnerWithLogicalModel(t *testing.T) {
 		},
 	}
 	catalog := subsystem.NewCatalog(compiled)
-	server := httptest.NewServer(NewServer(compiled, catalog, scheduler.NewRunner(compiled, catalog, executor)))
+	server := httptest.NewServer(NewServer(compiled, catalog, scheduler.NewRunner(compiled.RoutingPlan(), catalog, executor)))
 	defer server.Close()
 	response, err := http.Post(server.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"standard","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
 	if err != nil {
@@ -176,7 +179,7 @@ func TestServerStreamsWinnerWithLogicalModel(t *testing.T) {
 }
 
 func TestManualRefreshDoesNotExposeProviderNamespace(t *testing.T) {
-	compiled := config.RaceOnlyConfig(t)
+	compiled := configtest.RaceOnlyConfig(t)
 	compiled.ClientKeys = map[string]string{"primary": "client-secret"}
 	catalog := subsystem.NewCatalogWithSources(map[string]subsystem.CatalogSource{
 		"internal-provider-id": {Lister: model.ModelListFunc(func(context.Context) ([]model.ModelInfo, error) { return nil, errors.New("discovery unavailable") })},
@@ -187,7 +190,7 @@ func TestManualRefreshDoesNotExposeProviderNamespace(t *testing.T) {
 			return nil, nil
 		},
 	}
-	server := httptest.NewServer(NewServer(compiled, catalog, scheduler.NewRunner(compiled, catalog, executor)))
+	server := httptest.NewServer(NewServer(compiled, catalog, scheduler.NewRunner(compiled.RoutingPlan(), catalog, executor)))
 	defer server.Close()
 	request, _ := http.NewRequest(http.MethodPost, server.URL+"/admin/models/refresh", nil)
 	request.Header.Set("Authorization", "Bearer client-secret")
@@ -203,14 +206,14 @@ func TestManualRefreshDoesNotExposeProviderNamespace(t *testing.T) {
 }
 
 func TestServerReportsFailureAfterStreamingWinner(t *testing.T) {
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "a"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 1),
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 1),
 	}
 	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
@@ -227,7 +230,7 @@ func TestServerReportsFailureAfterStreamingWinner(t *testing.T) {
 		},
 	}
 	catalog := subsystem.NewCatalog(compiled)
-	server := httptest.NewServer(NewServer(compiled, catalog, scheduler.NewRunner(compiled, catalog, executor)))
+	server := httptest.NewServer(NewServer(compiled, catalog, scheduler.NewRunner(compiled.RoutingPlan(), catalog, executor)))
 	defer server.Close()
 	response, err := http.Post(server.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"standard","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
 	if err != nil {
@@ -243,13 +246,13 @@ func TestServerReportsFailureAfterStreamingWinner(t *testing.T) {
 
 func affinityServerConfig(t *testing.T) *config.CompiledConfig {
 	t.Helper()
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "a"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
 		&policy.AffinityRule{
 			RuleBase:          policy.RuleBase{Route: "standard", Action: policy.ActionAffinity},
 			Sources:           []string{"responses.conversation", "responses.previous_response_id"},
@@ -257,7 +260,7 @@ func affinityServerConfig(t *testing.T) *config.CompiledConfig {
 			OnMissing:         "ignore",
 			OnProviderFailure: "fail-closed",
 		},
-		policy.RaceRuleHelper("standard", 1),
+		policytest.RaceRuleHelper("standard", 1),
 	}
 	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
@@ -277,7 +280,7 @@ func TestServerBindsResponseAffinityNonStreaming(t *testing.T) {
 		},
 	}
 	catalog := subsystem.NewCatalog(compiled)
-	runner := scheduler.NewRunner(compiled, catalog, executor)
+	runner := scheduler.NewRunner(compiled.RoutingPlan(), catalog, executor)
 	server := httptest.NewServer(NewServer(compiled, catalog, runner))
 	defer server.Close()
 	response, err := http.Post(server.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"standard","input":"hi"}`))
@@ -317,7 +320,7 @@ func TestServerBindsResponseAffinityStreaming(t *testing.T) {
 		},
 	}
 	catalog := subsystem.NewCatalog(compiled)
-	runner := scheduler.NewRunner(compiled, catalog, executor)
+	runner := scheduler.NewRunner(compiled.RoutingPlan(), catalog, executor)
 	server := httptest.NewServer(NewServer(compiled, catalog, runner))
 	defer server.Close()
 	response, err := http.Post(server.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"standard","stream":true,"input":"hi"}`))
@@ -354,7 +357,7 @@ func TestServerResponsesAffinityPinsSecondRequest(t *testing.T) {
 		},
 	}
 	catalog := subsystem.NewCatalog(compiled)
-	runner := scheduler.NewRunner(compiled, catalog, executor)
+	runner := scheduler.NewRunner(compiled.RoutingPlan(), catalog, executor)
 	server := httptest.NewServer(NewServer(compiled, catalog, runner))
 	defer server.Close()
 	// First request binds resp_1 -> a.
@@ -397,7 +400,7 @@ func TestServerResponsesAffinityConversationPinsSecondRequest(t *testing.T) {
 		},
 	}
 	catalog := subsystem.NewCatalog(compiled)
-	runner := scheduler.NewRunner(compiled, catalog, executor)
+	runner := scheduler.NewRunner(compiled.RoutingPlan(), catalog, executor)
 	server := httptest.NewServer(NewServer(compiled, catalog, runner))
 	defer server.Close()
 	// First request binds conv_1 -> a.

@@ -182,7 +182,7 @@ func (r *Runtime) Exchange(ctx context.Context, req Request, emit func(Event) er
 			state.cwd = cwd
 			state.toolHash = hash
 			if state.process == nil {
-				spec := Spec{CWD: cwd, Model: req.Model, System: systemPrompt(messages), Tools: tools}
+				spec := Spec{CWD: cwd, Model: req.Model, ReasoningEffort: req.ReasoningEffort, System: systemPrompt(messages), Tools: tools}
 				if useResume {
 					spec.ResumeID = state.resumeID
 				}

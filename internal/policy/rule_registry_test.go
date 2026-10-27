@@ -9,7 +9,7 @@ import "testing"
 // strawman action reuses race semantics so the pipeline stays valid.
 func TestRuleRegistryIsTheOnlyExtensionPoint(t *testing.T) {
 	const strawAction = "straw"
-	ruleRegistry[strawAction] = ruleDescriptor{rank: 6, new: func() Rule { return &RaceRule{} }}
+	ruleRegistry[strawAction] = ruleDescriptor{new: func() Rule { return &RaceRule{} }}
 	defer delete(ruleRegistry, strawAction)
 
 	// Decode path: the envelope discriminates into the registered concrete

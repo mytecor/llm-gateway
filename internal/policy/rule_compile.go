@@ -32,14 +32,13 @@ type stageState struct {
 }
 
 // stageContext is the explicit compiler/builder state handed to every rule's
-// apply method. It carries the shared per-rule identity (index, route, action,
-// canonical rank), the provider registry and the per-route stage and compiled
+// apply method. It carries the shared per-rule identity (index, route, action),
+// the provider registry and the per-route stage and compiled
 // route being built. Concrete rules read and mutate only what they own.
 type stageContext struct {
 	index     int
 	route     string
 	action    string
-	rank      int
 	providers map[string]provider.Provider
 	st        *stageState
 	plan      *CompiledRoute
@@ -230,7 +229,6 @@ func compileRoutes(rules []Rule, providers map[string]provider.Provider) (*route
 				index:     indices[name][offset],
 				route:     name,
 				action:    action,
-				rank:      ruleRegistry[action].rank,
 				providers: providers,
 				st:        st,
 				plan:      plan,

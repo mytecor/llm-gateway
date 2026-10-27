@@ -12,11 +12,10 @@ import (
 )
 
 // CompileConfig compiles prepared providers without launching processes or making network calls.
-func CompileConfig(cfg Config) (*CompiledConfig, error) {
-	var err error
-	cfg, err = normalizeSettings(cfg)
-	if err != nil {
-		return nil, err
+func CompileConfig(prepared PreparedConfig) (*CompiledConfig, error) {
+	cfg := prepared.config
+	if len(cfg.Providers) == 0 {
+		return nil, errors.New("prepare configuration before compilation")
 	}
 
 	compiled := &CompiledConfig{
@@ -73,26 +72,26 @@ func CompileConfig(cfg Config) (*CompiledConfig, error) {
 // PrepareConfig performs environment-dependent normalization and driver discovery.
 // Its returned configuration contains explicit descriptions consumed by compilation
 // and startup, so neither phase needs a second discovery handshake.
-func PrepareConfig(ctx context.Context, cfg Config) (Config, error) {
+func PrepareConfig(ctx context.Context, cfg Config) (PreparedConfig, error) {
 	cfg, err := normalizeSettings(cfg)
 	if err != nil {
-		return Config{}, err
+		return PreparedConfig{}, err
 	}
 	cfg.Providers = append([]provider.Provider(nil), cfg.Providers...)
 	seen := make(map[string]bool)
 	for i, p := range cfg.Providers {
 		id := strings.TrimSpace(p.ID)
 		if seen[id] {
-			return Config{}, fmt.Errorf("duplicate provider id %q", id)
+			return PreparedConfig{}, fmt.Errorf("duplicate provider id %q", id)
 		}
 		seen[id] = true
 		prepared, err := provider.Prepare(ctx, p)
 		if err != nil {
-			return Config{}, err
+			return PreparedConfig{}, err
 		}
 		cfg.Providers[i] = prepared
 	}
-	return cfg, nil
+	return PreparedConfig{config: cfg}, nil
 }
 
 // PrepareAndCompile is a convenience for callers that need both phases.

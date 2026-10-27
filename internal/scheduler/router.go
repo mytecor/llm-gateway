@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mytecor/llm-gateway/internal/config"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/subsystem"
@@ -16,7 +15,7 @@ import (
 )
 
 type Runner struct {
-	config   *config.CompiledConfig
+	plan     policy.RuntimePlan
 	catalog  *subsystem.Catalog
 	executor model.Executor
 	logger   *slog.Logger
@@ -27,13 +26,14 @@ type Runner struct {
 	// until which that pair is excluded from candidate pools. The window is
 	// lazy: no timer rearms it, entries are checked at request time and an
 	// expired entry is dropped on the pair's next success.
-	cooling   map[cooldownKey]time.Time
-	leases    *subsystem.LeaseStore
-	scores    *subsystem.ScoreStore
-	capacity  *subsystem.ProviderCapacity
-	affinity  *subsystem.AffinityStore
-	metrics   *telemetry.Metrics
-	admission *subsystem.AdmissionController
+	cooling      map[cooldownKey]time.Time
+	leases       *subsystem.LeaseStore
+	scores       *subsystem.ScoreStore
+	capacity     *subsystem.ProviderCapacity
+	affinity     *subsystem.AffinityStore
+	metrics      *telemetry.Metrics
+	admission    *subsystem.AdmissionController
+	ownsAffinity bool
 }
 
 // cooldownKey identifies the unit of provider failure isolation: one native
@@ -44,40 +44,65 @@ type cooldownKey struct {
 	model    string
 }
 
-func NewRunner(config *config.CompiledConfig, catalog *subsystem.Catalog, executor model.Executor) *Runner {
-	return NewRunnerMetrics(config, catalog, executor, telemetry.NewMetrics())
+// Dependencies are owned by the application composition root. Defaults in New
+// are in-memory and make isolated runners straightforward to construct.
+type Dependencies struct {
+	Catalog   *subsystem.Catalog
+	Executor  model.Executor
+	Logger    *slog.Logger
+	Metrics   *telemetry.Metrics
+	Capacity  *subsystem.ProviderCapacity
+	Scores    *subsystem.ScoreStore
+	Leases    *subsystem.LeaseStore
+	Affinity  *subsystem.AffinityStore
+	Admission *subsystem.AdmissionController
 }
 
-func NewRunnerMetrics(config *config.CompiledConfig, catalog *subsystem.Catalog, executor model.Executor, metrics *telemetry.Metrics) *Runner {
-	if metrics == nil {
-		metrics = telemetry.NewMetrics()
+func NewRunner(plan policy.RuntimePlan, catalog *subsystem.Catalog, executor model.Executor) *Runner {
+	return New(plan, Dependencies{Catalog: catalog, Executor: executor})
+}
+
+func NewRunnerMetrics(plan policy.RuntimePlan, catalog *subsystem.Catalog, executor model.Executor, metrics *telemetry.Metrics) *Runner {
+	return New(plan, Dependencies{Catalog: catalog, Executor: executor, Metrics: metrics})
+}
+
+func New(plan policy.RuntimePlan, deps Dependencies) *Runner {
+	if deps.Logger == nil {
+		deps.Logger = telemetry.NewGatewayLogger("silent")
 	}
-	logger := config.Logger
-	if logger == nil {
-		logger = telemetry.NewGatewayLogger("info")
+	if deps.Metrics == nil {
+		deps.Metrics = telemetry.NewMetrics()
+	}
+	if deps.Capacity == nil {
+		deps.Capacity = subsystem.NewProviderCapacity(deps.Metrics)
+	}
+	if deps.Scores == nil {
+		deps.Scores = subsystem.NewScoreStoreWithOptions(time.Now, deps.Capacity, subsystem.ScoreStoreOptions{MaxWindow: plan.MaxBalanceWindow()})
+	}
+	if deps.Leases == nil {
+		deps.Leases = subsystem.NewLeaseStore(time.Now)
+	}
+	ownsAffinity := deps.Affinity == nil
+	if deps.Affinity == nil {
+		deps.Affinity = subsystem.NewAffinityStore(time.Now, "", nil)
+	}
+	if deps.Admission == nil {
+		deps.Admission = subsystem.NewAdmissionController(deps.Metrics, time.Now)
 	}
 	runner := &Runner{
-		config: config, catalog: catalog, executor: executor, logger: logger,
+		plan: plan, catalog: deps.Catalog, executor: deps.Executor, logger: deps.Logger,
 		now: time.Now, sleep: sleepContext, cooling: make(map[cooldownKey]time.Time),
-		metrics: metrics,
+		metrics: deps.Metrics, capacity: deps.Capacity, scores: deps.Scores,
+		leases: deps.Leases, affinity: deps.Affinity, admission: deps.Admission, ownsAffinity: ownsAffinity,
 	}
-	runner.leases = subsystem.NewLeaseStore(runner.now)
-	runner.capacity = subsystem.NewProviderCapacity(runner.metrics)
-	runner.scores = subsystem.NewScoreStore(runner.now, runner.capacity)
-	runner.affinity = subsystem.NewAffinityStore(runner.now, config.Raw.AffinityFile, func(err error) {
-		telemetry.LogEvent(context.Background(), config.Logger, slog.LevelError, "affinity_persistence_failed", "detail", telemetry.SafeLogDetail(err.Error()))
-	})
-	runner.admission = subsystem.NewAdmissionController(runner.metrics, runner.now)
-	if registry, ok := executor.(interface {
+	if registry, ok := deps.Executor.(interface {
 		UseCatalog(model.ProviderModelLister)
 	}); ok {
-		registry.UseCatalog(catalog)
+		registry.UseCatalog(deps.Catalog)
 	}
-	if config != nil {
-		for id, p := range config.Providers {
-			runner.capacity.SetLimit(id, p.MaxConcurrent)
-			runner.metrics.ObserveProviderEWMATTFT(id, time.Duration(runner.scores.LatencyOf(id)*float64(time.Second)))
-		}
+	for id, p := range plan.Providers {
+		runner.capacity.SetLimit(id, p.MaxConcurrent)
+		runner.metrics.ObserveProviderEWMATTFT(id, time.Duration(runner.scores.LatencyOf(id)*float64(time.Second)))
 	}
 	return runner
 }
@@ -141,20 +166,12 @@ func (r *Runner) observeBranchCancelled(res *branchResult) {
 // are health-neutral, exactly like cancelled branches. The lease (if enabled)
 // is released per the entry route's ReleaseOn policy, and both the branch
 // attempt counter and the dedicated stream-break counter are observed.
-// RecordStreamFailure feeds a mid-stream (post-selection) failure of the
-// winning stream back into the same health machinery that pre-selection branch
-// failures use. The scheduler has already returned by the time the winner's
-// stream breaks, so without this call the provider would keep a clean health
-// record no matter how often it breaks streams mid-flight. Cancelled streams
-// are health-neutral, exactly like cancelled branches. The lease (if enabled)
-// is released per the entry route's ReleaseOn policy, and both the branch
-// attempt counter and the dedicated stream-break counter are observed.
 func (r *Runner) RecordStreamFailure(ctx context.Context, logical, provider, nativeModel string, callErr *model.CallError) {
 	if callErr == nil || callErr.Class == model.ErrorCancelled || provider == "" {
 		return
 	}
 	r.record(ctx, provider, nativeModel, callErr)
-	if entry, ok := r.config.Models[logical]; ok {
+	if entry, ok := r.plan.Models[logical]; ok {
 		r.observeLeaseFailure(logical, entry, provider, callErr)
 	}
 	r.scores.Observe(provider, callErr, 0)
@@ -180,13 +197,13 @@ func (r *Runner) StreamRetryable(logical string, callErr *model.CallError) bool 
 	if callErr != nil && callErr.Replay == model.ReplayUnknown {
 		return false
 	}
-	if route, ok := r.config.Models[logical]; ok && route.Stateful {
+	if route, ok := r.plan.Models[logical]; ok && route.Stateful {
 		return false
 	}
 	if callErr == nil {
 		return false
 	}
-	entry, ok := r.config.Models[logical]
+	entry, ok := r.plan.Models[logical]
 	if !ok {
 		return policy.AllRetryableClasses()[callErr.Class]
 	}
@@ -215,17 +232,17 @@ func (r *Runner) StreamRetryable(logical string, callErr *model.CallError) bool 
 // Close shuts down the runner's persistent state: the affinity store flushes
 // any recent mappings so a graceful restart does not lose them.
 func (r *Runner) Close() error {
-	if r.affinity != nil {
+	if r.ownsAffinity && r.affinity != nil {
 		return r.affinity.Close()
 	}
 	return nil
 }
 
 func (r *Runner) admit(ctx context.Context, logical string, runtime *routeRuntime) (func(), *model.CallError) {
-	if r.admission == nil || r.config == nil {
+	if r.admission == nil || r.plan.Models == nil {
 		return func() {}, nil
 	}
-	entry, ok := r.config.Models[logical]
+	entry, ok := r.plan.Models[logical]
 	if !ok {
 		return func() {}, nil
 	}
@@ -249,7 +266,7 @@ func (r *Runner) Run(ctx context.Context, logical string, request model.ExecuteR
 // RunWithResult executes the non-streaming route graph and also reports the
 // winning provider, needed for lease and affinity bookkeeping.
 func (r *Runner) RunWithResult(ctx context.Context, logical string, request model.ExecuteRequest) (*model.RunOutcome, *model.CallError) {
-	entry, ok := r.config.Models[logical]
+	entry, ok := r.plan.Models[logical]
 	if !ok {
 		return nil, &model.CallError{Class: model.ErrorInvalid, Status: 404, Scope: model.FailureScopeRequest}
 	}
@@ -268,19 +285,6 @@ func (r *Runner) RunWithResult(ctx context.Context, logical string, request mode
 		ttft = outcome.ttft
 	}
 	return &model.RunOutcome{Body: outcome.body, Provider: outcome.provider, Model: outcome.model, Attempts: outcome.attempts, TTFT: ttft}, nil
-}
-
-// runPlan resolves the request-level entry route for the logical model and
-// executes the compiled route graph with one request-wide runtime: the
-// deadline, the semaphore budget and the used-provider set are shared by every
-// transition and never reset when entering a subroute.
-func (r *Runner) runPlan(ctx context.Context, logical string, request model.ExecuteRequest, streamMode bool) *routeOutcome {
-	entry, ok := r.config.Models[logical]
-	if !ok {
-		return &routeOutcome{err: &model.CallError{Class: model.ErrorInvalid, Status: 404}}
-	}
-	runtime := newRouteRuntime(entry)
-	return r.executeRoute(ctx, logical, entry, request, streamMode, runtime)
 }
 
 // executeRoute uses one bounded transition engine for retry and fallback.
@@ -325,7 +329,7 @@ func (r *Runner) buildPool(logical string, route *policy.CompiledRoute, request 
 	if route.Affinity.Enabled && request.Kind == model.RequestResponses {
 		if id := subsystem.RequestAffinityID(request.Body, request.Kind, route.Affinity.Sources); id != "" {
 			if provider, ok := r.affinity.Lookup(id); ok {
-				if _, exists := r.config.Providers[provider]; !exists {
+				if _, exists := r.plan.Providers[provider]; !exists {
 					// A mapping can outlive a configuration change that removes
 					// or renames its provider. Only that structural case is
 					// treated as missing affinity; runtime resolution failures
@@ -524,7 +528,7 @@ func (r *Runner) record(ctx context.Context, providerID, nativeModel string, cal
 	if callErr == nil {
 		delete(r.cooling, key)
 	} else if policy.AllRetryableClasses()[callErr.Class] {
-		newUntil = r.now().Add(r.config.Providers[providerID].Cooldown.Duration)
+		newUntil = r.now().Add(r.plan.Providers[providerID].Cooldown)
 		r.cooling[key] = newUntil
 	}
 	r.mu.Unlock()
@@ -552,7 +556,7 @@ func (r *Runner) record(ctx context.Context, providerID, nativeModel string, cal
 		"provider", providerID,
 		"native_model", nativeModel,
 		"error_type", string(callErr.Class),
-		"cooldown_ms", int64(r.config.Providers[providerID].Cooldown.Duration.Milliseconds()),
+		"cooldown_ms", int64(r.plan.Providers[providerID].Cooldown.Milliseconds()),
 	)
 }
 
@@ -596,7 +600,7 @@ func (r *Runner) observeLeaseWinner(logical string, route *policy.CompiledRoute,
 // affinityBindTTL returns the affinity TTL for a logical model when affinity is
 // enabled, so the server can persist response id mappings.
 func (r *Runner) AffinityBindTTL(logical string) (time.Duration, bool) {
-	entry, ok := r.config.Models[logical]
+	entry, ok := r.plan.Models[logical]
 	if !ok || !entry.Affinity.Enabled {
 		return 0, false
 	}
@@ -716,7 +720,7 @@ func (r *Runner) probeStream(ctx context.Context, target model.Target, request m
 
 // ModelDetails returns optional native metadata for a single-target logical model.
 func (r *Runner) ModelDetails(ctx context.Context, logical string) (model.ModelInfo, error) {
-	route, ok := r.config.Models[logical]
+	route, ok := r.plan.Models[logical]
 	if !ok || len(route.Pool) != 1 {
 		return model.ModelInfo{}, nil
 	}

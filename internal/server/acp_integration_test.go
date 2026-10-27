@@ -378,7 +378,7 @@ func newNativeServer(t *testing.T, kind, mode string, timeout time.Duration, sto
 		t.Fatal(err)
 	}
 	catalog := subsystem.NewCatalog(compiled)
-	runner := scheduler.NewRunner(compiled, catalog, executors)
+	runner := scheduler.NewRunner(compiled.RoutingPlan(), catalog, executors)
 	close := func() { _ = executors.Close(); _ = runner.Close() }
 	t.Cleanup(close)
 	return NewServer(compiled, catalog, runner), close

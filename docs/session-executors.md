@@ -104,7 +104,14 @@ an attached exchange cancels its turn; completing an exchange with tool_calls
 `session_file` (configured at the top level of the gateway config, alongside `affinity_file`) enables atomic checkpoint persistence across all stateful providers. The file contains
 native resume IDs, CWD, history count/hash and toolset hash, not prompts or tool
 results. Pending work is never
-persisted. This checkpoint format is version 2; use a new file path when moving
+persisted. Idle eviction removes native processes and runtime entries; checkpoints
+are restored lazily by conversation key. Metadata retention is separate from the
+process TTL: `session_checkpoint_retention` defaults to `168h` and
+`session_checkpoint_limit` defaults to 10,000 records across all providers.
+These bounds also apply to in-memory checkpoints when `session_file` is omitted.
+The current checkpoint format is version 3 and includes completion timestamps.
+Version 2 files remain readable, using their file modification time for the
+initial age; subsequent writes use version 3. Use a new file path when moving
 from agentrun-openai, whose version 1 keys do not include gateway client/model
 identity. Legacy files are rejected rather than silently reusing another scope. Completed sessions can resume after eviction/restart; a missing native
 session falls back once to the supplied conversation history.

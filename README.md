@@ -58,12 +58,30 @@ Authorization: Bearer <client_api_key>
 ### Building
 
 ```sh
-# Build binary to bin/llm-gateway
+# Gateway + default HTTP driver (Go only)
 make build
 
-# Or directly with Go:
-go build -o bin/llm-gateway ./cmd/llm-gateway
+# Gateway core only; install the required drivers separately
+make build-core
+
+# All bundled drivers, including Rust web-driver
+make build-all
+
+# Independently build selected drivers
+make build-drivers DRIVERS="http acp"
 ```
+
+The core and drivers are independent executables. Driver lookup uses explicit
+configuration, environment overrides, the executable directory, or `PATH`; it
+does not build source code during normal startup. Development-only source
+builds require explicit `LLM_GATEWAY_DEV_BUILD=1`. The web driver includes its parser
+source snapshot, so a sibling checkout is unnecessary. `make test-unit` checks
+the core unit packages without drivers; `make test` also builds drivers and runs
+the core integration and standalone driver suites.
+
+The default Docker image includes the HTTP and ACP drivers; `docker build
+--target core .` produces a core-only image. `package.nix` packages the core only;
+install drivers alongside it or set `LLM_GATEWAY_DRIVERS_DIR`.
 
 ### Validating Configuration
 
@@ -86,8 +104,9 @@ make check-config
 Configuration is specified in JSON format (see [configs/config.example.json](configs/config.example.json) for a comprehensive example). Secret values support loading from environment variables using the `env.` prefix (e.g., `"api_key": "env.OPENAI_API_KEY"`).
 
 The canonical format uses `snake_case` gateway settings and a nested provider
-`config` object for driver-specific settings. Legacy top-level driver settings
-and camelCase aliases remain readable; conflicting alias values are rejected.
+`config` object for driver-specific settings. Known legacy top-level driver settings and camelCase aliases remain readable;
+conflicting values are rejected. Unknown provider envelope fields are errors;
+custom driver options belong inside `config`.
 
 ### Example Configuration
 
@@ -254,6 +273,10 @@ Each client run creates its own rule instances from the compiled policy.
 normalized tail; `continue` evaluates failures and missing tool-call finish
 markers. A provider takeover sends a stream-start event to reset detector state.
 Buffered and live chunks go through the same evaluation path.
+`continue.max_buffer_bytes` limits retained recovery output (default 16 MiB).
+If it fills, recovery is disabled for that response while the current stream
+continues. The route timeout bounds selection and recovery dispatch across
+continuation/hold; an already selected live stream follows its idle timeout.
 
 The context supplies request/provider metadata and an output summary. The original
 request is available through a read-only accessor when needed; message history is
@@ -268,7 +291,7 @@ graph; they do not consume response deltas.
 
 ### Prometheus Metrics
 
-Metrics are exposed in Prometheus format on a dedicated loopback listener (`127.0.0.1:9209/metrics`).
+Metrics are exposed in Prometheus format on a dedicated loopback listener (`127.0.0.1:9209/metrics`). `metrics_host` accepts numeric loopback addresses only (`127.0.0.1` or `::1`); the client API listener returns 404 for `/metrics`.
 
 Verify metrics collection:
 

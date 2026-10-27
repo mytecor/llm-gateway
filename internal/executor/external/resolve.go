@@ -17,8 +17,8 @@ var (
 
 // ResolveDriverBinary locates the executable for a named driver (<name>-driver)
 // across environment overrides, adjacent directories, standard build outputs,
-// and $PATH. When running from a source checkout where drivers/<name>/ is
-// present, it builds the driver binary on demand.
+// and $PATH. Source builds require explicit LLM_GATEWAY_DEV_BUILD=1; production
+// startup never invokes a compiler or downloads dependencies.
 func ResolveDriverBinary(name string) (string, error) {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if name == "" {
@@ -82,7 +82,7 @@ func ResolveDriverBinary(name string) (string, error) {
 		}
 	}
 
-	if repoRoot != "" {
+	if repoRoot != "" && os.Getenv("LLM_GATEWAY_DEV_BUILD") == "1" {
 		driverModDir := filepath.Join(repoRoot, "drivers", name)
 		if info, err := os.Stat(filepath.Join(driverModDir, "go.mod")); err == nil && !info.IsDir() {
 			return buildGoDriverOnDemand(repoRoot, name, driverModDir)

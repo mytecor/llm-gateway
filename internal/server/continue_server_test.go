@@ -1,6 +1,9 @@
 package server
 
 import (
+	"github.com/mytecor/llm-gateway/internal/testsupport/configtest"
+	"github.com/mytecor/llm-gateway/internal/testsupport/policytest"
+
 	"context"
 	"encoding/json"
 	"net/http"
@@ -129,15 +132,15 @@ func TestServerContinueTakeoverOnEmptyCompletion(t *testing.T) {
 }
 
 func TestServerContinueTakeoverExcludesJustBrokenProvider(t *testing.T) {
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:2] // a, b
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "a", "b"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 2),
-		policy.ContinueRuleHelper("standard", 90*time.Second, "full"),
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a", "b"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 2),
+		policytest.ContinueRuleHelper("standard", 90*time.Second, "full"),
 	}
 	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {

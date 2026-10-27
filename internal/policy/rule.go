@@ -67,12 +67,11 @@ const (
 	ActionRepetition = "repetition"
 )
 
-// ruleDescriptor declares one routing action: its canonical pipeline position
-// and a factory used by the strict decoder. Adding a new action changes only
+// ruleDescriptor declares an action factory and its decoding aliases.
+// Adding a new action changes only
 // this registry plus the new implementation file; no central switch is
 // extended.
 type ruleDescriptor struct {
-	rank    int
 	new     func() Rule
 	aliases map[string][]string
 }
@@ -81,21 +80,21 @@ type ruleDescriptor struct {
 // compiler: an unknown action fails at the registry boundary before any
 // concrete type is constructed.
 var ruleRegistry = map[string]ruleDescriptor{
-	ActionFilter:     {rank: 1, new: func() Rule { return &FilterRule{} }},
-	ActionMap:        {rank: 2, new: func() Rule { return &MapRule{} }},
-	ActionRank:       {rank: 3, new: func() Rule { return &RankRule{} }},
-	ActionAdmission:  {rank: 4, new: func() Rule { return &AdmissionRule{} }, aliases: map[string][]string{"max_in_flight": {"maxInFlight"}, "max_pending": {"maxPending"}, "wait_timeout": {"waitTimeout"}}},
-	ActionLease:      {rank: 5, new: func() Rule { return &LeaseRule{} }},
-	ActionBalance:    {rank: 5, new: func() Rule { return &BalanceRule{} }},
-	ActionAffinity:   {rank: 6, new: func() Rule { return &AffinityRule{} }},
-	ActionRace:       {rank: 7, new: func() Rule { return &RaceRule{} }},
-	ActionRetry:      {rank: 8, new: func() Rule { return &RetryRule{} }, aliases: map[string][]string{"attempts": {"max_attempts", "maxAttempts"}}},
-	ActionHedge:      {rank: 9, new: func() Rule { return &HedgeRule{} }},
-	ActionSemaphore:  {rank: 10, new: func() Rule { return &SemaphoreRule{} }},
-	ActionTimeout:    {rank: 11, new: func() Rule { return &TimeoutRule{} }},
-	ActionFallback:   {rank: 12, new: func() Rule { return &FallbackRule{} }},
-	ActionContinue:   {rank: 13, new: func() Rule { return &ContinueRule{} }},
-	ActionRepetition: {rank: 14, new: func() Rule { return &RepetitionRule{} }},
+	ActionFilter:     {new: func() Rule { return &FilterRule{} }},
+	ActionMap:        {new: func() Rule { return &MapRule{} }},
+	ActionRank:       {new: func() Rule { return &RankRule{} }},
+	ActionAdmission:  {new: func() Rule { return &AdmissionRule{} }, aliases: map[string][]string{"max_in_flight": {"maxInFlight"}, "max_pending": {"maxPending"}, "wait_timeout": {"waitTimeout"}}},
+	ActionLease:      {new: func() Rule { return &LeaseRule{} }},
+	ActionBalance:    {new: func() Rule { return &BalanceRule{} }},
+	ActionAffinity:   {new: func() Rule { return &AffinityRule{} }},
+	ActionRace:       {new: func() Rule { return &RaceRule{} }},
+	ActionRetry:      {new: func() Rule { return &RetryRule{} }, aliases: map[string][]string{"attempts": {"max_attempts", "maxAttempts"}}},
+	ActionHedge:      {new: func() Rule { return &HedgeRule{} }},
+	ActionSemaphore:  {new: func() Rule { return &SemaphoreRule{} }},
+	ActionTimeout:    {new: func() Rule { return &TimeoutRule{} }},
+	ActionFallback:   {new: func() Rule { return &FallbackRule{} }},
+	ActionContinue:   {new: func() Rule { return &ContinueRule{} }},
+	ActionRepetition: {new: func() Rule { return &RepetitionRule{} }},
 }
 
 // ruleErrf formats a rule error that always carries the rule index,

@@ -72,7 +72,7 @@ make build-acp
 go test -race -C drivers/acp ./...
 ```
 
-When `llm-gateway` resolves a provider with `"driver": "acp"`, [`external.ResolveDriverBinary`](../../internal/executor/external/resolve.go) locates `acp-driver` next to the gateway executable, in `./bin/acp-driver`, on `$PATH`, or builds `./drivers/acp` on demand in a source checkout, and passes the configured `command` inside the NDJSON `init`/`start`/`models` `config` payload.
+When `llm-gateway` resolves a provider with `"driver": "acp"`, [`external.ResolveDriverBinary`](../../internal/executor/external/resolve.go) locates `acp-driver` next to the gateway executable, in `./bin/acp-driver`, or on `$PATH`, and passes the configured `command` inside the NDJSON `init`/`start`/`models` `config` payload. On-demand source builds are available only with the explicit development setting `LLM_GATEWAY_DEV_BUILD=1`.
 
 ## Gateway configuration
 

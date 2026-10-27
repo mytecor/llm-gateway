@@ -1,6 +1,9 @@
 package server
 
 import (
+	"github.com/mytecor/llm-gateway/internal/testsupport/configtest"
+	"github.com/mytecor/llm-gateway/internal/testsupport/policytest"
+
 	"bytes"
 	"context"
 	"encoding/json"
@@ -24,20 +27,20 @@ import (
 // over the same provider.
 func singleProviderStreamConfig(t *testing.T) *config.CompiledConfig {
 	t.Helper()
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "a"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 1),
-		policy.RetryRuleHelper("standard", "standard.retry", 1),
-		policy.FilterError("standard.retry", "429", "5xx", "timeout", "connection_error"),
-		policy.FilterProviderUnused("standard.retry", "a"),
-		policy.MapRuleHelper("standard.retry", "native-model"),
-		policy.RankRuleHelper("standard.retry"),
-		policy.RaceRuleHelper("standard.retry", 1),
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 1),
+		policytest.RetryRuleHelper("standard", "standard.retry", 1),
+		policytest.FilterError("standard.retry", "429", "5xx", "timeout", "connection_error"),
+		policytest.FilterProviderUnused("standard.retry", "a"),
+		policytest.MapRuleHelper("standard.retry", "native-model"),
+		policytest.RankRuleHelper("standard.retry"),
+		policytest.RaceRuleHelper("standard.retry", 1),
 	}
 	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
@@ -52,7 +55,7 @@ func singleProviderStreamConfig(t *testing.T) *config.CompiledConfig {
 func streamTestServer(t *testing.T, compiled *config.CompiledConfig, executor model.Executor) (*httptest.Server, *scheduler.Runner) {
 	t.Helper()
 	catalog := subsystem.NewCatalog(compiled)
-	runner := scheduler.NewRunner(compiled, catalog, executor)
+	runner := scheduler.NewRunner(compiled.RoutingPlan(), catalog, executor)
 	api := httptest.NewServer(NewServer(compiled, catalog, runner))
 	t.Cleanup(api.Close)
 	return api, runner
@@ -102,8 +105,8 @@ func sseErrorData(t *testing.T, body string) []byte {
 // health error, the branch attempt and stream break counters increment, and
 // cancellations stay health-neutral.
 func TestRecordStreamFailureCooldownHealthMetrics(t *testing.T) {
-	compiled := config.RaceOnlyConfig(t)
-	runner := scheduler.NewRunner(compiled, subsystem.NewCatalog(compiled), &fakeExecutor{
+	compiled := configtest.RaceOnlyConfig(t)
+	runner := scheduler.NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), &fakeExecutor{
 		do: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) {
 			return successBody("a"), nil
 		},
@@ -159,11 +162,11 @@ func TestRecordStreamFailureCooldownHealthMetrics(t *testing.T) {
 // an error admitted by the entry route's retry filter is retryable; one the
 // filter excludes is not, even though it is in the shared retryable class set.
 func TestStreamRetryableReflectsRouteErrorFilter(t *testing.T) {
-	compiled, err := config.PrepareAndCompile(config.TestConfig())
+	compiled, err := config.PrepareAndCompile(configtest.TestConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner := scheduler.NewRunner(compiled, subsystem.NewCatalog(compiled), &fakeExecutor{
+	runner := scheduler.NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), &fakeExecutor{
 		do: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) { return nil, nil },
 		stream: func(context.Context, model.Target, model.ExecuteRequest) (<-chan model.StreamEvent, *model.CallError) {
 			return nil, &model.CallError{Class: model.ErrorInvalid, Status: 500}

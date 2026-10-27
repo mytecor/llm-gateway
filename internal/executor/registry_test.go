@@ -1,6 +1,8 @@
 package executor
 
 import (
+	"github.com/mytecor/llm-gateway/internal/testsupport/executortest"
+
 	"context"
 	"strings"
 	"sync/atomic"
@@ -16,7 +18,7 @@ func TestMiddlewareIsolationAndStreamLifetime(t *testing.T) {
 	upstream := make(chan model.StreamEvent)
 	var finishes atomic.Int32
 	finished := make(chan struct{}, 1)
-	fake := &model.FakeExecutor{StreamFunc: func(_ context.Context, _ model.Target, req model.ExecuteRequest) (<-chan model.StreamEvent, *model.CallError) {
+	fake := &executortest.FakeExecutor{StreamFunc: func(_ context.Context, _ model.Target, req model.ExecuteRequest) (<-chan model.StreamEvent, *model.CallError) {
 		if string(req.Body) != "mutated" {
 			t.Error("missing middleware preparation")
 		}
@@ -64,7 +66,7 @@ func TestMiddlewareIsolationAndStreamLifetime(t *testing.T) {
 }
 func TestRegistryRejectsUnsupportedProtocolBeforeDispatch(t *testing.T) {
 	var called bool
-	fake := &model.FakeExecutor{DoFunc: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) {
+	fake := &executortest.FakeExecutor{DoFunc: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) {
 		called = true
 		return nil, nil
 	}}

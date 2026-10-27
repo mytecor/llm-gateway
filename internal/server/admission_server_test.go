@@ -1,6 +1,9 @@
 package server
 
 import (
+	"github.com/mytecor/llm-gateway/internal/testsupport/configtest"
+	"github.com/mytecor/llm-gateway/internal/testsupport/policytest"
+
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -17,22 +20,22 @@ import (
 )
 
 func TestAdmissionContinuationReleaseHandoverNoLeak(t *testing.T) {
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	maxPending := 4
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.MapRuleDirect("standard", []string{"a", "b"}, "model-x", 0),
+		policytest.FilterModel("standard", "standard"),
+		policytest.MapRuleDirect("standard", []string{"a", "b"}, "model-x", 0),
 		&policy.AdmissionRule{
 			RuleBase:    policy.RuleBase{Route: "standard", Action: policy.ActionAdmission},
 			MaxInFlight: 1,
 			MaxPending:  &maxPending,
 			WaitTimeout: policy.Duration{Duration: time.Second},
 		},
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 1),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 1),
 		&policy.RetryRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionRetry}, Attempts: 2},
 		&policy.TimeoutRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionTimeout}, Duration: policy.Duration{Duration: 10 * time.Second}},
-		policy.ContinueRuleHelper("standard", 10*time.Second, "full"),
+		policytest.ContinueRuleHelper("standard", 10*time.Second, "full"),
 	}
 	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
@@ -71,14 +74,14 @@ func TestAdmissionContinuationReleaseHandoverNoLeak(t *testing.T) {
 }
 
 func TestInternalRetryHidesProviderErrorsFromClient(t *testing.T) {
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.MapRuleDirect("standard", []string{"a", "b"}, "model-x", 0),
-		policy.MapRuleDirect("standard", []string{"c"}, "model-y", 1),
-		policy.RankRuleHelper("standard"),
-		policy.BalanceRuleCustom("standard", func(r *policy.BalanceRule) { r.Strategy = "expected-ttft" }),
-		policy.RaceRuleHelper("standard", 1),
+		policytest.FilterModel("standard", "standard"),
+		policytest.MapRuleDirect("standard", []string{"a", "b"}, "model-x", 0),
+		policytest.MapRuleDirect("standard", []string{"c"}, "model-y", 1),
+		policytest.RankRuleHelper("standard"),
+		policytest.BalanceRuleCustom("standard", func(r *policy.BalanceRule) { r.Strategy = "expected-ttft" }),
+		policytest.RaceRuleHelper("standard", 1),
 		&policy.RetryRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionRetry}},
 		&policy.TimeoutRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionTimeout}, Duration: policy.Duration{Duration: 10 * time.Second}},
 	}
@@ -104,7 +107,7 @@ func TestInternalRetryHidesProviderErrorsFromClient(t *testing.T) {
 		},
 	}
 
-	runner := scheduler.NewRunner(compiled, subsystem.NewCatalog(compiled), executor)
+	runner := scheduler.NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), executor)
 	srv := NewServer(compiled, subsystem.NewCatalog(compiled), runner)
 
 	reqBody := `{"model":"standard","messages":[{"role":"user","content":"hi"}]}`
@@ -126,14 +129,14 @@ func TestInternalRetryHidesProviderErrorsFromClient(t *testing.T) {
 }
 
 func TestInternalRetryFallbackToSameProviderDifferentTier(t *testing.T) {
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	// Provider a is in tier 0 with model-x (fails 404), and in tier 1 with model-y (succeeds)
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.MapRuleDirect("standard", []string{"a"}, "model-x", 0),
-		policy.MapRuleDirect("standard", []string{"a"}, "model-y", 1),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 1),
+		policytest.FilterModel("standard", "standard"),
+		policytest.MapRuleDirect("standard", []string{"a"}, "model-x", 0),
+		policytest.MapRuleDirect("standard", []string{"a"}, "model-y", 1),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 1),
 		&policy.RetryRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionRetry}, Attempts: 2},
 		&policy.TimeoutRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionTimeout}, Duration: policy.Duration{Duration: 10 * time.Second}},
 	}
@@ -156,7 +159,7 @@ func TestInternalRetryFallbackToSameProviderDifferentTier(t *testing.T) {
 		},
 	}
 
-	runner := scheduler.NewRunner(compiled, subsystem.NewCatalog(compiled), executor)
+	runner := scheduler.NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), executor)
 	srv := NewServer(compiled, subsystem.NewCatalog(compiled), runner)
 
 	reqBody := `{"model":"standard","messages":[{"role":"user","content":"hi"}]}`

@@ -111,7 +111,10 @@ func newRouteRuntime(entry *policy.CompiledRoute) *routeRuntime {
 		exclude:        make(map[string]bool),
 		excludeTargets: make(map[targetKey]bool),
 	}
-	if entry != nil && entry.RouteTimeout > 0 {
+	if entry == nil {
+		return runtime
+	}
+	if entry.RouteTimeout > 0 {
 		runtime.deadline = time.Now().Add(entry.RouteTimeout)
 	}
 	runtime.sem = semaphore{
@@ -125,6 +128,32 @@ func newRouteRuntime(entry *policy.CompiledRoute) *routeRuntime {
 
 func (r *routeRuntime) expired() bool {
 	return !r.deadline.IsZero() && !time.Now().Before(r.deadline)
+}
+
+// Call counters never recover with time. Avoid holding a client stream open
+// when no reachable provider can obtain another request-wide call permit.
+func (r *routeRuntime) hasCallBudget(entry *policy.CompiledRoute) bool {
+	if r.sem.maxCalls > 0 && r.sem.calls >= r.sem.maxCalls {
+		return false
+	}
+	if r.sem.maxCallsPerProvider <= 0 {
+		return true
+	}
+	seen := make(map[*policy.CompiledRoute]bool)
+	var available func(*policy.CompiledRoute) bool
+	available = func(route *policy.CompiledRoute) bool {
+		if route == nil || seen[route] {
+			return false
+		}
+		seen[route] = true
+		for _, target := range route.Pool {
+			if r.sem.perProvider[target.Provider] < r.sem.maxCallsPerProvider {
+				return true
+			}
+		}
+		return available(route.RetryTarget) || available(route.FallbackTarget) || available(route.HedgeTarget)
+	}
+	return available(entry)
 }
 
 func (r *routeRuntime) deadlineTimer() (<-chan time.Time, func()) {

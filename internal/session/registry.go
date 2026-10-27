@@ -11,7 +11,9 @@ import (
 )
 
 type sessionState struct {
-	gate                                 chan struct{}
+	gate chan struct{}
+	// waiters is protected by registry.mu, including callers waiting for gate.
+	waiters                              int
 	process                              Session
 	active                               *activeTurn
 	current                              atomic.Pointer[activeTurn]
@@ -58,6 +60,7 @@ type registry struct {
 	sessions map[string]*sessionState
 	ttl      time.Duration
 	store    *sessionStore
+	closed   bool
 }
 
 func newRegistry(ttl time.Duration, store *sessionStore, path string) (*registry, error) {
@@ -68,20 +71,30 @@ func newRegistry(ttl time.Duration, store *sessionStore, path string) (*registry
 			return nil, err
 		}
 	}
-	r := &registry{sessions: map[string]*sessionState{}, ttl: ttl, store: store}
-	for key, saved := range store.recordsSnapshot() {
-		r.sessions[key] = &sessionState{gate: make(chan struct{}, 1), resumeID: saved.ResumeID, cwd: saved.CWD, historyCount: saved.HistoryCount, historyHash: saved.HistoryHash, toolHash: saved.ToolHash, lastAccess: time.Now()}
-	}
-	return r, nil
+	return &registry{sessions: map[string]*sessionState{}, ttl: ttl, store: store}, nil
 }
 func (r *registry) lock(ctx context.Context, key string) (*sessionState, error) {
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil, &Error{Status: 503, Code: "runtime_closed"}
+	}
 	s := r.sessions[key]
 	if s == nil {
 		s = &sessionState{gate: make(chan struct{}, 1), lastAccess: time.Now()}
+		if saved, ok := r.store.get(key); ok {
+			s.resumeID, s.cwd, s.toolHash = saved.ResumeID, saved.CWD, saved.ToolHash
+			s.historyCount, s.historyHash = saved.HistoryCount, saved.HistoryHash
+		}
 		r.sessions[key] = s
 	}
+	s.waiters++
 	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		s.waiters--
+		r.mu.Unlock()
+	}()
 	select {
 	case s.gate <- struct{}{}:
 		return s, nil
@@ -91,41 +104,60 @@ func (r *registry) lock(ctx context.Context, key string) (*sessionState, error) 
 }
 func (s *sessionState) unlock() { <-s.gate }
 func (r *registry) evictIdle() {
+	r.store.prune()
 	if r.ttl <= 0 {
 		return
 	}
 	r.mu.Lock()
-	states := make([]*sessionState, 0, len(r.sessions))
-	for _, s := range r.sessions {
-		states = append(states, s)
+	states := make(map[string]*sessionState, len(r.sessions))
+	for key, s := range r.sessions {
+		states[key] = s
 	}
 	r.mu.Unlock()
-	for _, s := range states {
+	for key, s := range states {
+		r.mu.Lock()
+		if r.sessions[key] != s || s.waiters > 0 {
+			r.mu.Unlock()
+			continue
+		}
 		select {
 		case s.gate <- struct{}{}:
+			r.mu.Unlock()
 			if time.Since(s.lastAccess) > r.ttl {
 				// A pending tool exchange stays alive until the turn deadline. Idle TTL
 				// only releases completed native sessions, not client-side tool work.
 				if s.active == nil {
 					s.stop()
 					s.history = nil
+					// A waiter can arrive while Close is stopping the native session.
+					// Keep its exact state until that waiter has acquired the gate;
+					// otherwise a new caller could create a parallel session for key.
+					r.mu.Lock()
+					if r.sessions[key] == s && s.waiters == 0 {
+						delete(r.sessions, key)
+					}
+					r.mu.Unlock()
 				}
 			}
 			s.unlock()
 		default:
+			r.mu.Unlock()
 		}
 	}
 }
 func (r *registry) close() {
 	r.mu.Lock()
+	r.closed = true
 	states := make([]*sessionState, 0, len(r.sessions))
 	for _, s := range r.sessions {
 		states = append(states, s)
 	}
+	r.sessions = make(map[string]*sessionState)
 	r.mu.Unlock()
 	for _, s := range states {
 		s.gate <- struct{}{}
 		s.stop()
+		s.history = nil
 		s.unlock()
 	}
 }

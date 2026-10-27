@@ -30,36 +30,71 @@ import (
 // factor baseline. Cancellations are neutral (the scheduler never feeds
 // them), exactly like lease and cooldown state.
 type ScoreStore struct {
-	mu        sync.Mutex
-	now       func() time.Time
-	pick01    func() float64 // injected for deterministic weighted-random tests
-	providers map[string]*providerScore
-	rrCursor  map[string]int // per-route round-robin cursor
-	capacity  *ProviderCapacity
+	mu          sync.Mutex
+	now         func() time.Time
+	pick01      func() float64 // injected for deterministic weighted-random tests
+	providers   map[string]*providerScore
+	rrCursor    map[string]int // per-route round-robin cursor
+	capacity    *ProviderCapacity
+	retention   time.Duration
+	bucketWidth time.Duration
+	bucketCount int
 }
 
 type providerScore struct {
 	latency   float64 // EWMA of first-meaningful success latency, seconds
 	latencyOK bool
-	samples   []scoreSample // sliding window, appended on every relevant branch
+	buckets   []scoreBucket
 }
 
-type scoreSample struct {
-	at        time.Time
-	success   bool
-	healthErr bool
+type scoreBucket struct {
+	tick            int64
+	latest          time.Time
+	total, failures uint64
 }
+
+// ScoreStoreOptions configures the common history horizon. MaxWindow must cover
+// the largest balance window in the compiled policy; smaller windows only read
+// this history and never discard observations needed by other routes.
+type ScoreStoreOptions struct {
+	MaxWindow time.Duration
+}
+
+const (
+	DefaultScoreRetention = 5 * time.Minute
+	maxScoreBuckets       = 601
+)
 
 func NewScoreStore(now func() time.Time, capacity *ProviderCapacity) *ScoreStore {
+	return NewScoreStoreWithOptions(now, capacity, ScoreStoreOptions{})
+}
+
+func NewScoreStoreWithOptions(now func() time.Time, capacity *ProviderCapacity, opts ScoreStoreOptions) *ScoreStore {
 	if now == nil {
 		now = time.Now
 	}
+	retention := max(DefaultScoreRetention, opts.MaxWindow)
+	// At most 601 aggregate buckets per provider, independent of throughput
+	// and uptime. Boundary windows may include less than one bucket of older
+	// evidence; default resolution is one second and scales for long windows.
+	width := retention / (maxScoreBuckets - 1)
+	if retention%(maxScoreBuckets-1) != 0 {
+		width++
+	}
+	width = max(time.Second, width)
+	count := int(retention / width)
+	if retention%width != 0 {
+		count++
+	}
 	return &ScoreStore{
-		now:       now,
-		pick01:    rand.Float64,
-		providers: make(map[string]*providerScore),
-		rrCursor:  make(map[string]int),
-		capacity:  capacity,
+		now:         now,
+		pick01:      rand.Float64,
+		providers:   make(map[string]*providerScore),
+		rrCursor:    make(map[string]int),
+		capacity:    capacity,
+		retention:   retention,
+		bucketWidth: width,
+		bucketCount: count + 1,
 	}
 }
 
@@ -104,9 +139,9 @@ func balanceHealthErrors(class model.ErrorClass) bool {
 }
 
 // Observe records one completed upstream branch for a provider. Latency is
-// only meaningful for successful branches; failures append a health-error
-// sample when their class counts against the budget, and a neutral failure
-// otherwise. Cancelled branches never reach this method.
+// only meaningful for successful branches. Successes and health errors update
+// bounded time buckets; neutral failures need no history. No balance reads are
+// required to bound memory. Cancelled branches never reach this method.
 func (s *ScoreStore) Observe(provider string, callErr *model.CallError, latency time.Duration) {
 	if provider == "" {
 		return
@@ -120,11 +155,26 @@ func (s *ScoreStore) Observe(provider string, callErr *model.CallError, latency 
 	}
 	now := s.now()
 	success := callErr == nil
-	sample := scoreSample{at: now, success: success}
-	if callErr != nil {
-		sample.healthErr = balanceHealthErrors(callErr.Class)
+	healthErr := callErr != nil && balanceHealthErrors(callErr.Class)
+	if success || healthErr {
+		if score.buckets == nil {
+			score.buckets = make([]scoreBucket, s.bucketCount)
+		}
+		tick := now.UnixNano() / int64(s.bucketWidth)
+		index := tick % int64(len(score.buckets))
+		if index < 0 {
+			index += int64(len(score.buckets))
+		}
+		bucket := &score.buckets[index]
+		if bucket.tick != tick || bucket.latest.IsZero() {
+			*bucket = scoreBucket{tick: tick}
+		}
+		bucket.latest = now
+		bucket.total++
+		if healthErr {
+			bucket.failures++
+		}
 	}
-	score.samples = append(score.samples, sample)
 	if success {
 		// EWMA with α=0.3 (window ≈ 3 samples): smooth but responsive enough
 		// that a provider recovering from a bad spell starts winning back
@@ -152,26 +202,21 @@ func (s *ScoreStore) health(provider string, window time.Duration, errorBudget f
 		return 1
 	}
 	now := s.now()
-	cutoff := now.Add(-window)
-	// The window is pruned in place from the front; samples are appended in
-	// time order so the window is contiguous.
-	for len(score.samples) > 0 && !score.samples[0].at.After(cutoff) {
-		score.samples = score.samples[1:]
+	if window <= 0 || window > s.retention {
+		window = s.retention
 	}
-	total := 0
-	errors := 0
-	for _, sample := range score.samples {
-		if sample.healthErr {
-			errors++
-		}
-		if sample.healthErr || sample.success {
-			total++
+	cutoff := now.Add(-window)
+	var total, failures uint64
+	for _, bucket := range score.buckets {
+		if bucket.latest.After(cutoff) && !bucket.latest.After(now) {
+			total += bucket.total
+			failures += bucket.failures
 		}
 	}
 	if total == 0 {
 		return 1
 	}
-	errorRate := float64(errors) / float64(total)
+	errorRate := float64(failures) / float64(total)
 	if errorRate >= errorBudget {
 		return 0
 	}

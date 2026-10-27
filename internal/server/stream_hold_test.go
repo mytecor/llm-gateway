@@ -1,6 +1,9 @@
 package server
 
 import (
+	"github.com/mytecor/llm-gateway/internal/testsupport/configtest"
+	"github.com/mytecor/llm-gateway/internal/testsupport/policytest"
+
 	"bufio"
 	"context"
 	"errors"
@@ -216,15 +219,15 @@ func TestServerHoldRecoveryBoundedWhenProviderRepeatedlyBreaks(t *testing.T) {
 		close(ch)
 		return ch, nil
 	}}
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Providers[0].Cooldown = policy.Duration{Duration: 10 * time.Millisecond}
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "a"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 1),
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 1),
 		&policy.RetryRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionRetry}, Attempts: 2},
 		&policy.TimeoutRule{
 			RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionTimeout},
@@ -289,15 +292,15 @@ func TestServerEmitsParsedKeepAliveDeltasDuringSlowSelectAndToolGeneration(t *te
 
 func continueConfigRetriesWait(t *testing.T, retries int, wait time.Duration) *config.CompiledConfig {
 	t.Helper()
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:2] // a, b
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "a", "b"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 2),
-		policy.ContinueRuleWait("standard", 90*time.Second, "full", retries, wait),
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a", "b"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 2),
+		policytest.ContinueRuleWait("standard", 90*time.Second, "full", retries, wait),
 	}
 	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
@@ -322,18 +325,18 @@ func continueConfigWait(t *testing.T, retries int, wait time.Duration) *config.C
 // recovery.
 func continueConfigHold(t *testing.T, retries int, wait, cooldown time.Duration) *config.CompiledConfig {
 	t.Helper()
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	for i := range cfg.Providers {
 		cfg.Providers[i].Cooldown = policy.Duration{Duration: cooldown}
 	}
 	cfg.Providers = cfg.Providers[:2] // a, b
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "a", "b"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 2),
-		policy.ContinueRuleWait("standard", 90*time.Second, "full", retries, wait),
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a", "b"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 2),
+		policytest.ContinueRuleWait("standard", 90*time.Second, "full", retries, wait),
 	}
 	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {

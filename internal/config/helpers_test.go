@@ -1,6 +1,8 @@
 package config
 
 import (
+	"github.com/mytecor/llm-gateway/internal/testsupport/policytest"
+
 	"encoding/json"
 	"strings"
 	"testing"
@@ -10,21 +12,21 @@ import (
 )
 
 var (
-	fallbackRule         = policy.FallbackRuleHelper
-	filterModel          = policy.FilterModel
-	filterProvider       = policy.FilterProvider
-	filterProviderUnused = policy.FilterProviderUnused
-	filterError          = policy.FilterError
-	mapRule              = policy.MapRuleHelper
-	rankRule             = policy.RankRuleHelper
-	raceRule             = policy.RaceRuleHelper
-	retryRule            = policy.RetryRuleHelper
-	retryRuleBackoff     = policy.RetryRuleBackoff
-	hedgeRule            = policy.HedgeRuleHelper
-	timeoutRule          = policy.TimeoutRuleHelper
-	semaphoreRule        = policy.SemaphoreRuleHelper
-	leaseRule            = policy.LeaseRuleCustom
-	affinityRule         = policy.AffinityRuleCustom
+	fallbackRule         = policytest.FallbackRuleHelper
+	filterModel          = policytest.FilterModel
+	filterProvider       = policytest.FilterProvider
+	filterProviderUnused = policytest.FilterProviderUnused
+	filterError          = policytest.FilterError
+	mapRule              = policytest.MapRuleHelper
+	rankRule             = policytest.RankRuleHelper
+	raceRule             = policytest.RaceRuleHelper
+	retryRule            = policytest.RetryRuleHelper
+	retryRuleBackoff     = policytest.RetryRuleBackoff
+	hedgeRule            = policytest.HedgeRuleHelper
+	timeoutRule          = policytest.TimeoutRuleHelper
+	semaphoreRule        = policytest.SemaphoreRuleHelper
+	leaseRule            = policytest.LeaseRuleCustom
+	affinityRule         = policytest.AffinityRuleCustom
 )
 
 func boolPtr(v bool) *bool { return &v }

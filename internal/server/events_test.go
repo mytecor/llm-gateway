@@ -1,6 +1,9 @@
 package server
 
 import (
+	"github.com/mytecor/llm-gateway/internal/testsupport/configtest"
+	"github.com/mytecor/llm-gateway/internal/testsupport/policytest"
+
 	"bytes"
 	"context"
 	"encoding/json"
@@ -115,7 +118,7 @@ func eventsTestServer(t *testing.T, cfg config.Config, executor model.Executor) 
 		t.Fatal(err)
 	}
 	catalog := subsystem.NewCatalog(compiled)
-	runner := scheduler.NewRunner(compiled, catalog, executor)
+	runner := scheduler.NewRunner(compiled.RoutingPlan(), catalog, executor)
 	logger, read := captureLogger("debug")
 	runner.SetLogger(logger)
 	server := NewServer(compiled, catalog, runner)
@@ -137,14 +140,14 @@ func postCompletion(t *testing.T, url, body string) (*http.Response, string) {
 }
 
 func TestRequestCompletedEventCarriesFullFields(t *testing.T) {
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "a"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 1),
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 1),
 	}
 	usage := `{"id":"c","model":"native-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`
 	executor := &fakeExecutor{
@@ -190,14 +193,14 @@ func TestRequestCompletedEventCarriesFullFields(t *testing.T) {
 }
 
 func TestRequestFailedEventOnTimeout(t *testing.T) {
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "a"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 1),
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 1),
 	}
 	executor := &fakeExecutor{
 		do: func(_ context.Context, _ model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
@@ -235,27 +238,27 @@ func TestRequestFailedEventOnTimeout(t *testing.T) {
 }
 
 func TestRetryEmitsAttemptEvents(t *testing.T) {
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:2]
 	// First provider always fails with 429; second succeeds. Entry route races
 	// provider a only (count=1) and retries into standard.retry which picks
 	// the unused provider b.
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "a"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 1),
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 1),
 		retryRuleBackoff("standard", "standard.retry", 1, &policy.BackoffConfig{
 			Type:    "fixed",
 			Initial: policy.Duration{Duration: 1},
 			Max:     policy.Duration{Duration: 1},
 		}),
-		policy.FilterError("standard.retry", "429"),
-		policy.FilterProviderUnused("standard.retry", "a", "b"),
-		policy.MapRuleHelper("standard.retry", "native-model"),
-		policy.RankRuleHelper("standard.retry"),
-		policy.RaceRuleHelper("standard.retry", 1),
+		policytest.FilterError("standard.retry", "429"),
+		policytest.FilterProviderUnused("standard.retry", "a", "b"),
+		policytest.MapRuleHelper("standard.retry", "native-model"),
+		policytest.RankRuleHelper("standard.retry"),
+		policytest.RaceRuleHelper("standard.retry", 1),
 	}
 	executor := &fakeExecutor{
 		do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
@@ -297,14 +300,14 @@ func TestRetryEmitsAttemptEvents(t *testing.T) {
 }
 
 func TestFallbackEmitsFallbackEvent(t *testing.T) {
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:2]
 	cfg.Rules = append([]policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "a"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 1),
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 1),
 	}, fallbackRules("standard", []string{"429", "5xx", "timeout"}, []string{"b"})...)
 	executor := &fakeExecutor{
 		do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
@@ -337,15 +340,15 @@ func TestFallbackEmitsFallbackEvent(t *testing.T) {
 }
 
 func TestCooldownPutEventFiresOnRetryableFailure(t *testing.T) {
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Providers[0].Cooldown = policy.Duration{Duration: 5 * time.Minute}
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "a"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 1),
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 1),
 	}
 	const nCalls = 3
 	calls := 0
@@ -383,14 +386,14 @@ func TestCooldownPutEventFiresOnRetryableFailure(t *testing.T) {
 }
 
 func TestEveryEventLineCarriesServiceAndEventName(t *testing.T) {
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "a"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 1),
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 1),
 	}
 	executor := &fakeExecutor{
 		do: func(_ context.Context, _ model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
@@ -417,16 +420,16 @@ func TestEveryEventLineCarriesServiceAndEventName(t *testing.T) {
 
 func TestEventsNeverContainSecrets(t *testing.T) {
 	secret := "sk-test-super-secret-123"
-	cfg := config.TestConfig()
+	cfg := configtest.TestConfig()
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Providers[0].Config["api_key"] = secret
 	cfg.ClientAPIKeys = []config.ClientKey{{ID: "primary", Key: secret}}
 	cfg.Rules = []policy.Rule{
-		policy.FilterModel("standard", "standard"),
-		policy.FilterProvider("standard", "a"),
-		policy.MapRuleHelper("standard", "native-model"),
-		policy.RankRuleHelper("standard"),
-		policy.RaceRuleHelper("standard", 1),
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
+		policytest.RaceRuleHelper("standard", 1),
 	}
 	executor := &fakeExecutor{
 		do: func(_ context.Context, _ model.Target, request model.ExecuteRequest) ([]byte, *model.CallError) {
@@ -463,11 +466,11 @@ func TestEventsNeverContainSecrets(t *testing.T) {
 
 func fallbackRules(route string, on []string, providers []string) []policy.Rule {
 	return []policy.Rule{
-		policy.FallbackRuleHelper(route, route+".fallback"),
-		policy.FilterError(route+".fallback", on...),
-		policy.FilterProvider(route+".fallback", providers...),
-		policy.MapRuleHelper(route+".fallback", "native-model"),
-		policy.RankRuleHelper(route + ".fallback"),
-		policy.RaceRuleHelper(route+".fallback", 1),
+		policytest.FallbackRuleHelper(route, route+".fallback"),
+		policytest.FilterError(route+".fallback", on...),
+		policytest.FilterProvider(route+".fallback", providers...),
+		policytest.MapRuleHelper(route+".fallback", "native-model"),
+		policytest.RankRuleHelper(route + ".fallback"),
+		policytest.RaceRuleHelper(route+".fallback", 1),
 	}
 }

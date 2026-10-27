@@ -31,14 +31,17 @@ type SelectedStream struct {
 // The winner is chosen only by the first meaningful content, reasoning, or
 // tool-call event; losers are cancelled and never affect health or lease state.
 func (r *Runner) SelectStream(ctx context.Context, logical string, request model.ExecuteRequest) (*SelectedStream, *model.CallError) {
-	entry, ok := r.config.Models[logical]
+	return r.selectAdmittedStream(ctx, logical, request, newRouteRuntime(r.plan.Models[logical]))
+}
+
+func (r *Runner) selectAdmittedStream(ctx context.Context, logical string, request model.ExecuteRequest, runtime *routeRuntime) (*SelectedStream, *model.CallError) {
+	entry, ok := r.plan.Models[logical]
 	if !ok {
 		return nil, &model.CallError{Class: model.ErrorInvalid, Status: 404, Scope: model.FailureScopeRequest}
 	}
 	if request.StreamIdleTimeout <= 0 {
 		request.StreamIdleTimeout = r.StreamIdleTimeout(logical)
 	}
-	runtime := newRouteRuntime(entry)
 	release, admitErr := r.admit(ctx, logical, runtime)
 	if admitErr != nil {
 		return nil, admitErr
@@ -67,7 +70,14 @@ func (r *Runner) SelectStream(ctx context.Context, logical string, request model
 // remaining provider can serve the continuation; the caller then decides
 // whether to surface the original stream's structured error.
 func (r *Runner) ContinueStream(ctx context.Context, logical string, request model.ExecuteRequest, partial *subsystem.PartialStreamOutput, broken []string) (*SelectedStream, *model.CallError) {
-	entry, ok := r.config.Models[logical]
+	return r.continueStream(ctx, logical, request, partial, broken, newRouteRuntime(r.plan.Models[logical]))
+}
+
+// continueStream keeps request-wide budgets while replacing only the current
+// selection's exclusion set. A chain retry may reconsider earlier providers,
+// but it never replenishes call counters or extends the original deadline.
+func (r *Runner) continueStream(ctx context.Context, logical string, request model.ExecuteRequest, partial *subsystem.PartialStreamOutput, broken []string, runtime *routeRuntime) (*SelectedStream, *model.CallError) {
+	entry, ok := r.plan.Models[logical]
 	if !ok {
 		return nil, &model.CallError{Class: model.ErrorInvalid, Status: 404, Cause: errors.New("continue: unknown logical model")}
 	}
@@ -82,7 +92,14 @@ func (r *Runner) ContinueStream(ctx context.Context, logical string, request mod
 	if request.StreamIdleTimeout <= 0 {
 		request.StreamIdleTimeout = r.StreamIdleTimeout(logical)
 	}
-	runtime := newRouteRuntime(entry)
+	if runtime.expired() {
+		return nil, model.RouteTimeoutError()
+	}
+	if !runtime.hasCallBudget(entry) {
+		return nil, emptyPoolError()
+	}
+	runtime.exclude = make(map[string]bool)
+	runtime.excludeTargets = make(map[targetKey]bool)
 	// A continuation must never re-race a provider that is still cooling
 	// (it just broke): the strict policy disables the availability fail-open,
 	// so an all-cooling pool yields no targets here instead of re-adding the
@@ -110,7 +127,7 @@ func (r *Runner) ContinueStream(ctx context.Context, logical string, request mod
 // relayed winner stream: explicit continue.idle wins, then the route's timeout
 // rule (idle or duration), and finally the config fallback.
 func (r *Runner) StreamIdleTimeout(logical string) time.Duration {
-	if entry, ok := r.config.Models[logical]; ok {
+	if entry, ok := r.plan.Models[logical]; ok {
 		if entry.Continue.Enabled && entry.Continue.Idle > 0 {
 			return entry.Continue.Idle
 		}
@@ -121,7 +138,7 @@ func (r *Runner) StreamIdleTimeout(logical string) time.Duration {
 			return entry.RouteTimeout
 		}
 	}
-	return r.config.Raw.StreamIdleTimeout.Duration
+	return r.plan.StreamIdleTimeout
 }
 
 // continuePolicy reports the compiled in-gateway takeover policy (the
@@ -129,7 +146,7 @@ func (r *Runner) StreamIdleTimeout(logical string) time.Duration {
 // Like repetitionPolicy, it is enabled only by an explicit "continue" rule on
 // the entry route, never implicitly by "retry".
 func (r *Runner) ContinuePolicy(logical string) (policy.ContinueConfig, bool) {
-	entry, ok := r.config.Models[logical]
+	entry, ok := r.plan.Models[logical]
 	if !ok {
 		return policy.ContinueConfig{}, false
 	}
@@ -141,7 +158,7 @@ func (r *Runner) ContinuePolicy(logical string) (policy.ContinueConfig, bool) {
 // active. Absence means no loop detection: the relay behaves exactly as
 // before, mirroring how an absent continue rule disables takeovers.
 func (r *Runner) RepetitionPolicy(logical string) (policy.RepetitionConfig, bool) {
-	entry, ok := r.config.Models[logical]
+	entry, ok := r.plan.Models[logical]
 	if !ok {
 		return policy.RepetitionConfig{}, false
 	}
