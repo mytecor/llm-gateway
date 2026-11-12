@@ -303,6 +303,11 @@ func (s *semaphore) acquire(provider string, inFlight int) bool {
 // route's race batch (group 0) plus, when configured and armed, the hedge
 // target batch (group 1). It is owned by the single scheduler goroutine except
 // for branch goroutines sending on results.
+type activeBranch struct {
+	provider string
+	started  time.Time
+}
+
 type schedule struct {
 	r       *Runner
 	ctx     context.Context
@@ -326,6 +331,7 @@ type schedule struct {
 	stream         bool
 	results        chan *branchResult
 	cancels        map[int]context.CancelFunc
+	activeBranches map[int]activeBranch
 	sem            *semaphore
 	runtime        *routeRuntime
 	active         int
@@ -416,6 +422,9 @@ func (sc *schedule) launch(g int) bool {
 		sc.runtime.used[target.Provider] = true
 		branchCtx, cancel := context.WithCancel(sc.ctx)
 		sc.cancels[id] = cancel
+		if sc.activeBranches != nil {
+			sc.activeBranches[id] = activeBranch{provider: target.Provider, started: sc.r.now()}
+		}
 		// The permit owns the slot, the balancing load signal and its metric
 		// through the branch and any selected stream handed to the caller.
 		go sc.runBranch(branchCtx, id, cancel, target, permit)
@@ -481,9 +490,36 @@ func (sc *schedule) cancelOthers(except int) {
 	}
 }
 
+func (r *Runner) observeProviderOutcome(provider string, callErr *model.CallError, latency time.Duration) {
+	if provider == "" {
+		return
+	}
+	r.scores.Observe(provider, callErr, latency)
+	r.capacity.ObserveOutcome(provider, callErr)
+	if r.metrics != nil {
+		r.metrics.ObserveProviderEWMATTFT(provider, time.Duration(r.scores.LatencyOf(provider)*float64(time.Second)))
+	}
+}
+
 func (sc *schedule) cancelAll() {
 	for _, cancel := range sc.cancels {
 		cancel()
+	}
+}
+
+func (sc *schedule) observeRouteTimeouts() {
+	if len(sc.activeBranches) == 0 {
+		return
+	}
+	now := sc.r.now()
+	timeoutErr := model.RouteTimeoutError()
+	for id, active := range sc.activeBranches {
+		var latency time.Duration
+		if !active.started.IsZero() {
+			latency = now.Sub(active.started)
+		}
+		sc.r.observeProviderOutcome(active.provider, timeoutErr, latency)
+		delete(sc.activeBranches, id)
 	}
 }
 
@@ -636,18 +672,19 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 		totalTargets += len(group)
 	}
 	sc := &schedule{
-		r:       r,
-		ctx:     ctx,
-		logical: logical,
-		route:   route,
-		groups:  groups,
-		request: request,
-		stream:  streamMode,
-		results: make(chan *branchResult, totalTargets),
-		cancels: make(map[int]context.CancelFunc),
-		sem:     &runtime.sem,
-		runtime: runtime,
-		hedgeG:  hedgeG,
+		r:              r,
+		ctx:            ctx,
+		logical:        logical,
+		route:          route,
+		groups:         groups,
+		request:        request,
+		stream:         streamMode,
+		results:        make(chan *branchResult, totalTargets),
+		cancels:        make(map[int]context.CancelFunc),
+		activeBranches: make(map[int]activeBranch, totalTargets),
+		sem:            &runtime.sem,
+		runtime:        runtime,
+		hedgeG:         hedgeG,
 	}
 	sc.armed = make([]bool, len(groups))
 	sc.excludeUsed = make([]bool, len(groups))
@@ -710,6 +747,7 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 	for {
 		select {
 		case res := <-sc.results:
+			delete(sc.activeBranches, res.id)
 			if !res.winner && res.err == nil {
 				res.err = &model.CallError{Class: model.ErrorInvalid, Status: 502}
 			}
@@ -729,11 +767,7 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 					if !res.finished.IsZero() && !res.started.IsZero() {
 						latency = res.finished.Sub(res.started)
 					}
-					r.scores.Observe(res.provider, res.err, latency)
-					r.capacity.ObserveOutcome(res.provider, res.err)
-					if r.metrics != nil {
-						r.metrics.ObserveProviderEWMATTFT(res.provider, time.Duration(r.scores.LatencyOf(res.provider)*float64(time.Second)))
-					}
+					r.observeProviderOutcome(res.provider, res.err, latency)
 				}
 			} else {
 				r.observeBranchCancelled(res)
@@ -775,6 +809,7 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 		case <-sc.hedgeC:
 			sc.hedgeC = nil
 			if runtime.expired() {
+				sc.observeRouteTimeouts()
 				sc.cancelAll()
 				return &routeOutcome{err: model.RouteTimeoutError()}
 			}
@@ -805,6 +840,7 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 				)
 			}
 		case <-deadlineCh:
+			sc.observeRouteTimeouts()
 			sc.cancelAll()
 			return &routeOutcome{err: model.RouteTimeoutError()}
 		case <-ctx.Done():

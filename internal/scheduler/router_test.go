@@ -2228,3 +2228,30 @@ func TestDynamicAdmissionCapacityExcludesCoolingProviders(t *testing.T) {
 		t.Fatalf("dynamic capacity with cooling provider a = %d, want 6", got)
 	}
 }
+
+func TestRouteTimeoutRecordsHealthAndCapacity(t *testing.T) {
+	rules := append(policytest.EntryRules([]string{"a", "b"}, 1),
+		&policy.TimeoutRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionTimeout}, Duration: policy.Duration{Duration: 25 * time.Millisecond}},
+	)
+	compiled := configtest.RulesConfig(t, 2, rules)
+	pa := compiled.Providers["a"]
+	pa.MaxConcurrent = 4
+	compiled.Providers["a"] = pa
+
+	runner := NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), &fakeExecutor{
+		do: func(ctx context.Context, target model.Target, req model.ExecuteRequest) ([]byte, *model.CallError) {
+			<-ctx.Done()
+			return nil, &model.CallError{Class: model.ErrorCancelled, Status: 499}
+		},
+	})
+	_, callErr := runner.Run(context.Background(), "standard", model.ExecuteRequest{})
+	if callErr == nil || callErr.Class != model.ErrorTimeout {
+		t.Fatalf("expected route timeout error, got %#v", callErr)
+	}
+	if health := runner.scores.Health("a", 5*time.Minute, 0.2); health != 0 {
+		t.Fatalf("expected provider a health=0 after route timeout, got %v", health)
+	}
+	if lim := runner.capacity.Limit("a"); lim != 2 {
+		t.Fatalf("expected provider a effective capacity halved to 2, got %d", lim)
+	}
+}
