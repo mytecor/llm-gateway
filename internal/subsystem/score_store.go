@@ -112,16 +112,18 @@ func (s *ScoreStore) latencyOf(provider string) float64 {
 	if score, ok := s.providers[provider]; ok && score.latencyOK && score.latency > 0 {
 		return score.latency
 	}
-	minLatency := math.Inf(1)
+	maxLatency := 0.0
 	haveBaseline := false
 	for _, other := range s.providers {
 		if other.latencyOK && other.latency > 0 {
-			minLatency = math.Min(minLatency, other.latency)
-			haveBaseline = true
+			if !haveBaseline || other.latency > maxLatency {
+				maxLatency = other.latency
+				haveBaseline = true
+			}
 		}
 	}
 	if haveBaseline {
-		return minLatency
+		return maxLatency * 1.5
 	}
 	return 1.0
 }

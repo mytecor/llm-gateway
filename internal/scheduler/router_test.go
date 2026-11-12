@@ -2173,3 +2173,58 @@ func TestParallelRaceWholePoolHungCarrierDoesNotBlock(t *testing.T) {
 		t.Fatalf("expected 2 upstream calls (b,c), got %d", calls.Load())
 	}
 }
+
+func TestCooldownExponentialBackoffAndProviderScope(t *testing.T) {
+	compiled := configtest.RaceOnlyConfig(t)
+	runner := NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), &fakeExecutor{do: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) {
+		return successBody("a"), nil
+	}})
+	now := time.Unix(1_700_000_000, 0)
+	runner.now = func() time.Time { return now }
+
+	// First 402 cools provider across all models for 10m.
+	runner.record(context.Background(), "a", "model-x", &model.CallError{Class: model.ErrorUpstream, Status: 402})
+	if got := runner.cooldownUntil("a", "model-y").Sub(now); got != 10*time.Minute {
+		t.Fatalf("first 402 provider-wide cooldown = %v, want 10m", got)
+	}
+	// Second consecutive 402 doubles cooldown to 20m.
+	runner.record(context.Background(), "a", "model-x", &model.CallError{Class: model.ErrorUpstream, Status: 402})
+	if got := runner.cooldownUntil("a", "model-y").Sub(now); got != 20*time.Minute {
+		t.Fatalf("second 402 provider-wide cooldown = %v, want 20m", got)
+	}
+	// Success resets streak and clears provider-wide cooldown.
+	runner.record(context.Background(), "a", "model-y", nil)
+	if until := runner.cooldownUntil("a", "model-x"); !until.IsZero() {
+		t.Fatalf("success must clear provider-wide cooldown, got %v", until)
+	}
+	runner.record(context.Background(), "a", "model-x", &model.CallError{Class: model.ErrorUpstream, Status: 402})
+	if got := runner.cooldownUntil("a", "model-x").Sub(now); got != 10*time.Minute {
+		t.Fatalf("after reset, 402 cooldown = %v, want 10m", got)
+	}
+}
+
+func TestDynamicAdmissionCapacityExcludesCoolingProviders(t *testing.T) {
+	rules := append(policytest.EntryRules([]string{"a", "b"}, 1),
+		&policy.AdmissionRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionAdmission}, MaxInFlight: 20, Dynamic: true},
+	)
+	compiled := configtest.RulesConfig(t, 2, rules)
+	pa := compiled.Providers["a"]
+	pa.MaxConcurrent = 4
+	compiled.Providers["a"] = pa
+	pb := compiled.Providers["b"]
+	pb.MaxConcurrent = 6
+	compiled.Providers["b"] = pb
+
+	runner := NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), &fakeExecutor{do: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) {
+		return successBody("a"), nil
+	}})
+	entry := runner.plan.Models["standard"]
+	if got := runner.dynamicRouteCapacity(entry); got != 10 {
+		t.Fatalf("healthy dynamic capacity = %d, want 10", got)
+	}
+
+	runner.record(context.Background(), "a", "native-model", &model.CallError{Class: model.ErrorUpstream, Status: 402})
+	if got := runner.dynamicRouteCapacity(entry); got != 6 {
+		t.Fatalf("dynamic capacity with cooling provider a = %d, want 6", got)
+	}
+}

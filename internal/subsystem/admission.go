@@ -21,6 +21,7 @@ type AdmissionController struct {
 
 type admissionQueue struct {
 	inFlight int
+	limit    int
 	waiters  []chan struct{}
 }
 
@@ -45,6 +46,7 @@ func (ac *AdmissionController) Admit(ctx context.Context, route string, policy p
 		q = &admissionQueue{}
 		ac.routes[route] = q
 	}
+	q.limit = policy.MaxInFlight
 
 	if q.inFlight < policy.MaxInFlight {
 		q.inFlight++
@@ -150,7 +152,7 @@ func (ac *AdmissionController) removeWaiter(q *admissionQueue, route string, tar
 }
 
 func (ac *AdmissionController) releaseSlotLocked(q *admissionQueue, route string) {
-	if len(q.waiters) > 0 {
+	if len(q.waiters) > 0 && (q.limit <= 0 || q.inFlight <= q.limit) {
 		next := q.waiters[0]
 		q.waiters = q.waiters[1:]
 		if ac.metrics != nil {

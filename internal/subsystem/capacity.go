@@ -1,18 +1,23 @@
 package subsystem
 
 import (
+	"sync"
+
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/telemetry"
-	"sync"
 )
 
 // ProviderCapacity owns global provider limits and their live reservations.
 // Balancing and metrics read the same count; only a permit can release a slot.
+// Effective limits adapt dynamically via AIMD within [1, configuredLimit] when
+// upstream rate limits, timeouts, or 5xx errors occur.
 type ProviderCapacity struct {
-	mu           sync.Mutex
-	used, limits map[string]int
-	changed      chan struct{}
-	metrics      *telemetry.Metrics
+	mu              sync.Mutex
+	used, limits    map[string]int
+	effectiveLimits map[string]int
+	successStreaks  map[string]int
+	changed         chan struct{}
+	metrics         *telemetry.Metrics
 }
 
 type Permit struct {
@@ -22,14 +27,28 @@ type Permit struct {
 }
 
 func NewProviderCapacity(metrics *telemetry.Metrics) *ProviderCapacity {
-	return &ProviderCapacity{used: make(map[string]int), limits: make(map[string]int), changed: make(chan struct{}), metrics: metrics}
+	return &ProviderCapacity{
+		used:            make(map[string]int),
+		limits:          make(map[string]int),
+		effectiveLimits: make(map[string]int),
+		successStreaks:  make(map[string]int),
+		changed:         make(chan struct{}),
+		metrics:         metrics,
+	}
 }
 
-func (c *ProviderCapacity) limit(provider string) int {
+func (c *ProviderCapacity) configuredLimit(provider string) int {
 	if n := c.limits[provider]; n > 0 {
 		return n
 	}
 	return 16
+}
+
+func (c *ProviderCapacity) limit(provider string) int {
+	if n := c.effectiveLimits[provider]; n > 0 {
+		return n
+	}
+	return c.configuredLimit(provider)
 }
 
 func (c *ProviderCapacity) SetLimit(provider string, n int) {
@@ -39,11 +58,56 @@ func (c *ProviderCapacity) SetLimit(provider string, n int) {
 		n = 16
 	}
 	c.limits[provider] = n
+	c.effectiveLimits[provider] = n
+	c.successStreaks[provider] = 0
 	if c.metrics != nil {
 		c.metrics.ObserveProviderCapacity(provider, n)
 	}
 	close(c.changed)
 	c.changed = make(chan struct{})
+}
+
+// ObserveOutcome adjusts the provider's effective concurrency limit using AIMD:
+// consecutive successes gently probe upward toward the configured ceiling, while
+// congestion/timeout/5xx failures halve the effective limit (floor 1).
+func (c *ProviderCapacity) ObserveOutcome(provider string, callErr *model.CallError) {
+	if provider == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ceiling := c.configuredLimit(provider)
+	eff := c.limit(provider)
+	if eff > ceiling {
+		eff = ceiling
+	}
+	if callErr == nil {
+		c.successStreaks[provider]++
+		if c.successStreaks[provider] >= 4 && eff < ceiling {
+			eff++
+			c.effectiveLimits[provider] = eff
+			c.successStreaks[provider] = 0
+			if c.metrics != nil {
+				c.metrics.ObserveProviderCapacity(provider, eff)
+			}
+			close(c.changed)
+			c.changed = make(chan struct{})
+		}
+		return
+	}
+	switch callErr.Class {
+	case model.ErrorRateLimit, model.ErrorTimeout, model.ErrorConnection, model.ErrorUpstream:
+		c.successStreaks[provider] = 0
+		next := max(1, eff/2)
+		if next != eff {
+			c.effectiveLimits[provider] = next
+			if c.metrics != nil {
+				c.metrics.ObserveProviderCapacity(provider, next)
+			}
+			close(c.changed)
+			c.changed = make(chan struct{})
+		}
+	}
 }
 
 func (c *ProviderCapacity) Acquire(provider string) *Permit {
@@ -85,16 +149,19 @@ func (c *ProviderCapacity) Count(provider string) int {
 	defer c.mu.Unlock()
 	return c.used[provider]
 }
+
 func (c *ProviderCapacity) Limit(provider string) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.limit(provider)
 }
+
 func (c *ProviderCapacity) Changed() <-chan struct{} {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.changed
 }
+
 func (c *ProviderCapacity) Available(targets []model.Target) []model.Target {
 	c.mu.Lock()
 	defer c.mu.Unlock()

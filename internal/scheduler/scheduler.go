@@ -730,6 +730,7 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 						latency = res.finished.Sub(res.started)
 					}
 					r.scores.Observe(res.provider, res.err, latency)
+					r.capacity.ObserveOutcome(res.provider, res.err)
 					if r.metrics != nil {
 						r.metrics.ObserveProviderEWMATTFT(res.provider, time.Duration(r.scores.LatencyOf(res.provider)*float64(time.Second)))
 					}

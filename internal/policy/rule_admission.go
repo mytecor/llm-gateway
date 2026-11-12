@@ -8,6 +8,7 @@ type AdmissionConfig struct {
 	MaxInFlight int
 	MaxPending  int
 	WaitTimeout time.Duration
+	Dynamic     bool
 }
 
 // AdmissionRule declares the admission and queueing policy on a route.
@@ -17,6 +18,7 @@ type AdmissionRule struct {
 	MaxInFlight int      `json:"max_in_flight,omitempty"`
 	MaxPending  *int     `json:"max_pending,omitempty"`
 	WaitTimeout Duration `json:"wait_timeout,omitempty"`
+	Dynamic     bool     `json:"dynamic,omitempty"`
 }
 
 func (r *AdmissionRule) apply(ctx *stageContext) error {
@@ -51,6 +53,7 @@ func (r *AdmissionRule) apply(ctx *stageContext) error {
 		MaxInFlight: maxInFlight,
 		MaxPending:  maxPending,
 		WaitTimeout: waitTimeout,
+		Dynamic:     r.Dynamic,
 	}
 	return nil
 }

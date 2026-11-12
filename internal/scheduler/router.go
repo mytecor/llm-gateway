@@ -27,6 +27,7 @@ type Runner struct {
 	// lazy: no timer rearms it, entries are checked at request time and an
 	// expired entry is dropped on the pair's next success.
 	cooling      map[cooldownKey]time.Time
+	authStreaks  map[string]int
 	leases       *subsystem.LeaseStore
 	scores       *subsystem.ScoreStore
 	capacity     *subsystem.ProviderCapacity
@@ -92,7 +93,8 @@ func New(plan policy.RuntimePlan, deps Dependencies) *Runner {
 	runner := &Runner{
 		plan: plan, catalog: deps.Catalog, executor: deps.Executor, logger: deps.Logger,
 		now: time.Now, sleep: sleepContext, cooling: make(map[cooldownKey]time.Time),
-		metrics: deps.Metrics, capacity: deps.Capacity, scores: deps.Scores,
+		authStreaks: make(map[string]int),
+		metrics:     deps.Metrics, capacity: deps.Capacity, scores: deps.Scores,
 		leases: deps.Leases, affinity: deps.Affinity, admission: deps.Admission, ownsAffinity: ownsAffinity,
 	}
 	if registry, ok := deps.Executor.(interface {
@@ -175,6 +177,7 @@ func (r *Runner) RecordStreamFailure(ctx context.Context, logical, provider, nat
 		r.observeLeaseFailure(logical, entry, provider, callErr)
 	}
 	r.scores.Observe(provider, callErr, 0)
+	r.capacity.ObserveOutcome(provider, callErr)
 	r.metrics.ObserveAttempt(provider, nativeModel, string(callErr.Class))
 	r.metrics.ObserveStreamBreak(provider, nativeModel, string(callErr.Class))
 	telemetry.LogEvent(ctx, r.logger, slog.LevelWarn, "llm_stream_break",
@@ -246,11 +249,51 @@ func (r *Runner) admit(ctx context.Context, logical string, runtime *routeRuntim
 	if !ok {
 		return func() {}, nil
 	}
+	adm := entry.Admission
+	if adm.Dynamic {
+		dynamicCap := r.dynamicRouteCapacity(entry)
+		if adm.MaxInFlight > 0 && adm.MaxInFlight < dynamicCap {
+			dynamicCap = adm.MaxInFlight
+		}
+		adm.MaxInFlight = dynamicCap
+	}
 	deadline := time.Time{}
 	if runtime != nil {
 		deadline = runtime.deadline
 	}
-	return r.admission.Admit(ctx, entry.Name, entry.Admission, deadline)
+	return r.admission.Admit(ctx, entry.Name, adm, deadline)
+}
+
+func (r *Runner) dynamicRouteCapacity(entry *policy.CompiledRoute) int {
+	if entry == nil || len(entry.Pool) == 0 {
+		return 1
+	}
+	r.mu.Lock()
+	now := r.now()
+	seen := make(map[string]struct{}, len(entry.Pool))
+	var candidates []string
+	for _, target := range entry.Pool {
+		if _, ok := seen[target.Provider]; ok {
+			continue
+		}
+		seen[target.Provider] = struct{}{}
+		if !r.coolingLocked(target.Provider, target.Model, now) {
+			candidates = append(candidates, target.Provider)
+		}
+	}
+	r.mu.Unlock()
+
+	total := 0
+	for _, provider := range candidates {
+		if entry.Balance.Enabled && entry.Balance.ErrorBudget > 0 && !r.scores.Healthy(provider, entry.Balance.Window, entry.Balance.ErrorBudget) {
+			continue
+		}
+		total += r.capacity.Limit(provider)
+	}
+	if total < 1 {
+		return 1
+	}
+	return total
 }
 
 // Run executes the bounded non-streaming route graph and returns the winner
@@ -536,15 +579,29 @@ func (r *Runner) record(ctx context.Context, providerID, nativeModel string, cal
 	var cooldown time.Duration
 	if callErr == nil {
 		delete(r.cooling, key)
+		delete(r.cooling, cooldownKey{provider: providerID, model: ""})
+		delete(r.authStreaks, providerID)
 	} else if policy.AllRetryableClasses()[callErr.Class] {
 		cooldown = r.plan.Providers[providerID].Cooldown
-		// Auth/billing failures (401/402/403) require operator action (key unblock or credit top-up),
-		// so a 15s default cooldown would immediately re-poison every request.
+		// Auth/billing failures (401/402/403) affect the entire provider across models
+		// and back off exponentially (10m -> 20m -> 40m -> ... -> 6h) so dead keys
+		// or empty balances stop poisoning live requests every 10 minutes.
 		if callErr.Status == 401 || callErr.Status == 402 || callErr.Status == 403 {
-			const authBillingCooldown = 10 * time.Minute
-			if cooldown < authBillingCooldown {
-				cooldown = authBillingCooldown
+			const (
+				authBillingCooldown    = 10 * time.Minute
+				maxAuthBillingCooldown = 6 * time.Hour
+			)
+			streak := r.authStreaks[providerID] + 1
+			r.authStreaks[providerID] = streak
+			shift := min(streak-1, 6)
+			expCooldown := authBillingCooldown << shift
+			if expCooldown > maxAuthBillingCooldown {
+				expCooldown = maxAuthBillingCooldown
 			}
+			if cooldown < expCooldown {
+				cooldown = expCooldown
+			}
+			key = cooldownKey{provider: providerID, model: ""}
 		}
 		newUntil = r.now().Add(cooldown)
 		r.cooling[key] = newUntil
@@ -583,7 +640,10 @@ func (r *Runner) record(ctx context.Context, providerID, nativeModel string, cal
 func (r *Runner) cooldownUntil(providerID, nativeModel string) time.Time {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.cooling[cooldownKey{provider: providerID, model: nativeModel}]
+	if until := r.cooling[cooldownKey{provider: providerID, model: nativeModel}]; !until.IsZero() {
+		return until
+	}
+	return r.cooling[cooldownKey{provider: providerID, model: ""}]
 }
 
 // observeLeaseFailure releases the model lease when its holder fails with a

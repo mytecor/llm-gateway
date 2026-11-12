@@ -592,6 +592,30 @@ func TestExpectedTTFTExplorationPreservesTiers(t *testing.T) {
 	}
 }
 
+func TestExpectedTTFTUnprovenProviderGetsPessimisticLatency(t *testing.T) {
+	clock := newStoreAt(time.Now())
+	clock.store.capacity.SetLimit("proven", 4)
+	clock.store.capacity.SetLimit("unproven", 4)
+
+	clock.store.Observe("proven", nil, 500*time.Millisecond)
+
+	balPolicy := policy.BalanceConfig{
+		Enabled:     true,
+		Strategy:    "expected-ttft",
+		Window:      5 * time.Minute,
+		ErrorBudget: 0.2,
+	}
+	targets := []model.Target{
+		{Provider: "unproven", Model: "m"},
+		{Provider: "proven", Model: "m"},
+	}
+
+	selected := clock.store.Select("standard", targets, balPolicy)
+	if selected[0].Provider != "proven" {
+		t.Fatalf("proven provider must beat unproven provider, got %s", selected[0].Provider)
+	}
+}
+
 func (s *storeClock) acquire(provider string) {
 	s.permitsMu.Lock()
 	defer s.permitsMu.Unlock()
