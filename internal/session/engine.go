@@ -53,6 +53,8 @@ type Event struct {
 }
 
 type Request struct {
+	Exchange                                                           *Exchange
+	ResponseSchema, Correction                                         string
 	Principal, Conversation, LogicalModel, Model, CWD, ReasoningEffort string
 	Messages                                                           []Message
 	Tools                                                              []FunctionTool

@@ -9,6 +9,7 @@ The gateway encapsulates upstream LLM providers: clients interact with virtual l
 ## Features
 
 - **OpenAI Compatibility:** Full support for `/v1/chat/completions` and `/v1/responses` in both standard and streaming (SSE) modes.
+- **Strict Structured Outputs:** JSON Schema validation with up to two corrective generations across HTTP, ACP, and Web; [request contract and examples](./docs/structured-outputs.md).
 - **Logical Models:** Decouples client requests from physical provider models, endpoints, and credentials.
 - **Declarative Routing:** Composable pipeline stages (`filter`, `map`, `admission`, `balance`, `affinity`, `race`, `retry`, `hedge`, `timeout`).
 - **Load Balancing & Resilience:** Dynamic balancing via expected TTFT (EWMA), automatic cooldown on upstream failures (429, 5xx), multi-tier fallbacks, and request hedging.

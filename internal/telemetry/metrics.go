@@ -63,7 +63,9 @@ type Metrics struct {
 	// repetitionTotal counts loop-guard firings (the "repetition" rule), per
 	// entry route and winning provider, incremented exactly once per detected
 	// loop so a bounded loop cannot inflate the series.
-	repetitionTotal *counterVec
+	structuredValidations *counterVec
+	structuredCorrections *counterVec
+	repetitionTotal       *counterVec
 	// streamBreaks counts mid-stream (post-selection) winner stream failures
 	// by provider, native model and error class. These failures escape the
 	// scheduler (the route graph already returned a winner); the
@@ -135,6 +137,8 @@ func NewMetrics() *Metrics {
 		fallbackTotal:          newCounterVec([]string{"from_provider", "to_provider", "reason"}),
 		continueTotal:          newCounterVec([]string{"from_provider", "to_provider", "kind"}),
 		chainRetriesTotal:      newCounterVec([]string{"status"}),
+		structuredValidations:  newCounterVec([]string{"model", "provider", "status"}),
+		structuredCorrections:  newCounterVec([]string{"model"}),
 		repetitionTotal:        newCounterVec([]string{"route", "provider"}),
 		balanceSelections:      newCounterVec([]string{"route", "provider"}),
 		inputTokens:            newCounterVec([]string{"api_key", "model", "provider", "native_model"}),
@@ -375,6 +379,8 @@ func (m *Metrics) WriteExposition(writer io.Writer) error {
 	m.fallbackTotal.write(buffered, "llm_fallbacks_total", "Explicit fallback transitions by source and destination provider.")
 	m.continueTotal.write(buffered, "llm_continues_total", "In-gateway stream continuations (continue rule) by source/destination provider and kind (takeover vs chain_retry).")
 	m.chainRetriesTotal.write(buffered, "llm_chain_retries_total", "Whole-chain retries of an exhausted continue chain by outcome (started, completed, exhausted).")
+	m.structuredValidations.write(buffered, "llm_structured_validations_total", "Strict JSON Schema validation outcomes.")
+	m.structuredCorrections.write(buffered, "llm_structured_corrections_total", "Strict output corrective generations.")
 	m.repetitionTotal.write(buffered, "llm_repetition_detected_total", "Loop-guard firings (repetition rule) by route and winning provider, exactly once per detected loop.")
 	m.balanceSelections.write(buffered, "llm_balance_selections_total", "Provider chosen by the balance action per route.")
 	m.inputTokens.write(buffered, "llm_input_tokens_total", "Accumulated input tokens by client key id, logical model, provider and native model.")
@@ -647,4 +653,17 @@ func (h *histogramVec) write(buffered *bufio.Writer, name, help string) {
 // for Prometheus label values.
 func formatFloat(value float64) string {
 	return strconv.FormatFloat(value, 'g', -1, 64)
+}
+
+// ObserveStructuredValidation records no schema or response material.
+func (m *Metrics) ObserveStructuredValidation(logical, provider, status string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.structuredValidations.inc(logical, provider, status)
+}
+
+func (m *Metrics) ObserveStructuredCorrection(logical string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.structuredCorrections.inc(logical)
 }

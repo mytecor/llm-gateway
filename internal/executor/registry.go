@@ -134,6 +134,20 @@ func (r *Registry) Do(ctx context.Context, target model.Target, request model.Ex
 	r.finish(ctx, target, request, err)
 	return body, err
 }
+
+// BeginExchange is used only by a fixed stateful route before its first turn.
+func (r *Registry) BeginExchange(ctx context.Context, target model.Target, request model.ExecuteRequest) (model.Exchange, *model.CallError) {
+	binding, err := r.binding(target, request, false)
+	if err != nil {
+		return nil, err
+	}
+	if executor, ok := binding.Executor.(interface {
+		BeginExchange(context.Context, model.Target, model.ExecuteRequest) (model.Exchange, *model.CallError)
+	}); ok {
+		return executor.BeginExchange(ctx, target, request)
+	}
+	return nil, &model.CallError{Class: model.ErrorInvalid, Status: 400, Code: "unsupported_exchange", Scope: model.FailureScopeRequest, Replay: model.ReplayNotSent}
+}
 func (r *Registry) Stream(ctx context.Context, target model.Target, request model.ExecuteRequest) (<-chan model.StreamEvent, *model.CallError) {
 	binding, err := r.binding(target, request, true)
 	if err != nil {

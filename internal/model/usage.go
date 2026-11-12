@@ -4,8 +4,8 @@ import "encoding/json"
 
 // UsageSummary is the parsed token usage of one provider response (non-stream
 // body or a stream usage chunk). CachedTokens is optional and zero when the
-// provider does not report prompt-cache hits; it is only populated for the
-// Responses API shape (top-level cached_tokens).
+// provider does not report prompt-cache hits. Both Responses cached_tokens and
+// Chat Completions prompt_tokens_details.cached_tokens are supported.
 type UsageSummary struct {
 	Input        int64
 	Output       int64
@@ -45,7 +45,7 @@ func ExtractFinishReason(body []byte) bool {
 // when a provider omits usage entirely (a legitimate response), so the caller
 // contributes zero tokens without inventing them. The expensive responses
 // shape is handled by reading the top-level usage object only; detail data
-// (audio/text/input_details) is intentionally ignored.
+// (audio/text/input_details) is intentionally ignored except prompt cache usage.
 func ExtractUsage(body []byte) (input, output int64, ok bool) {
 	summary, ok := ExtractUsageFull(body)
 	if !ok {
@@ -73,6 +73,9 @@ func ExtractUsageFull(body []byte) (usage UsageSummary, ok bool) {
 		InputTokens      json.Number `json:"input_tokens"`
 		OutputTokens     json.Number `json:"output_tokens"`
 		CachedTokens     json.Number `json:"cached_tokens"`
+		PromptDetails    struct {
+			CachedTokens json.Number `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	}
 	if err := json.Unmarshal(envelope.Usage, &raw); err != nil {
 		return UsageSummary{}, false
@@ -91,6 +94,9 @@ func ExtractUsageFull(body []byte) (usage UsageSummary, ok bool) {
 	}
 	if n, err := raw.CachedTokens.Int64(); err == nil {
 		usage.CachedTokens += n
+	}
+	if n, err := raw.PromptDetails.CachedTokens.Int64(); err == nil {
+		usage.CachedTokens = n
 	}
 	return usage, true
 }

@@ -84,6 +84,10 @@ func (r *Runtime) clear(s *sessionState, key string) error {
 	return r.registry.store.delete(key)
 }
 func (r *Runtime) Exchange(ctx context.Context, req Request, emit func(Event) error) (*Result, error) {
+	if req.Exchange != nil {
+		req.Exchange.mu.Lock()
+		defer req.Exchange.mu.Unlock()
+	}
 	if r.ctx.Err() != nil {
 		return nil, &Error{Status: 503, Code: "runtime_closed"}
 	}
@@ -98,31 +102,28 @@ func (r *Runtime) Exchange(ctx context.Context, req Request, emit func(Event) er
 	if err != nil {
 		return nil, invalid("invalid_messages", err)
 	}
-	cwd := strings.TrimSpace(req.CWD)
-	if cwd == "" {
-		cwd = r.config.DefaultCWD
-	}
-	cwd, err = resolveCWD(cwd, r.config.AllowedRoots)
-	if err != nil {
-		return nil, invalid("invalid_cwd", err)
-	}
-	// Structured keys avoid collisions between user-supplied names and isolate
-	// principals, providers, native models and effort selections in the store.
-	keyParts := []string{req.Principal, req.Conversation, req.LogicalModel, req.Model, req.ReasoningEffort}
-	if r.config.Provider != "" {
-		keyParts = append(keyParts, r.config.Provider)
-	}
-	keyBytes, _ := json.Marshal(keyParts)
-	key := string(keyBytes)
-	lockCtx, stopLock := context.WithCancel(ctx)
-	stopShutdown := context.AfterFunc(r.ctx, stopLock)
-	defer stopLock()
-	defer stopShutdown()
-	state, err := r.registry.lock(lockCtx, key)
+	cwd, key, err := r.identity(req)
 	if err != nil {
 		return nil, err
 	}
-	defer state.unlock()
+	var state *sessionState
+	if req.Exchange != nil {
+		x := req.Exchange
+		if x.runtime != r || x.key != key || x.done {
+			return nil, invalid("invalid_exchange", errors.New("exchange does not match request"))
+		}
+		state = x.state
+	} else {
+		lockCtx, stopLock := context.WithCancel(ctx)
+		stopShutdown := context.AfterFunc(r.ctx, stopLock)
+		defer stopLock()
+		defer stopShutdown()
+		state, err = r.registry.lock(lockCtx, key)
+		if err != nil {
+			return nil, err
+		}
+		defer state.unlock()
+	}
 	if r.ctx.Err() != nil {
 		return nil, &Error{Status: 503, Code: "runtime_closed"}
 	}
@@ -150,10 +151,16 @@ func (r *Runtime) Exchange(ctx context.Context, req Request, emit func(Event) er
 		if state.active != nil && (same || (state.cwd == cwd && state.toolHash == hash && hasPrefix(state.history, messages))) {
 			return nil, &Error{Status: 409, Code: "turn_pending"}
 		}
+		correcting := req.Exchange != nil && req.Exchange.turns > 0
+		if correcting && (state.process == nil || req.Correction == "") {
+			return nil, &Error{Status: 502, Code: "structured_output_session_lost"}
+		}
 		resume := state.process == nil && state.resumeID != "" && same
 		resuming = resume
 		delta := messages
-		if same && (state.process != nil || resume) {
+		if correcting {
+			delta = []transcriptMessage{{Role: "user", Content: req.Correction}}
+		} else if same && (state.process != nil || resume) {
 			delta = messages[state.persistedHistoryCount():]
 		} else {
 			if err = r.clear(state, key); err != nil {
@@ -168,6 +175,9 @@ func (r *Runtime) Exchange(ctx context.Context, req Request, emit func(Event) er
 		prompt, promptErr := toolTurnPrompt(delta, policy)
 		if promptErr != nil {
 			return nil, invalid("invalid_messages", promptErr)
+		}
+		if !correcting && req.ResponseSchema != "" {
+			prompt += "\n\nReturn only JSON satisfying this JSON Schema:\n" + req.ResponseSchema
 		}
 		preserveResumeOnStartError := false
 		start = func(useResume bool, prompt string) error {
@@ -255,6 +265,9 @@ func (r *Runtime) Exchange(ctx context.Context, req Request, emit func(Event) er
 			}
 			prompt, err = toolTurnPrompt(messages, policy)
 			if err == nil {
+				if req.ResponseSchema != "" {
+					prompt += "\n\nReturn only JSON satisfying this JSON Schema:\n" + req.ResponseSchema
+				}
 				err = start(false, prompt)
 			}
 		}
@@ -373,6 +386,9 @@ func (r *Runtime) Exchange(ctx context.Context, req Request, emit func(Event) er
 						if promptErr != nil {
 							return nil, promptErr
 						}
+						if req.ResponseSchema != "" {
+							prompt += "\n\nReturn only JSON satisfying this JSON Schema:\n" + req.ResponseSchema
+						}
 						if err = start(false, prompt); err != nil {
 							return failed(err)
 						}
@@ -396,6 +412,11 @@ func (r *Runtime) Exchange(ctx context.Context, req Request, emit func(Event) er
 			if event.call != nil || event.done {
 				result.Text = text.String()
 				result.Reasoning = reasoning.String()
+				if req.Exchange != nil {
+					req.Exchange.turns++
+					state.lastAccess = time.Now()
+					return result, nil
+				}
 				state.history = append(append([]transcriptMessage(nil), messages...), transcriptMessage{Role: "assistant", Content: result.Text, ToolCalls: result.ToolCalls})
 				state.historyCount = len(state.history)
 				state.historyHash = transcriptHash(state.history)

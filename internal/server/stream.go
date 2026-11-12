@@ -29,6 +29,7 @@ type sseStreamSink struct {
 	logical, requestID string
 	kind               model.RequestKind
 	begun              bool
+	strict             bool
 }
 
 func (s *sseStreamSink) Begin() {
@@ -60,7 +61,9 @@ func (s *sseStreamSink) KeepAlive(heartbeat scheduler.StreamHeartbeat) bool {
 			chunkID = "chatcmpl-" + s.requestID
 		}
 		var delta map[string]any
-		if heartbeat.ToolCallIndex != nil {
+		if s.strict {
+			delta = map[string]any{}
+		} else if heartbeat.ToolCallIndex != nil {
 			idx := *heartbeat.ToolCallIndex
 			delta = map[string]any{
 				"tool_calls": []map[string]any{{
@@ -99,7 +102,15 @@ func (s *sseStreamSink) Complete() {
 
 func (s *sseStreamSink) Fail(err *model.CallError, retryable bool) {
 	if s.begun {
-		writeStreamError(s.writer, s.flusher, err, s.requestID, retryable)
+		if s.strict {
+			payload := streamErrorPayload(err, s.requestID, false)
+			payload["partial"] = false
+			data, _ := json.Marshal(map[string]any{"error": payload})
+			_, _ = fmt.Fprintf(s.writer, "event: error\ndata: %s\n\n", data)
+			s.flusher.Flush()
+		} else {
+			writeStreamError(s.writer, s.flusher, err, s.requestID, retryable)
+		}
 	} else {
 		writeCallError(s.writer, err)
 	}

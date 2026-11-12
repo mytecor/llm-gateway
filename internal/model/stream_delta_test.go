@@ -5,6 +5,7 @@ import "testing"
 func TestStreamDeltaSupportsChatAndResponsesUsage(t *testing.T) {
 	for _, body := range []string{
 		`{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":8,"cached_tokens":2}}`,
+		`{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":8,"prompt_tokens_details":{"cached_tokens":2}}}`,
 		`{"type":"response.completed","response":{"usage":{"input_tokens":5,"output_tokens":8,"cached_tokens":2}}}`,
 	} {
 		delta, err := DecodeStreamDelta([]byte(body))
@@ -38,5 +39,12 @@ func TestStreamDeltaKeepsTextToolsAndFinishSemantics(t *testing.T) {
 	call := delta.Choices[0].Delta.ToolCalls[0]
 	if call.Index != 2 || call.ID != "call" || call.Function.Arguments != "{}" {
 		t.Fatalf("lost tool call: %+v", call)
+	}
+}
+
+func TestNonStreamChatCachedUsage(t *testing.T) {
+	summary, ok := ExtractUsageFull([]byte(`{"usage":{"prompt_tokens":5,"completion_tokens":8,"prompt_tokens_details":{"cached_tokens":2}}}`))
+	if !ok || summary.Input != 5 || summary.Output != 8 || summary.CachedTokens != 2 {
+		t.Fatalf("lost chat cache usage: %+v %v", summary, ok)
 	}
 }

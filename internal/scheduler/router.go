@@ -266,6 +266,16 @@ func (r *Runner) Run(ctx context.Context, logical string, request model.ExecuteR
 // RunWithResult executes the non-streaming route graph and also reports the
 // winning provider, needed for lease and affinity bookkeeping.
 func (r *Runner) RunWithResult(ctx context.Context, logical string, request model.ExecuteRequest) (*model.RunOutcome, *model.CallError) {
+	outcome, err := r.RunGeneration(ctx, logical, request)
+	if err != nil {
+		return nil, err
+	}
+	return outcome, nil
+}
+
+// RunGeneration executes one complete non-stream route graph and preserves
+// attempt metadata even on failure, without observing a client completion.
+func (r *Runner) RunGeneration(ctx context.Context, logical string, request model.ExecuteRequest) (*model.RunOutcome, *model.CallError) {
 	entry, ok := r.plan.Models[logical]
 	if !ok {
 		return nil, &model.CallError{Class: model.ErrorInvalid, Status: 404, Scope: model.FailureScopeRequest}
@@ -277,14 +287,12 @@ func (r *Runner) RunWithResult(ctx context.Context, logical string, request mode
 	}
 	defer release()
 	outcome := r.executeRoute(ctx, logical, entry, request, false, runtime)
-	if outcome.err != nil {
-		return nil, outcome.err
-	}
 	ttft := time.Duration(0)
 	if outcome.ttft > 0 {
 		ttft = outcome.ttft
 	}
-	return &model.RunOutcome{Body: outcome.body, Provider: outcome.provider, Model: outcome.model, Attempts: outcome.attempts, TTFT: ttft}, nil
+	usage, hasUsage := model.ExtractUsageFull(outcome.body)
+	return &model.RunOutcome{Body: outcome.body, Provider: outcome.provider, Model: outcome.model, Attempts: outcome.attempts, TTFT: ttft, Usage: usage, HasUsage: hasUsage}, outcome.err
 }
 
 // executeRoute uses one bounded transition engine for retry and fallback.
@@ -687,6 +695,7 @@ func (r *Runner) probeStream(ctx context.Context, target model.Target, request m
 		return res
 	}
 	buffered := make([]model.StreamEvent, 0, 4)
+	bufferedBytes := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -707,8 +716,21 @@ func (r *Runner) probeStream(ctx context.Context, target model.Target, request m
 				res.err = normalizeContextError(ctx, event.Err)
 				return res
 			}
+			bufferedBytes += len(event.Data) + 128
+			if request.MaxBufferBytes > 0 && bufferedBytes > request.MaxBufferBytes {
+				res.err = &model.CallError{Class: model.ErrorInvalid, Status: 502, Code: "structured_output_buffer_exceeded", Scope: model.FailureScopeRequest}
+				return res
+			}
 			buffered = append(buffered, event)
-			if event.Meaningful {
+			meaningful := event.Meaningful
+			if !meaningful {
+				if delta, err := model.DecodeStreamDelta(event.Data); err == nil {
+					for _, choice := range delta.Choices {
+						meaningful = meaningful || choice.Delta.Refusal != ""
+					}
+				}
+			}
+			if meaningful {
 				res.winner = true
 				res.finished = r.now()
 				res.selected = &SelectedStream{Buffered: buffered, Remaining: stream}

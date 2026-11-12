@@ -104,6 +104,19 @@ type ExecuteRequest struct {
 	Kind              RequestKind
 	Body              []byte
 	StreamIdleTimeout time.Duration
+	// Exchange keeps a stateful conversation locked across private generations.
+	// These fields are internal and never enter the external driver protocol.
+	MaxBufferBytes int
+	Exchange       Exchange
+	ResponseSchema string
+	Correction     string
+}
+
+// Exchange commits the public assistant response or discards an interrupted
+// native exchange. Both terminal operations are idempotent.
+type Exchange interface {
+	Commit(string) *CallError
+	Abort() *CallError
 }
 
 type StreamEvent struct {
@@ -132,5 +145,7 @@ type RunOutcome struct {
 	Attempts int
 	// TTFT is the time to first meaningful event; for a non-streaming request
 	// this is the full response duration.
-	TTFT time.Duration
+	TTFT     time.Duration
+	Usage    UsageSummary
+	HasUsage bool
 }

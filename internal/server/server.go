@@ -18,6 +18,7 @@ import (
 	"github.com/mytecor/llm-gateway/internal/config"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/scheduler"
+	"github.com/mytecor/llm-gateway/internal/structured"
 	"github.com/mytecor/llm-gateway/internal/subsystem"
 	"github.com/mytecor/llm-gateway/internal/telemetry"
 )
@@ -229,6 +230,18 @@ func (s *Server) inference(writer http.ResponseWriter, request *http.Request, ki
 		writer.Header().Set("X-Session-ID", call.Conversation)
 	}
 	executeRequest := model.ExecuteRequest{Kind: kind, Body: body, Call: call}
+	if kind == model.RequestChat {
+		contract, callErr := structured.Parse(body)
+		if callErr != nil {
+			s.observeRequest(request, metadata.Model, "", "", "failed", time.Since(started))
+			writeCallError(writer, callErr)
+			return
+		}
+		if contract != nil {
+			s.strictInference(writer, request, metadata.Model, executeRequest, contract, metadata.Stream, started)
+			return
+		}
+	}
 	if metadata.Stream {
 		s.stream(writer, request, metadata.Model, executeRequest, started)
 		return

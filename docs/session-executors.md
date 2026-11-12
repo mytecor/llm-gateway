@@ -208,3 +208,12 @@ for the same turn. Emit `done` after the final answer, not while waiting for a
 tool result. `text`/`reasoning` events are deltas; do not repeat a final snapshot
 of already streamed text. Native processes are terminated on cancellation or
 session eviction, and each fresh process receives a new `start` handshake.
+
+## Strict JSON Schema exchanges
+
+[Strict Structured Outputs](./structured-outputs.md) keep the conversation gate
+across the initial generation and corrective native turns. The schema is appended
+to the current prompt, and corrections send only validator feedback. Prefix
+matching and completed checkpoints describe the public transcript, while the
+native session retains hidden correction turns. Failed exchanges discard their
+checkpoint and native process. The session NDJSON protocol remains unchanged.

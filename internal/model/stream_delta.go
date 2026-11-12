@@ -17,6 +17,7 @@ type StreamDelta struct {
 }
 
 type ChatDelta struct {
+	Refusal          string           `json:"refusal"`
 	Content          string           `json:"content"`
 	Reasoning        string           `json:"reasoning"`
 	ReasoningContent string           `json:"reasoning_content"`
@@ -38,6 +39,9 @@ type StreamUsage struct {
 	InputTokens      json.Number `json:"input_tokens"`
 	OutputTokens     json.Number `json:"output_tokens"`
 	CachedTokens     json.Number `json:"cached_tokens"`
+	PromptDetails    struct {
+		CachedTokens json.Number `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
 }
 
 func DecodeStreamDelta(data []byte) (StreamDelta, error) {
@@ -78,6 +82,6 @@ func (d StreamDelta) UsageSummary() (UsageSummary, bool) {
 	return UsageSummary{
 		Input:        number(u.PromptTokens) + number(u.InputTokens),
 		Output:       number(u.CompletionTokens) + number(u.OutputTokens),
-		CachedTokens: number(u.CachedTokens),
+		CachedTokens: max(number(u.CachedTokens), number(u.PromptDetails.CachedTokens)),
 	}, true
 }

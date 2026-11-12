@@ -57,7 +57,41 @@ func (e *Executor) prepare(ctx context.Context, target model.Target, req model.E
 	if conversation == "" {
 		conversation = body.SessionID
 	}
-	return runtime.Request{Principal: req.Call.Principal, LogicalModel: req.Call.LogicalModel, Conversation: conversation, Model: native, CWD: req.Call.CWD, ReasoningEffort: body.Effort, Messages: body.Messages, Tools: body.Tools, ToolChoice: body.ToolChoice}, nil
+	request := runtime.Request{Principal: req.Call.Principal, LogicalModel: req.Call.LogicalModel, Conversation: conversation, Model: native, CWD: req.Call.CWD, ReasoningEffort: body.Effort, Messages: body.Messages, Tools: body.Tools, ToolChoice: body.ToolChoice, ResponseSchema: req.ResponseSchema, Correction: req.Correction}
+	if req.Exchange != nil {
+		x, ok := req.Exchange.(*exchange)
+		if !ok {
+			return runtime.Request{}, &model.CallError{Class: model.ErrorInvalid, Status: 400, Code: "invalid_exchange", Scope: model.FailureScopeRequest}
+		}
+		request.Exchange = x.native
+	}
+	return request, nil
+}
+
+type exchange struct{ native *runtime.Exchange }
+
+func (x *exchange) Commit(content string) *model.CallError {
+	if err := x.native.Commit(content); err != nil {
+		return callError(err, model.ReplayCompleted)
+	}
+	return nil
+}
+func (x *exchange) Abort() *model.CallError {
+	if err := x.native.Abort(); err != nil {
+		return callError(err, model.ReplayUnknown)
+	}
+	return nil
+}
+func (e *Executor) BeginExchange(ctx context.Context, target model.Target, req model.ExecuteRequest) (model.Exchange, *model.CallError) {
+	request, callErr := e.prepare(ctx, target, req)
+	if callErr != nil {
+		return nil, callErr
+	}
+	x, err := e.runtime.Begin(ctx, request)
+	if err != nil {
+		return nil, callError(err, model.ReplayNotSent)
+	}
+	return &exchange{native: x}, nil
 }
 func (e *Executor) Do(ctx context.Context, target model.Target, req model.ExecuteRequest) ([]byte, *model.CallError) {
 	request, err := e.prepare(ctx, target, req)

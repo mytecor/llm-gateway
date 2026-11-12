@@ -35,8 +35,10 @@ type StreamHeartbeat struct {
 // streamRun owns one client stream across selection, continuation and recovery.
 // Only its goroutine mutates the selected stream or its admission release.
 type streamRun struct {
+	generation                           bool
 	runner                               *Runner
 	ctx                                  context.Context
+	cancel                               context.CancelFunc
 	logical                              string
 	request                              model.ExecuteRequest
 	started                              time.Time
@@ -52,6 +54,7 @@ type streamRun struct {
 	idleTimer                            *time.Timer
 	rules                                subsystem.RuntimeRules
 	sawFinishReason                      bool
+	sawRefusal                           bool
 	inTokens, outTokens, cachedTokens    int64
 	hasUsage                             bool
 	brokenProviders                      []string
@@ -61,12 +64,16 @@ type streamRun struct {
 // RunStream owns the complete streaming lifecycle, including the selected
 // provider's cancellation and the route admission permit, until transport exit.
 func (r *Runner) RunStream(ctx context.Context, logical string, request model.ExecuteRequest, started time.Time, sink StreamSink) {
+	r.runStream(ctx, logical, request, started, sink, false)
+}
+
+func (r *Runner) runStream(ctx context.Context, logical string, request model.ExecuteRequest, started time.Time, sink StreamSink, generation bool) *model.RunOutcome {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	continuation, _ := r.ContinuePolicy(logical)
 	repetition, _ := r.RepetitionPolicy(logical)
 	x := &streamRun{
-		runner: r, ctx: ctx, logical: logical, request: request, started: started,
+		generation: generation, runner: r, ctx: ctx, cancel: cancel, logical: logical, request: request, started: started,
 		sink: sink, partial: subsystem.NewPartialStreamOutput(continuation.Enabled, continuation.MaxBufferBytes),
 		runtime:      newRouteRuntime(r.plan.Models[logical]),
 		continuation: continuation, idleTimeout: r.StreamIdleTimeout(logical),
@@ -75,7 +82,7 @@ func (r *Runner) RunStream(ctx context.Context, logical string, request model.Ex
 	}
 	defer x.finishRun()
 	if !x.selectWinner() {
-		return
+		return x.outcome()
 	}
 	x.begin()
 	x.evaluate(policy.RuleEvent{Kind: policy.RuleStreamStart})
@@ -84,6 +91,15 @@ func (r *Runner) RunStream(ctx context.Context, logical string, request model.Ex
 		defer x.idleTimer.Stop()
 	}
 	x.relay()
+	return x.outcome()
+}
+
+func (x *streamRun) outcome() *model.RunOutcome {
+	out := &model.RunOutcome{Attempts: x.runtime.attempts, Usage: model.UsageSummary{Input: x.inTokens, Output: x.outTokens, CachedTokens: x.cachedTokens}, HasUsage: x.hasUsage}
+	if x.current != nil {
+		out.Provider, out.Model, out.TTFT = x.current.Provider, x.current.Model, x.current.TTFT
+	}
+	return out
 }
 
 func closeSelected(selected *SelectedStream) {
@@ -155,7 +171,18 @@ func (x *streamRun) selectWinner() bool {
 	// An unbuffered handoff keeps ownership in the selection goroutine until
 	// this run accepts the winner. Early transport exit cancels and releases it.
 	results := make(chan result)
+	done := make(chan struct{})
+	accepted := false
+	defer func() {
+		// Generation outcomes read the route counters. Selection must relinquish
+		// ownership before that read, including early transport cancellation.
+		if !accepted {
+			x.cancel()
+		}
+		<-done
+	}()
 	go func() {
+		defer close(done)
 		selected, err := x.runner.selectAdmittedStream(x.ctx, x.logical, x.request, x.runtime)
 		select {
 		case results <- result{selected, err}:
@@ -175,7 +202,7 @@ func (x *streamRun) selectWinner() bool {
 			}
 		case result := <-results:
 			if result.err != nil {
-				telemetry.LogEvent(x.ctx, x.runner.logger, slog.LevelWarn, "request_failed",
+				telemetry.LogEvent(x.ctx, x.runner.logger, slog.LevelWarn, x.failureEvent(),
 					"kind", x.request.Kind, "logical_model", x.logical, "stream", true,
 					"status_code", model.CallErrorStatus(result.err), "error_type", string(result.err.Class),
 					"duration_ms", time.Since(x.started).Milliseconds())
@@ -183,6 +210,7 @@ func (x *streamRun) selectWinner() bool {
 				x.fail(result.err)
 				return false
 			}
+			accepted = true
 			x.current = result.selected
 			x.release = x.current.Release
 			x.current.Release = nil
@@ -199,6 +227,10 @@ func (x *streamRun) routeName() string {
 }
 
 func (x *streamRun) observeRequest(provider, native, status string) {
+	if x.generation {
+		x.observed = true
+		return
+	}
 	if x.observed {
 		return
 	}
@@ -250,6 +282,7 @@ func (x *streamRun) swapTo(next *SelectedStream) {
 	x.brokenProviders = append(x.brokenProviders, x.current.Provider)
 	x.current = next
 	x.sawFinishReason = false
+	x.sawRefusal = false
 	x.evaluate(policy.RuleEvent{Kind: policy.RuleStreamStart})
 	x.rearmIdle()
 }
@@ -447,6 +480,9 @@ func (x *streamRun) stopLoop(loop *model.CallError) bool {
 
 func (x *streamRun) completeStreamSuccess() {
 	x.sink.Complete()
+	if x.generation {
+		return
+	}
 	telemetry.LogEvent(x.ctx, x.runner.logger, slog.LevelInfo, "request_completed",
 		"kind", x.request.Kind,
 		"route", x.routeName(),
@@ -474,7 +510,7 @@ func (x *streamRun) finalizeCompletedStream() bool {
 	if x.request.Kind != model.RequestChat {
 		return false
 	}
-	if x.sawFinishReason && (x.partial.GotText || x.partial.GotToolCalls) {
+	if x.sawFinishReason && (x.partial.GotText || x.partial.GotToolCalls || x.sawRefusal) {
 		x.completeStreamSuccess()
 		return true
 	}
@@ -499,7 +535,7 @@ func (x *streamRun) finalizeCompletedStream() bool {
 }
 
 func (x *streamRun) handleStreamAbruptEnd(broken *model.CallError, reason string) bool {
-	telemetry.LogEvent(x.ctx, x.runner.logger, slog.LevelWarn, "request_failed",
+	telemetry.LogEvent(x.ctx, x.runner.logger, slog.LevelWarn, x.failureEvent(),
 		"kind", x.request.Kind, "logical_model", x.logical, "stream", true,
 		"provider", x.current.Provider,
 		"native_model", x.current.Model,
@@ -584,7 +620,7 @@ func (x *streamRun) relay() {
 					x.fail(broken)
 					return
 				}
-				if x.request.Kind == model.RequestChat && x.sawFinishReason && !x.partial.GotText && !x.partial.GotToolCalls {
+				if x.request.Kind == model.RequestChat && x.sawFinishReason && !x.partial.GotText && !x.partial.GotToolCalls && !x.sawRefusal {
 					broken := &model.CallError{Class: model.ErrorUpstream, Status: 502,
 						Cause: errors.New("winner stream ended with empty completion (no content, no tool calls)")}
 					if x.handleStreamAbruptEnd(broken, "empty_completion") {
@@ -608,7 +644,7 @@ func (x *streamRun) relay() {
 // A successful takeover leaves its buffer queued for the next relay iteration.
 func (x *streamRun) handleEvent(event model.StreamEvent) bool {
 	if event.Err != nil {
-		telemetry.LogEvent(x.ctx, x.runner.logger, slog.LevelWarn, "request_failed",
+		telemetry.LogEvent(x.ctx, x.runner.logger, slog.LevelWarn, x.failureEvent(),
 			"kind", x.request.Kind, "logical_model", x.logical, "stream", true,
 			"provider", x.current.Provider,
 			"native_model", x.current.Model,
@@ -641,6 +677,9 @@ func (x *streamRun) handleEvent(event model.StreamEvent) bool {
 		return false
 	}
 	if x.request.Kind == model.RequestChat {
+		for _, choice := range delta.Choices {
+			x.sawRefusal = x.sawRefusal || choice.Delta.Refusal != ""
+		}
 		x.partial.Accumulate(delta)
 		x.sawFinishReason = x.sawFinishReason || delta.Finished()
 	}
@@ -657,4 +696,11 @@ func (x *streamRun) handleEvent(event model.StreamEvent) bool {
 	}
 	x.bind(event)
 	return x.write(event)
+}
+
+func (x *streamRun) failureEvent() string {
+	if x.generation {
+		return "generation_failed"
+	}
+	return "request_failed"
 }

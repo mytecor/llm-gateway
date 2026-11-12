@@ -16,6 +16,7 @@ flowchart TD
         Server["HTTP Server & Transport<br/>/v1/chat/completions, /v1/responses, /v1/models"]
         Auth["Auth & Context<br/>Bearer Tokens, Request ID, Client Key"]
         
+        Structured["Structured Output Controller<br/>(Validation, Buffering, Correction)"]
         Scheduler["Scheduler & Pipeline Router<br/>(Dynamic Graph, DAG Validation)"]
         
         subgraph Subsystems["Stateful Core Subsystems"]
@@ -42,6 +43,10 @@ flowchart TD
     Client --> Server
     Server --> Auth
     Auth --> Scheduler
+    Auth -->|Strict JSON Schema| Structured
+    Structured --> Scheduler
+    Scheduler -->|Completed strict generation| Structured
+    Structured -->|Begin / Commit / Abort exchange| SessionExec
     Scheduler <--> Subsystems
     Scheduler --> ExternalDriver
     Scheduler --> SessionExec
@@ -258,6 +263,34 @@ the shared [session NDJSON protocol](docs/session-executors.md#session-ndjson-dr
   - [`drivers/web/README.md`](drivers/web/README.md) (`web-driver`): Standalone Rust crate automating browser sessions over CDP using YAML site profiles.
 - **`drivers/acp/bridge.go` and `drivers/acp/facade.go`**:
   - Provide the private stdio MCP subprocess mode and the session HTTP facade inside the ACP driver.
+
+---
+
+### Strict Structured Outputs
+
+Strict Chat Completions use an outer validation/correction loop. Each generation
+runs the normal scheduler pipeline. HTTP corrections reroute the same logical
+model; stateful corrections retain the native session. The session runtime holds
+the conversation gate across generations and checkpoints only the accepted public
+transcript. The NDJSON driver protocol is unchanged.
+
+```mermaid
+flowchart LR
+    Client["Client<br/>Strict JSON Schema"] --> Structured["Structured Output Controller<br/>Compile, Buffer, Validate"]
+    Structured --> Scheduler["Scheduler<br/>Route and Execute"]
+    Scheduler --> HTTP["HTTP Driver<br/>Stateless Generation"]
+    Scheduler --> Session["Session Runtime<br/>Native Conversation Exchange"]
+    Session --> Native["ACP / Web Driver<br/>Continue Native Chat"]
+    HTTP --> Structured
+    Native --> Structured
+    Structured -->|Invalid: bounded feedback| Scheduler
+    Structured -->|Accepted response or terminal error| Client
+```
+
+Selected streaming events stay buffered until validation succeeds. The outer
+controller owns one client completion observation and the shared deadline;
+scheduler generations retain branch, provider usage, admission, and recovery
+accounting. See [strict response contracts](./docs/structured-outputs.md).
 
 ---
 

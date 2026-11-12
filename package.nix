@@ -6,14 +6,18 @@ buildGo127Module {
   pname = "llm-gateway";
   version = "0.1.0";
 
-  src = ./.;
-  vendorHash = null;
+  # The core package does not need independent drivers or local build caches.
+  src = lib.fileset.toSource {
+    root = ./.;
+    fileset = lib.fileset.unions [ ./go.mod ./go.sum ./cmd ./driverproto ./internal ];
+  };
+  vendorHash = "sha256-qVoj03LNLbdoCUAOydK7oEHsuZ1BZ6Z2jwYB3gPOfrw=";
   subPackages = [ "cmd/llm-gateway" ];
 
   doCheck = true;
   checkPhase = ''
     runHook preCheck
-    go test ./driverproto ./internal/model ./internal/policy ./internal/session ./internal/telemetry
+    go test ./driverproto ./internal/model ./internal/policy ./internal/session ./internal/structured ./internal/telemetry
     runHook postCheck
   '';
 
