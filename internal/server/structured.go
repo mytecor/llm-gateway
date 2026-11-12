@@ -42,11 +42,16 @@ func (s *Server) strictInference(writer http.ResponseWriter, request *http.Reque
 		s.observeRequest(request, logical, provider, native, status, time.Since(started))
 		event, level := "request_completed", slog.LevelInfo
 		code := 200
+		errorType, errorCode := "", ""
 		if status != "success" {
 			event, level = "request_failed", slog.LevelWarn
 			code = model.CallErrorStatus(callErr)
+			if callErr != nil {
+				errorType = string(callErr.Class)
+				errorCode = callErr.Code
+			}
 		}
-		telemetry.LogEvent(ctx, s.logger, level, event, "kind", model.RequestChat, "route", s.routeOf(logical), "logical_model", logical, "provider", provider, "native_model", native, "stream", stream, "status", status, "status_code", code, "duration_ms", time.Since(started).Milliseconds(), "ttft_ms", summary.TTFT.Milliseconds(), "attempts", summary.Attempts, "input_tokens", summary.Usage.Input, "output_tokens", summary.Usage.Output, "cached_tokens", summary.Usage.CachedTokens, "has_usage", summary.HasUsage)
+		telemetry.LogEvent(ctx, s.logger, level, event, "kind", model.RequestChat, "route", s.routeOf(logical), "logical_model", logical, "provider", provider, "native_model", native, "stream", stream, "status", status, "status_code", code, "error_type", errorType, "error_code", errorCode, "duration_ms", time.Since(started).Milliseconds(), "ttft_ms", summary.TTFT.Milliseconds(), "attempts", summary.Attempts, "input_tokens", summary.Usage.Input, "output_tokens", summary.Usage.Output, "cached_tokens", summary.Usage.CachedTokens, "has_usage", summary.HasUsage)
 	}()
 	fail := func(err *model.CallError) {
 		callErr = err

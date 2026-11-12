@@ -533,10 +533,20 @@ func (r *Runner) record(ctx context.Context, providerID, nativeModel string, cal
 	before := r.cooldownUntil(providerID, nativeModel)
 	r.mu.Lock()
 	newUntil := time.Time{}
+	var cooldown time.Duration
 	if callErr == nil {
 		delete(r.cooling, key)
 	} else if policy.AllRetryableClasses()[callErr.Class] {
-		newUntil = r.now().Add(r.plan.Providers[providerID].Cooldown)
+		cooldown = r.plan.Providers[providerID].Cooldown
+		// Auth/billing failures (401/402/403) require operator action (key unblock or credit top-up),
+		// so a 15s default cooldown would immediately re-poison every request.
+		if callErr.Status == 401 || callErr.Status == 402 || callErr.Status == 403 {
+			const authBillingCooldown = 10 * time.Minute
+			if cooldown < authBillingCooldown {
+				cooldown = authBillingCooldown
+			}
+		}
+		newUntil = r.now().Add(cooldown)
 		r.cooling[key] = newUntil
 	}
 	r.mu.Unlock()
@@ -564,7 +574,7 @@ func (r *Runner) record(ctx context.Context, providerID, nativeModel string, cal
 		"provider", providerID,
 		"native_model", nativeModel,
 		"error_type", string(callErr.Class),
-		"cooldown_ms", int64(r.plan.Providers[providerID].Cooldown.Milliseconds()),
+		"cooldown_ms", int64(cooldown.Milliseconds()),
 	)
 }
 

@@ -175,7 +175,7 @@ func (s *ScoreStore) Observe(provider string, callErr *model.CallError, latency 
 			bucket.failures++
 		}
 	}
-	if success {
+	if success || (callErr != nil && callErr.Class == model.ErrorTimeout && latency > 0) {
 		// EWMA with α=0.3 (window ≈ 3 samples): smooth but responsive enough
 		// that a provider recovering from a bad spell starts winning back
 		// influence instead of being cemented out by a long stale history.

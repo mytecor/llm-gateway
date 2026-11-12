@@ -1054,6 +1054,24 @@ func TestCooldownIsolatesByProviderModelPair(t *testing.T) {
 	}
 }
 
+func TestCooldownAppliesLongWindowForAuthAndBillingErrors(t *testing.T) {
+	compiled := configtest.RaceOnlyConfig(t)
+	runner := NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), &fakeExecutor{do: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) {
+		return successBody("a"), nil
+	}})
+	now := time.Unix(1_700_000_000, 0)
+	runner.now = func() time.Time { return now }
+
+	for _, status := range []int{401, 402, 403} {
+		runner.record(context.Background(), "a", "model-x", &model.CallError{Class: model.ErrorUpstream, Status: status})
+		until := runner.cooldownUntil("a", "model-x")
+		if got := until.Sub(now); got < 10*time.Minute {
+			t.Fatalf("status %d cooldown = %v, want >= 10m", status, got)
+		}
+		runner.record(context.Background(), "a", "model-x", nil)
+	}
+}
+
 // TestCooldownUntilGaugeFlow pins the metric feedback of the
 // cooldown cycle: the gauge enters with the window, refreshes while the window
 // re-extends, clears on success, and never reports a stale window as cooling.

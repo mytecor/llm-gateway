@@ -447,6 +447,17 @@ func TestExpectedTTFTHealthyBeatsUnhealthyRegardlessOfInitialLatency(t *testing.
 	}
 }
 
+func TestTimeoutUpdatesLatencyEWMA(t *testing.T) {
+	clock := newStoreAt(time.Now())
+	clock.store.Observe("a", nil, 2*time.Second)
+	before := clock.store.LatencyOf("a")
+	clock.store.Observe("a", &model.CallError{Class: model.ErrorTimeout}, 60*time.Second)
+	after := clock.store.LatencyOf("a")
+	if after <= before {
+		t.Fatalf("timeout must increase latency EWMA: before=%v after=%v", before, after)
+	}
+}
+
 func TestExpectedTTFTBalancingShiftsLoadWhenFastProviderIsBusy(t *testing.T) {
 	clock := newStoreAt(time.Now())
 	clock.store.capacity.SetLimit("fast", 4)
