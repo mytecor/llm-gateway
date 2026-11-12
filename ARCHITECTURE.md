@@ -17,6 +17,7 @@ flowchart TD
         Auth["Auth & Context<br/>Bearer Tokens, Request ID, Client Key"]
         
         Structured["Structured Output Controller<br/>(Validation, Buffering, Correction)"]
+        Transform["Response Transformations<br/>(Explicit Entry-Route Rules)"]
         Scheduler["Scheduler & Pipeline Router<br/>(Dynamic Graph, DAG Validation)"]
         
         subgraph Subsystems["Stateful Core Subsystems"]
@@ -48,7 +49,8 @@ flowchart TD
     Scheduler -->|Completed strict generation| Structured
     Structured -->|Begin / Commit / Abort exchange| SessionExec
     Scheduler <--> Subsystems
-    Scheduler --> ExternalDriver
+    Scheduler --> Transform
+    Transform --> ExternalDriver
     Scheduler --> SessionExec
     
     SessionExec --> ExternalDriver
@@ -291,6 +293,14 @@ Selected streaming events stay buffered until validation succeeds. The outer
 controller owns one client completion observation and the shared deadline;
 scheduler generations retain branch, provider usage, admission, and recovery
 accounting. See [strict response contracts](./docs/structured-outputs.md).
+
+Stateless entry models may declare output `transform` rules. Transformations wrap
+each physical Chat Completions branch before meaningful-stream selection and
+runtime stream rules, and are inherited by retry/fallback/hedge and continuation
+branches. The opt-in `split_thinking` transformation moves a leading reasoning
+block out of content, so strict validation sees only the final answer. Native
+reasoning/details and signatures remain separate. See
+[response transformations](./docs/response-transforms.md).
 
 ---
 

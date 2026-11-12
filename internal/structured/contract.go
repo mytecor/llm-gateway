@@ -174,6 +174,9 @@ func Answer(body []byte) (content string, refusal bool, callErr *model.CallError
 	if choice.Message.Refusal != nil && *choice.Message.Refusal != "" {
 		return content, true, nil
 	}
+	if choice.Finish == "length" {
+		return "", false, Error(502, "structured_output_incomplete")
+	}
 	if choice.Finish == "content_filter" {
 		return "", false, Error(502, "structured_output_content_filtered")
 	}

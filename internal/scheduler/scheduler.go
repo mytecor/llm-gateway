@@ -7,6 +7,7 @@ import (
 	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/subsystem"
 	"github.com/mytecor/llm-gateway/internal/telemetry"
+	"github.com/mytecor/llm-gateway/internal/transform"
 	"log/slog"
 	"strings"
 	"time"
@@ -502,11 +503,15 @@ func (sc *schedule) runBranch(ctx context.Context, id int, cancel context.Cancel
 	}()
 
 	started := sc.r.now()
+	executor := sc.r.executor
+	if entry := sc.r.plan.Models[sc.logical]; entry != nil {
+		executor = transform.Wrap(executor, entry.Transforms)
+	}
 	var res *branchResult
 	if sc.stream {
 		request := sc.request
 		request.Attempt = model.Attempt{ID: id, Target: target}
-		res = sc.r.probeStream(ctx, target, request)
+		res = sc.r.probeStream(ctx, target, request, executor)
 		if res.selected != nil {
 			// A selected result can lose the race or be abandoned before its
 			// caller accepts ownership. Parent cancellation must release its
@@ -525,7 +530,7 @@ func (sc *schedule) runBranch(ctx context.Context, id int, cancel context.Cancel
 	} else {
 		request := sc.request
 		request.Attempt = model.Attempt{ID: id, Target: target}
-		body, callErr := sc.r.executor.Do(ctx, target, request)
+		body, callErr := executor.Do(ctx, target, request)
 		callErr = normalizeContextError(ctx, callErr)
 		res = &branchResult{winner: callErr == nil, body: body, err: callErr}
 	}

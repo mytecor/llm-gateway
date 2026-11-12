@@ -36,7 +36,10 @@ and filesystem access, is disabled.
 After each complete routing run, the gateway checks exactly one JSON document
 from `choices[0].message.content`. Numeric values retain their precision.
 Markdown fences, additional prose, and trailing JSON documents fail validation.
-The original response text is preserved when accepted.
+The original response text is preserved when accepted, except when the logical
+model explicitly enables a [response transformation](./response-transforms.md).
+For example, `split_thinking` separates a leading reasoning envelope before
+validation; separate reasoning fields never participate in JSON Schema checks.
 
 There are at most two corrective generations after the initial response.
 Feedback contains JSON Pointer locations, violated keywords, and descriptions,
@@ -106,6 +109,7 @@ See [session lifecycle](./session-executors.md) for the underlying runtime.
 | 400 | `structured_output_tools_unsupported` | Non-empty client tools were supplied |
 | 400 | `structured_output_n_unsupported` | `n` differs from one |
 | 502 | `structured_output_validation_failed` | All three generations failed JSON Schema validation |
+| 502 | `structured_output_incomplete` | The provider reached its output limit; the same budget is not retried |
 | 502 | `structured_output_buffer_exceeded` | A generation exceeded its bounded buffer |
 | 502 | `structured_output_unexpected_tool_calls` | The provider unexpectedly returned a function call |
 | 502 | `structured_output_content_filtered` | Generation was filtered without an explicit refusal |

@@ -687,8 +687,8 @@ func isReschedulableError(callErr *model.CallError) bool {
 // probeStream reads one streaming branch until the first meaningful content,
 // reasoning or tool-call event, buffering the prelude. Cancellations of losers
 // are neutral for health and lease state.
-func (r *Runner) probeStream(ctx context.Context, target model.Target, request model.ExecuteRequest) *branchResult {
-	stream, callErr := r.executor.Stream(ctx, target, request)
+func (r *Runner) probeStream(ctx context.Context, target model.Target, request model.ExecuteRequest, executor model.Executor) *branchResult {
+	stream, callErr := executor.Stream(ctx, target, request)
 	res := &branchResult{}
 	if callErr != nil {
 		res.err = callErr

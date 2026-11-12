@@ -55,6 +55,7 @@ type streamRun struct {
 	rules                                subsystem.RuntimeRules
 	sawFinishReason                      bool
 	sawRefusal                           bool
+	sawLength                            bool
 	inTokens, outTokens, cachedTokens    int64
 	hasUsage                             bool
 	brokenProviders                      []string
@@ -283,6 +284,7 @@ func (x *streamRun) swapTo(next *SelectedStream) {
 	x.current = next
 	x.sawFinishReason = false
 	x.sawRefusal = false
+	x.sawLength = false
 	x.evaluate(policy.RuleEvent{Kind: policy.RuleStreamStart})
 	x.rearmIdle()
 }
@@ -510,7 +512,7 @@ func (x *streamRun) finalizeCompletedStream() bool {
 	if x.request.Kind != model.RequestChat {
 		return false
 	}
-	if x.sawFinishReason && (x.partial.GotText || x.partial.GotToolCalls || x.sawRefusal) {
+	if x.sawFinishReason && (x.partial.GotText || x.partial.GotToolCalls || x.sawRefusal || x.sawLength) {
 		x.completeStreamSuccess()
 		return true
 	}
@@ -620,7 +622,7 @@ func (x *streamRun) relay() {
 					x.fail(broken)
 					return
 				}
-				if x.request.Kind == model.RequestChat && x.sawFinishReason && !x.partial.GotText && !x.partial.GotToolCalls && !x.sawRefusal {
+				if x.request.Kind == model.RequestChat && x.sawFinishReason && !x.partial.GotText && !x.partial.GotToolCalls && !x.sawRefusal && !x.sawLength {
 					broken := &model.CallError{Class: model.ErrorUpstream, Status: 502,
 						Cause: errors.New("winner stream ended with empty completion (no content, no tool calls)")}
 					if x.handleStreamAbruptEnd(broken, "empty_completion") {
@@ -679,6 +681,7 @@ func (x *streamRun) handleEvent(event model.StreamEvent) bool {
 	if x.request.Kind == model.RequestChat {
 		for _, choice := range delta.Choices {
 			x.sawRefusal = x.sawRefusal || choice.Delta.Refusal != ""
+			x.sawLength = x.sawLength || choice.FinishReason == "length"
 		}
 		x.partial.Accumulate(delta)
 		x.sawFinishReason = x.sawFinishReason || delta.Finished()

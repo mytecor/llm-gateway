@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/mytecor/llm-gateway/internal/model"
+	"github.com/mytecor/llm-gateway/internal/transform"
 )
 
 // CompiledRoute is the compiled, immutable routing-graph node for one named
@@ -48,6 +49,9 @@ type CompiledRoute struct {
 	// Repetition is the in-gateway loop-guard policy (see RepetitionConfig).
 	// Absent (Disabled) means no loop detection, exactly like Continue.
 	Repetition RepetitionConfig
+	// Transforms apply to every Chat Completions branch of this entry model,
+	// including branches in retry/fallback/hedge and continuation routes.
+	Transforms []transform.Kind
 	// RouteTimeout bounds the entire route graph.
 	RouteTimeout time.Duration
 	// StreamIdleTimeout bounds per-chunk silence on the relayed winner stream.

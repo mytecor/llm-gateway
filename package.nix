@@ -17,7 +17,7 @@ buildGo127Module {
   doCheck = true;
   checkPhase = ''
     runHook preCheck
-    go test ./driverproto ./internal/model ./internal/policy ./internal/session ./internal/structured ./internal/telemetry
+    go test ./driverproto ./internal/model ./internal/policy ./internal/session ./internal/structured ./internal/transform ./internal/telemetry
     runHook postCheck
   '';
 

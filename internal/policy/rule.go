@@ -65,6 +65,7 @@ const (
 	ActionFallback   = "fallback"
 	ActionContinue   = "continue"
 	ActionRepetition = "repetition"
+	ActionTransform  = "transform"
 )
 
 // ruleDescriptor declares an action factory and its decoding aliases.
@@ -95,6 +96,7 @@ var ruleRegistry = map[string]ruleDescriptor{
 	ActionFallback:   {new: func() Rule { return &FallbackRule{} }},
 	ActionContinue:   {new: func() Rule { return &ContinueRule{} }},
 	ActionRepetition: {new: func() Rule { return &RepetitionRule{} }},
+	ActionTransform:  {new: func() Rule { return &TransformRule{} }},
 }
 
 // ruleErrf formats a rule error that always carries the rule index,
