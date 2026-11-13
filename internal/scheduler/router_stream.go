@@ -46,7 +46,8 @@ func (r *Runner) selectAdmittedStream(ctx context.Context, logical string, reque
 	if admitErr != nil {
 		return nil, admitErr
 	}
-	outcome := r.executeRoute(ctx, logical, entry, request, true, runtime)
+	startRoute := r.firstActiveRoute(entry, runtime.exclude, runtime.budget)
+	outcome := r.executeRoute(ctx, logical, startRoute, request, true, runtime)
 	if outcome.err != nil {
 		release()
 		return nil, outcome.err

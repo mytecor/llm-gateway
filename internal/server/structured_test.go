@@ -370,3 +370,156 @@ func TestStrictBufferOverflowFailsClosed(t *testing.T) {
 		t.Fatalf("status=%d body bytes=%d", resp.StatusCode, len(body))
 	}
 }
+
+func strictLengthCompletion(text string) []byte {
+	data, _ := json.Marshal(map[string]any{"id": "c", "model": "native-model", "choices": []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": text}, "finish_reason": "length"}}, "usage": map[string]any{"prompt_tokens": 3, "completion_tokens": 128, "total_tokens": 131}})
+	return data
+}
+
+func TestStrictIncompleteOutputFailsOverAcrossPoolAndTiers(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, failSecondTierZero := range []bool{false, true} {
+			name := fmt.Sprintf("stream=%t/cross-tier=%t", stream, failSecondTierZero)
+			t.Run(name, func(t *testing.T) {
+				cfg := configtest.TestConfig()
+				cfg.Rules = nil
+				zero := 0
+				cfg.Models = map[string]policy.ModelSpec{"standard": {
+					Profile: "balanced",
+					Budget:  &policy.BudgetSpec{MaxCalls: 4, MaxInFlight: 1, MaxCallsPerProvider: 1, MaxHedges: &zero},
+					Tiers: []policy.TierSpec{
+						{Targets: []policy.TargetSpec{{Provider: "a", Native: "native-model"}, {Provider: "b", Native: "native-model"}}},
+						{Targets: []policy.TargetSpec{{Provider: "c", Native: "native-model"}}},
+					},
+				}}
+				var calls []string
+				exec := &fakeExecutor{
+					do: func(_ context.Context, target model.Target, req model.ExecuteRequest) ([]byte, *model.CallError) {
+						calls = append(calls, target.Provider)
+						if bytes.Contains(req.Body, []byte("invalid JSON Schema")) {
+							t.Fatalf("unexpected validation correction message on incomplete failover: %s", req.Body)
+						}
+						if target.Provider == "a" || (failSecondTierZero && target.Provider == "b") {
+							return strictLengthCompletion(`{"value":`), nil
+						}
+						return strictCompletion(`{"value":42}`), nil
+					},
+					stream: func(_ context.Context, target model.Target, req model.ExecuteRequest) (<-chan model.StreamEvent, *model.CallError) {
+						calls = append(calls, target.Provider)
+						if bytes.Contains(req.Body, []byte("invalid JSON Schema")) {
+							t.Fatalf("unexpected validation correction message on incomplete failover: %s", req.Body)
+						}
+						ch := make(chan model.StreamEvent, 2)
+						if target.Provider == "a" || (failSecondTierZero && target.Provider == "b") {
+							ch <- strictChunk(map[string]any{"content": `{"value":`}, nil)
+							ch <- strictChunk(map[string]any{}, "length")
+						} else {
+							ch <- strictChunk(map[string]any{"content": `{"value":42}`}, nil)
+							ch <- strictChunk(map[string]any{}, "stop")
+						}
+						close(ch)
+						return ch, nil
+					},
+				}
+				api, _ := eventsTestServer(t, cfg, exec)
+				resp, body := postCompletion(t, api.URL, strictRequest(stream))
+				if resp.StatusCode != 200 || !strings.Contains(body, `42`) {
+					t.Fatalf("status=%d body=%s calls=%v", resp.StatusCode, body, calls)
+				}
+				wantCalls := 2
+				if failSecondTierZero {
+					wantCalls = 3
+				}
+				if len(calls) != wantCalls {
+					t.Fatalf("calls=%v, want %d", calls, wantCalls)
+				}
+				var metrics bytes.Buffer
+				if err := api.Config.Handler.(*Server).metrics.WriteExposition(&metrics); err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(metrics.String(), `llm_structured_corrections_total{model="standard"}`) {
+					t.Fatalf("clean failover should not increment correction metric: %s", metrics.String())
+				}
+			})
+		}
+	}
+}
+
+func TestStrictIncompleteOutputDownweightsProviderInExpectedTTFT(t *testing.T) {
+	cfg := configtest.TestConfig()
+	cfg.Providers = cfg.Providers[:2]
+	cfg.Providers[0].Priority = 100
+	cfg.Providers[1].Priority = 50
+	cfg.Rules = nil
+	zero := 0
+	cfg.Models = map[string]policy.ModelSpec{"standard": {
+		Profile: "balanced",
+		Budget:  &policy.BudgetSpec{MaxCalls: 3, MaxInFlight: 1, MaxCallsPerProvider: 1, MaxHedges: &zero},
+		Tiers: []policy.TierSpec{
+			{Targets: []policy.TargetSpec{{Provider: "a", Native: "native-model"}, {Provider: "b", Native: "native-model"}}},
+		},
+	}}
+	var aCalls, bCalls atomic.Int32
+	exec := &fakeExecutor{
+		do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
+			if target.Provider == "a" {
+				aCalls.Add(1)
+				return strictLengthCompletion(`{`), nil
+			}
+			time.Sleep(25 * time.Millisecond)
+			bCalls.Add(1)
+			return strictCompletion(`{"value":7}`), nil
+		},
+	}
+	api, _ := eventsTestServer(t, cfg, exec)
+	for i := 0; i < 6; i++ {
+		resp, body := postCompletion(t, api.URL, strictRequest(false))
+		if resp.StatusCode != 200 || !strings.Contains(body, `7`) {
+			t.Fatalf("iter %d: status=%d body=%s", i, resp.StatusCode, body)
+		}
+	}
+	// Request 1 hits "a" (truncated) then fails over to "b", tripping "a"'s error
+	// budget so later requests pick "b" directly without hitting "a" every time.
+	if aCalls.Load() >= 4 || bCalls.Load() != 6 {
+		t.Fatalf("expected expected-ttft health penalty to steer away from broken a: aCalls=%d bCalls=%d", aCalls.Load(), bCalls.Load())
+	}
+}
+
+func TestStrictValidationErrorFailoverMovesCorrectionToPeer(t *testing.T) {
+	cfg := configtest.TestConfig()
+	cfg.Providers = cfg.Providers[:2]
+	cfg.Rules = nil
+	zero := 0
+	cfg.Models = map[string]policy.ModelSpec{"standard": {
+		Profile: "balanced",
+		Budget:  &policy.BudgetSpec{MaxCalls: 3, MaxInFlight: 1, MaxCallsPerProvider: 1, MaxHedges: &zero},
+		Tiers: []policy.TierSpec{
+			{Targets: []policy.TargetSpec{{Provider: "a", Native: "native-model"}, {Provider: "b", Native: "native-model"}}},
+		},
+	}}
+	var calls []string
+	exec := &fakeExecutor{
+		do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
+			calls = append(calls, target.Provider)
+			if target.Provider == "a" {
+				return strictCompletion(`{"value":-1}`), nil
+			}
+			return strictCompletion(`{"value":5}`), nil
+		},
+	}
+	api, _ := eventsTestServer(t, cfg, exec)
+	resp, body := postCompletion(t, api.URL, strictRequest(false))
+	if resp.StatusCode != 200 || !strings.Contains(body, `5`) {
+		t.Fatalf("status=%d body=%s calls=%v", resp.StatusCode, body, calls)
+	}
+	if len(calls) != 2 || calls[0] != "a" || calls[1] != "b" {
+		t.Fatalf("expected initial attempt on a and correction on b, got %v", calls)
+	}
+	var metrics bytes.Buffer
+	if err := api.Config.Handler.(*Server).metrics.WriteExposition(&metrics); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(metrics.String(), `llm_structured_corrections_total{model="standard"} 1`) {
+		t.Fatalf("missing correction metric: %s", metrics.String())
+	}
+}

@@ -196,6 +196,31 @@ func (r *Runner) RecordStreamFailure(ctx context.Context, logical, provider, nat
 	)
 }
 
+// RecordStructuredFailure feeds structured completeness or validation failures
+// back into mode-aware provider scoring without putting aggregators into hard
+// cooldown, so expected-ttft and health budgets steer traffic toward peers
+// returning complete schema-valid responses.
+func (r *Runner) RecordStructuredFailure(ctx context.Context, logical, provider, nativeModel string, stream bool, code string) {
+	if provider == "" {
+		return
+	}
+	callErr := &model.CallError{
+		Class:  model.ErrorUpstream,
+		Status: 502,
+		Code:   code,
+		Scope:  model.FailureScopeProvider,
+	}
+	r.scores.ObserveMode(provider, stream, callErr, 0)
+	r.metrics.ObserveAttempt(provider, nativeModel, code)
+	telemetry.LogEvent(ctx, r.logger, slog.LevelWarn, "llm_structured_failure",
+		"logical_model", logical,
+		"provider", provider,
+		"native_model", nativeModel,
+		"stream", stream,
+		"error_code", code,
+	)
+}
+
 // streamRetryable reports whether a fresh client request carrying the same
 // failure would activate an explicit transition of the logical model's entry
 // route (retry or fallback, gated by their own error filters). With no
@@ -333,21 +358,22 @@ func (r *Runner) RunWithResult(ctx context.Context, logical string, request mode
 // RunGeneration executes one complete non-stream route graph and preserves
 // attempt metadata even on failure, without observing a client completion.
 func (r *Runner) RunGeneration(ctx context.Context, logical string, request model.ExecuteRequest) (*model.RunOutcome, *model.CallError) {
-	return r.runGeneration(ctx, logical, request, nil)
+	return r.runGeneration(ctx, logical, request, nil, nil)
 }
 
-func (r *Runner) runGeneration(ctx context.Context, logical string, request model.ExecuteRequest, budget *RequestBudget) (*model.RunOutcome, *model.CallError) {
+func (r *Runner) runGeneration(ctx context.Context, logical string, request model.ExecuteRequest, budget *RequestBudget, exclude map[string]bool) (*model.RunOutcome, *model.CallError) {
 	entry, ok := r.plan.Models[logical]
 	if !ok {
 		return nil, &model.CallError{Class: model.ErrorInvalid, Status: 404, Scope: model.FailureScopeRequest}
 	}
-	runtime := newRouteRuntimeWithBudget(entry, budget)
+	runtime := newRouteRuntimeWithExclude(entry, budget, exclude)
 	release, admitErr := r.admit(ctx, logical, runtime)
 	if admitErr != nil {
 		return nil, admitErr
 	}
 	defer release()
-	outcome := r.executeRoute(ctx, logical, entry, request, false, runtime)
+	startRoute := r.firstActiveRoute(entry, runtime.exclude, runtime.budget)
+	outcome := r.executeRoute(ctx, logical, startRoute, request, false, runtime)
 	ttft := time.Duration(0)
 	if outcome.ttft > 0 {
 		ttft = outcome.ttft

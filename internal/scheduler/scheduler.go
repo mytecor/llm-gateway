@@ -102,10 +102,17 @@ func newRouteRuntime(entry *policy.CompiledRoute) *routeRuntime {
 }
 
 func newRouteRuntimeWithBudget(entry *policy.CompiledRoute, budget *RequestBudget) *routeRuntime {
+	return newRouteRuntimeWithExclude(entry, budget, nil)
+}
+
+func newRouteRuntimeWithExclude(entry *policy.CompiledRoute, budget *RequestBudget, exclude map[string]bool) *routeRuntime {
 	runtime := &routeRuntime{
 		used:           make(map[string]bool),
 		exclude:        make(map[string]bool),
 		excludeTargets: make(map[targetKey]bool),
+	}
+	for provider := range exclude {
+		runtime.exclude[provider] = true
 	}
 	var deadline time.Time
 	if entry != nil && entry.RouteTimeout > 0 {

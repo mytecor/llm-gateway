@@ -22,6 +22,17 @@ type Observation struct {
 	Status     string
 }
 
+// MaxFailovers caps clean provider-failover attempts per structured request when
+// upstream aggregators return incomplete or invalid structured output.
+const MaxFailovers = 8
+
+type RunOptions struct {
+	Observe       func(Observation)
+	RecordFailure func(ctx context.Context, outcome model.RunOutcome, code string)
+	Failover      func(ctx context.Context, outcome model.RunOutcome, code string) bool
+	OnCorrection  func()
+}
+
 func Deadline(ctx context.Context, started time.Time, routeTimeout time.Duration) (context.Context, context.CancelFunc) {
 	deadline, hasClient := ctx.Deadline()
 	if routeTimeout > 0 {
@@ -38,6 +49,12 @@ func Deadline(ctx context.Context, started time.Time, routeTimeout time.Duration
 // Run owns the private history and budget. A stateful request carries an
 // Exchange already acquired by its caller; HTTP history is copied on correction.
 func Run(ctx context.Context, c *Contract, request model.ExecuteRequest, execute Execute, observe func(Observation)) (generation *Generation, callError *model.CallError) {
+	return RunWithOptions(ctx, c, request, execute, RunOptions{Observe: observe})
+}
+
+// RunWithOptions runs the structured generation loop with optional failure
+// feedback and cross-provider failover hooks.
+func RunWithOptions(ctx context.Context, c *Contract, request model.ExecuteRequest, execute Execute, opts RunOptions) (generation *Generation, callError *model.CallError) {
 	var usage model.UsageSummary
 	hasUsage := false
 	attempts := 0
@@ -53,7 +70,8 @@ func Run(ctx context.Context, c *Contract, request model.ExecuteRequest, execute
 		defer request.Exchange.Abort()
 		request.ResponseSchema = c.Schema
 	}
-	for i := 0; i <= MaxCorrections; i++ {
+	failovers := 0
+	for i := 0; i <= MaxCorrections; {
 		if err := ctx.Err(); err != nil {
 			return final, contextError(ctx)
 		}
@@ -73,6 +91,15 @@ func Run(ctx context.Context, c *Contract, request model.ExecuteRequest, execute
 			return final, callErr
 		}
 		if result == nil {
+			if failovers < MaxFailovers && request.Exchange == nil && final != nil && final.Outcome.Provider != "" {
+				if opts.RecordFailure != nil {
+					opts.RecordFailure(ctx, final.Outcome, "invalid_upstream_response")
+				}
+				if opts.Failover != nil && opts.Failover(ctx, final.Outcome, "invalid_upstream_response") {
+					failovers++
+					continue
+				}
+			}
 			return nil, Error(502, "invalid_upstream_response")
 		}
 		if len(result.Outcome.Body) > MaxBufferBytes {
@@ -80,6 +107,15 @@ func Run(ctx context.Context, c *Contract, request model.ExecuteRequest, execute
 		}
 		content, refusal, callErr := Answer(result.Outcome.Body)
 		if callErr != nil {
+			if (callErr.Code == "structured_output_incomplete" || callErr.Code == "invalid_upstream_response") && result.Outcome.Provider != "" {
+				if opts.RecordFailure != nil {
+					opts.RecordFailure(ctx, result.Outcome, callErr.Code)
+				}
+				if request.Exchange == nil && failovers < MaxFailovers && opts.Failover != nil && opts.Failover(ctx, result.Outcome, callErr.Code) {
+					failovers++
+					continue
+				}
+			}
 			return final, callErr
 		}
 		var validation error
@@ -92,8 +128,8 @@ func Run(ctx context.Context, c *Contract, request model.ExecuteRequest, execute
 		} else if validation == nil {
 			status = "valid"
 		}
-		if observe != nil {
-			observe(Observation{Generation: i, Outcome: result.Outcome, Status: status})
+		if opts.Observe != nil {
+			opts.Observe(Observation{Generation: i, Outcome: result.Outcome, Status: status})
 		}
 		if refusal || validation == nil {
 			if ctx.Err() != nil {
@@ -108,8 +144,14 @@ func Run(ctx context.Context, c *Contract, request model.ExecuteRequest, execute
 			result.Outcome.Body = WithUsage(result.Outcome.Body, usage, hasUsage)
 			return result, nil
 		}
+		if opts.RecordFailure != nil && result.Outcome.Provider != "" {
+			opts.RecordFailure(ctx, result.Outcome, "structured_output_validation_failed")
+		}
 		if i == MaxCorrections {
 			return final, Error(502, "structured_output_validation_failed")
+		}
+		if request.Exchange == nil && result.Outcome.Provider != "" && opts.Failover != nil {
+			_ = opts.Failover(ctx, result.Outcome, "structured_output_validation_failed")
 		}
 		feedback := Feedback(validation)
 		if request.Exchange != nil {
@@ -121,6 +163,10 @@ func Run(ctx context.Context, c *Contract, request model.ExecuteRequest, execute
 			}
 			request.Body = body
 		}
+		if opts.OnCorrection != nil {
+			opts.OnCorrection()
+		}
+		i++
 	}
 	panic("unreachable correction loop")
 }

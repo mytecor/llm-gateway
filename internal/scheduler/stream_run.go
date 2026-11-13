@@ -69,10 +69,10 @@ func (r *Runner) RunStream(ctx context.Context, logical string, request model.Ex
 }
 
 func (r *Runner) runStream(ctx context.Context, logical string, request model.ExecuteRequest, started time.Time, sink StreamSink, generation bool) *model.RunOutcome {
-	return r.runStreamWithBudget(ctx, logical, request, started, sink, generation, nil)
+	return r.runStreamWithBudget(ctx, logical, request, started, sink, generation, nil, nil)
 }
 
-func (r *Runner) runStreamWithBudget(ctx context.Context, logical string, request model.ExecuteRequest, started time.Time, sink StreamSink, generation bool, budget *RequestBudget) *model.RunOutcome {
+func (r *Runner) runStreamWithBudget(ctx context.Context, logical string, request model.ExecuteRequest, started time.Time, sink StreamSink, generation bool, budget *RequestBudget, exclude map[string]bool) *model.RunOutcome {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	continuation, _ := r.ContinuePolicy(logical)
@@ -80,7 +80,7 @@ func (r *Runner) runStreamWithBudget(ctx context.Context, logical string, reques
 	x := &streamRun{
 		generation: generation, runner: r, ctx: ctx, cancel: cancel, logical: logical, request: request, started: started,
 		sink: sink, partial: subsystem.NewPartialStreamOutput(continuation.Enabled, continuation.MaxBufferBytes),
-		runtime:      newRouteRuntimeWithBudget(r.plan.Models[logical], budget),
+		runtime:      newRouteRuntimeWithExclude(r.plan.Models[logical], budget, exclude),
 		continuation: continuation, idleTimeout: r.StreamIdleTimeout(logical),
 		rules:            subsystem.NewRuntimeRules(continuation, repetition),
 		chainRetriesLeft: continuation.Retries, holdRecoveriesLeft: max(1, continuation.Retries),

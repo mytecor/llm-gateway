@@ -69,13 +69,8 @@ func (s *Server) strictInference(writer http.ResponseWriter, request *http.Reque
 		}
 		defer executeRequest.Exchange.Abort()
 	}
-	generation := 0
 	run := s.runner.NewRequestRun(ctx, logical)
 	execute := func(ctx context.Context, req model.ExecuteRequest) (*structured.Generation, *model.CallError) {
-		if generation > 0 {
-			s.metrics.ObserveStructuredCorrection(logical)
-		}
-		generation++
 		if !stream {
 			result, err := run.RunGeneration(ctx, req)
 			if result == nil {
@@ -96,8 +91,23 @@ func (s *Server) strictInference(writer http.ResponseWriter, request *http.Reque
 		}
 		return &structured.Generation{Outcome: *outcome, Events: buffer.Events}, err
 	}
-	final, callErr = structured.Run(ctx, contract, executeRequest, execute, func(o structured.Observation) {
-		s.metrics.ObserveStructuredValidation(logical, o.Outcome.Provider, o.Status)
+	final, callErr = structured.RunWithOptions(ctx, contract, executeRequest, execute, structured.RunOptions{
+		Observe: func(o structured.Observation) {
+			s.metrics.ObserveStructuredValidation(logical, o.Outcome.Provider, o.Status)
+		},
+		RecordFailure: func(ctx context.Context, outcome model.RunOutcome, code string) {
+			s.runner.RecordStructuredFailure(ctx, logical, outcome.Provider, outcome.Model, stream, code)
+		},
+		Failover: func(ctx context.Context, outcome model.RunOutcome, code string) bool {
+			if !run.CanFailoverProvider(outcome.Provider) {
+				return false
+			}
+			run.ExcludeProvider(outcome.Provider)
+			return true
+		},
+		OnCorrection: func() {
+			s.metrics.ObserveStructuredCorrection(logical)
+		},
 	})
 	if callErr != nil {
 		fail(callErr)
