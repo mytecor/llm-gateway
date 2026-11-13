@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/telemetry"
@@ -47,16 +48,18 @@ func TestCapacityPermitReleaseIsIdempotentAndUpdatesMetrics(t *testing.T) {
 }
 
 func TestCapacityAIMD(t *testing.T) {
-	c := NewProviderCapacity(nil)
+	now := time.Unix(1_700_000_000, 0)
+	c := NewProviderCapacityWithClock(nil, func() time.Time { return now })
 	c.SetLimit("a", 8)
 	if got := c.Limit("a"); got != 8 {
 		t.Fatalf("initial limit = %d, want 8", got)
 	}
-	// Congestion halves effective limit down to floor 1.
+	// Congestion halves effective limit down to floor 1 when separated by the halve cooldown.
 	c.ObserveOutcome("a", &model.CallError{Class: model.ErrorRateLimit, Status: 429})
 	if got := c.Limit("a"); got != 4 {
 		t.Fatalf("after 429 limit = %d, want 4", got)
 	}
+	now = now.Add(defaultCapacityHalveCooldown)
 	c.ObserveOutcome("a", &model.CallError{Class: model.ErrorTimeout, Status: 504})
 	if got := c.Limit("a"); got != 2 {
 		t.Fatalf("after 504 limit = %d, want 2", got)
@@ -67,5 +70,31 @@ func TestCapacityAIMD(t *testing.T) {
 	}
 	if got := c.Limit("a"); got != 3 {
 		t.Fatalf("after 4 successes limit = %d, want 3", got)
+	}
+}
+
+func TestCapacityAIMDDebouncesConcurrentFailures(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	c := NewProviderCapacityWithClock(nil, func() time.Time { return now })
+	c.SetLimit("a", 16)
+
+	// Burst of concurrent failures within the cooldown window must halve only once.
+	for range 5 {
+		c.ObserveOutcome("a", &model.CallError{Class: model.ErrorTimeout, Status: 504})
+	}
+	if got := c.Limit("a"); got != 8 {
+		t.Fatalf("after burst within cooldown limit = %d, want 8", got)
+	}
+
+	now = now.Add(defaultCapacityHalveCooldown - time.Millisecond)
+	c.ObserveOutcome("a", &model.CallError{Class: model.ErrorUpstream, Status: 502})
+	if got := c.Limit("a"); got != 8 {
+		t.Fatalf("before cooldown elapsed limit = %d, want 8", got)
+	}
+
+	now = now.Add(time.Millisecond)
+	c.ObserveOutcome("a", &model.CallError{Class: model.ErrorUpstream, Status: 502})
+	if got := c.Limit("a"); got != 4 {
+		t.Fatalf("after cooldown elapsed limit = %d, want 4", got)
 	}
 }

@@ -2,10 +2,13 @@ package subsystem
 
 import (
 	"sync"
+	"time"
 
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/telemetry"
 )
+
+const defaultCapacityHalveCooldown = 5 * time.Second
 
 // ProviderCapacity owns global provider limits and their live reservations.
 // Balancing and metrics read the same count; only a permit can release a slot.
@@ -13,9 +16,12 @@ import (
 // upstream rate limits, timeouts, or 5xx errors occur.
 type ProviderCapacity struct {
 	mu              sync.Mutex
+	now             func() time.Time
+	halveCooldown   time.Duration
 	used, limits    map[string]int
 	effectiveLimits map[string]int
 	successStreaks  map[string]int
+	lastHalved      map[string]time.Time
 	changed         chan struct{}
 	metrics         *telemetry.Metrics
 }
@@ -27,11 +33,21 @@ type Permit struct {
 }
 
 func NewProviderCapacity(metrics *telemetry.Metrics) *ProviderCapacity {
+	return NewProviderCapacityWithClock(metrics, nil)
+}
+
+func NewProviderCapacityWithClock(metrics *telemetry.Metrics, now func() time.Time) *ProviderCapacity {
+	if now == nil {
+		now = time.Now
+	}
 	return &ProviderCapacity{
+		now:             now,
+		halveCooldown:   defaultCapacityHalveCooldown,
 		used:            make(map[string]int),
 		limits:          make(map[string]int),
 		effectiveLimits: make(map[string]int),
 		successStreaks:  make(map[string]int),
+		lastHalved:      make(map[string]time.Time),
 		changed:         make(chan struct{}),
 		metrics:         metrics,
 	}
@@ -60,6 +76,7 @@ func (c *ProviderCapacity) SetLimit(provider string, n int) {
 	c.limits[provider] = n
 	c.effectiveLimits[provider] = n
 	c.successStreaks[provider] = 0
+	delete(c.lastHalved, provider)
 	if c.metrics != nil {
 		c.metrics.ObserveProviderCapacity(provider, n)
 	}
@@ -98,6 +115,11 @@ func (c *ProviderCapacity) ObserveOutcome(provider string, callErr *model.CallEr
 	switch callErr.Class {
 	case model.ErrorRateLimit, model.ErrorTimeout, model.ErrorConnection, model.ErrorUpstream:
 		c.successStreaks[provider] = 0
+		now := c.now()
+		if last := c.lastHalved[provider]; !last.IsZero() && now.Sub(last) < c.halveCooldown {
+			return
+		}
+		c.lastHalved[provider] = now
 		next := max(1, eff/2)
 		if next != eff {
 			c.effectiveLimits[provider] = next

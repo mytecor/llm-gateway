@@ -2232,6 +2232,43 @@ func TestDynamicAdmissionCapacityExcludesCoolingProviders(t *testing.T) {
 	}
 }
 
+func TestDynamicAdmissionCapacityFallsBackWhenAllNonCoolingUnhealthy(t *testing.T) {
+	rules := []policy.Rule{
+		policytest.FilterModel("standard", "standard"),
+		policytest.FilterProvider("standard", "a", "b"),
+		policytest.MapRuleHelper("standard", "native-model"),
+		policytest.RankRuleHelper("standard"),
+		policytest.BalanceRuleCustom("standard", func(b *policy.BalanceRule) {
+			b.Strategy = "expected-ttft"
+			b.Window = policy.Duration{Duration: 5 * time.Minute}
+			b.ErrorBudget = 0.2
+		}),
+		policytest.RaceRuleHelper("standard", 1),
+		&policy.AdmissionRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionAdmission}, MaxInFlight: 20, Dynamic: true},
+	}
+	compiled := configtest.RulesConfig(t, 2, rules)
+	pa := compiled.Providers["a"]
+	pa.MaxConcurrent = 4
+	compiled.Providers["a"] = pa
+	pb := compiled.Providers["b"]
+	pb.MaxConcurrent = 6
+	compiled.Providers["b"] = pb
+
+	runner := NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), &fakeExecutor{do: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) {
+		return successBody("a"), nil
+	}})
+	entry := runner.plan.Models["standard"]
+
+	// Put both non-cooling providers above error_budget (0.2) without putting them in cooldown.
+	runner.observeProviderOutcome("a", &model.CallError{Class: model.ErrorTimeout, Status: 504}, time.Second)
+	runner.observeProviderOutcome("b", &model.CallError{Class: model.ErrorTimeout, Status: 504}, time.Second)
+
+	// Capacity limits halved once (4->2, 6->3); route must fail-open to sum non-cooling capacity (2+3=5), not serialize to 1.
+	if got := runner.dynamicRouteCapacity(entry); got != 5 {
+		t.Fatalf("dynamic capacity fail-open = %d, want 5", got)
+	}
+}
+
 func TestRouteTimeoutRecordsHealthAndCapacity(t *testing.T) {
 	rules := append(policytest.EntryRules([]string{"a", "b"}, 1),
 		&policy.TimeoutRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionTimeout}, Duration: policy.Duration{Duration: 25 * time.Millisecond}},

@@ -289,17 +289,23 @@ func (r *Runner) dynamicRouteCapacity(entry *policy.CompiledRoute) int {
 	}
 	r.mu.Unlock()
 
-	total := 0
+	healthyTotal := 0
+	allNonCoolingTotal := 0
 	for _, provider := range candidates {
+		limit := r.capacity.Limit(provider)
+		allNonCoolingTotal += limit
 		if entry.Balance.Enabled && entry.Balance.ErrorBudget > 0 && !r.scores.Healthy(provider, entry.Balance.Window, entry.Balance.ErrorBudget) {
 			continue
 		}
-		total += r.capacity.Limit(provider)
+		healthyTotal += limit
 	}
-	if total < 1 {
-		return 1
+	if healthyTotal > 0 {
+		return healthyTotal
 	}
-	return total
+	if allNonCoolingTotal > 0 {
+		return allNonCoolingTotal
+	}
+	return 1
 }
 
 // Run executes the bounded non-streaming route graph and returns the winner
