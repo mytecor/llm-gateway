@@ -50,18 +50,34 @@ func CompileConfig(prepared PreparedConfig) (*CompiledConfig, error) {
 		compiled.Providers[prepared.ID] = prepared
 	}
 
-	result, err := policy.Compile(cfg.Rules, compiled.Providers)
+	result, err := policy.CompileWithModels(cfg.Rules, cfg.Models, compiled.Providers)
 	if err != nil {
 		return nil, err
 	}
-	// A request must be allowed to run for the longest route that can use it.
-	for _, route := range result.Routes {
-		for _, target := range route.Pool {
-			if p, ok := compiled.Providers[target.Provider]; ok && p.RequestTimeout.Duration < route.RouteTimeout {
-				p.RequestTimeout.Duration = route.RouteTimeout
-				compiled.Providers[target.Provider] = p
-			}
+	// A request must be allowed to run for the longest route that can use it,
+	// including every reachable fallback/retry/hedge subroute.
+	for _, entry := range result.Models {
+		if entry.RouteTimeout <= 0 {
+			continue
 		}
+		seen := make(map[*policy.CompiledRoute]bool)
+		var raiseCeiling func(*policy.CompiledRoute)
+		raiseCeiling = func(route *policy.CompiledRoute) {
+			if route == nil || seen[route] {
+				return
+			}
+			seen[route] = true
+			for _, target := range route.Pool {
+				if p, ok := compiled.Providers[target.Provider]; ok && p.RequestTimeout.Duration < entry.RouteTimeout {
+					p.RequestTimeout.Duration = entry.RouteTimeout
+					compiled.Providers[target.Provider] = p
+				}
+			}
+			raiseCeiling(route.RetryTarget)
+			raiseCeiling(route.FallbackTarget)
+			raiseCeiling(route.HedgeTarget)
+		}
+		raiseCeiling(entry)
 	}
 	compiled.Routes = result.Routes
 	compiled.Models = result.Models

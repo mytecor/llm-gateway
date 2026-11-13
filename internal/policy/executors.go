@@ -21,7 +21,7 @@ func validateSessionRoutes(routes map[string]*CompiledRoute, providers map[strin
 		if len(route.Transforms) > 0 {
 			return fmt.Errorf("route %q: response transforms require stateless executors; stateful public history must be managed by the session runtime", route.Name)
 		}
-		if len(route.Pool) != 1 || route.RaceCount != 1 || route.Retry.Attempts > 0 || route.Fallback.Target != "" || route.Hedge.Enabled || route.Continue.Enabled || route.Repetition.Enabled {
+		if len(route.Pool) != 1 || route.RaceCount != 1 || route.Retry.Attempts > 0 || route.RetryTarget != nil || route.Fallback.Target != "" || route.FallbackTarget != nil || route.Hedge.Enabled || route.HedgeTarget != nil || route.Continue.Enabled || route.Repetition.Enabled {
 			return fmt.Errorf("route %q: stateful executors require one target, race count 1 and no retry/fallback/hedge/continue/repetition", route.Name)
 		}
 		for _, parent := range routes {

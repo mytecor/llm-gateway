@@ -64,9 +64,11 @@ func (ac *AdmissionController) Admit(ctx context.Context, route string, policy p
 			ac.metrics.ObserveRouteQueueRejection(route, "max_pending")
 		}
 		return nil, &model.CallError{
-			Class:  model.ErrorRateLimit,
-			Status: http.StatusTooManyRequests,
-			Cause:  fmt.Errorf("route %q queue is full (max_pending=%d)", route, policy.MaxPending),
+			Code:       "route_queue_full",
+			Class:      model.ErrorRateLimit,
+			Status:     http.StatusTooManyRequests,
+			RetryAfter: time.Second,
+			Cause:      fmt.Errorf("route %q queue is full (max_pending=%d)", route, policy.MaxPending),
 		}
 	}
 
@@ -126,9 +128,11 @@ func (ac *AdmissionController) Admit(ctx context.Context, route string, policy p
 			ac.metrics.ObserveRouteQueueRejection(route, "wait_timeout")
 		}
 		return nil, &model.CallError{
-			Class:  model.ErrorTimeout,
-			Status: http.StatusGatewayTimeout,
-			Cause:  fmt.Errorf("route %q queue wait timeout (%s) exceeded", route, waitTimeout),
+			Code:       "route_queue_wait_timeout",
+			Class:      model.ErrorRateLimit,
+			Status:     http.StatusTooManyRequests,
+			RetryAfter: time.Second,
+			Cause:      fmt.Errorf("route %q queue wait timeout (%s) exceeded", route, waitTimeout),
 		}
 	}
 }

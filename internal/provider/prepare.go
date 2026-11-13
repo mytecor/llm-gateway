@@ -28,6 +28,22 @@ func Prepare(ctx context.Context, provider Provider) (Provider, error) {
 	if provider.RequestTimeout.Duration < 0 || provider.Cooldown.Duration < 0 {
 		return Provider{}, fmt.Errorf("provider %q: durations must not be negative", provider.ID)
 	}
+	if len(provider.Labels) > 0 {
+		normalizedLabels := make(map[string]string, len(provider.Labels))
+		for rawKey, rawVal := range provider.Labels {
+			key := strings.TrimSpace(rawKey)
+			val := strings.TrimSpace(rawVal)
+			if key == "" || val == "" {
+				return Provider{}, fmt.Errorf("provider %q: labels must have non-empty keys and values", provider.ID)
+			}
+			if existing, dup := normalizedLabels[key]; dup && existing != val {
+				return Provider{}, fmt.Errorf("provider %q: conflicting normalized label %q", provider.ID, key)
+			}
+			normalizedLabels[key] = val
+		}
+		provider.Labels = normalizedLabels
+	}
+	explicitTimeout := explicitAttemptTimeout(provider)
 	if provider.ModelsURL != "" {
 		if err := validateEndpoint(provider.ModelsURL); err != nil {
 			return Provider{}, fmt.Errorf("provider %q models_url: %w", provider.ID, err)
@@ -41,6 +57,7 @@ func Prepare(ctx context.Context, provider Provider) (Provider, error) {
 	provider.Description = &desc
 	provider.ToolStrategy = desc.ToolStrategy
 	provider.Config = desc.Config
+	provider.AttemptTimeout = Duration{Duration: explicitTimeout}
 
 	if provider.Capabilities().Stateful {
 		if provider.Session == nil {
@@ -113,4 +130,28 @@ func validateEndpoint(value string) error {
 		return errors.New("URL must not contain credentials")
 	}
 	return nil
+}
+
+func explicitAttemptTimeout(p Provider) time.Duration {
+	if p.RequestTimeout.Duration > 0 {
+		return p.RequestTimeout.Duration
+	}
+	if p.Config == nil {
+		return 0
+	}
+	switch v := p.Config["request_timeout_seconds"].(type) {
+	case float64:
+		if v > 0 {
+			return time.Duration(v) * time.Second
+		}
+	case int:
+		if v > 0 {
+			return time.Duration(v) * time.Second
+		}
+	case int64:
+		if v > 0 {
+			return time.Duration(v) * time.Second
+		}
+	}
+	return 0
 }

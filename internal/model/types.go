@@ -29,11 +29,12 @@ const (
 
 type CallError struct {
 	// Code is a stable public code; Cause may contain private diagnostics.
-	Code   string
-	Class  ErrorClass
-	Status int
-	Cause  error
-	Scope  FailureScope
+	Code       string
+	Class      ErrorClass
+	Status     int
+	RetryAfter time.Duration
+	Cause      error
+	Scope      FailureScope
 	// Replay records whether the upstream may already have changed state.
 	Replay ReplaySafety
 }
@@ -46,7 +47,7 @@ func (e *CallError) Error() string {
 }
 
 func RouteTimeoutError() *CallError {
-	return &CallError{Class: ErrorTimeout, Status: 504, Cause: errors.New("route timeout exceeded")}
+	return &CallError{Code: "route_timeout", Class: ErrorTimeout, Status: 504, Cause: errors.New("route timeout exceeded")}
 }
 
 func (e *CallError) HTTPStatus() int {
@@ -103,6 +104,8 @@ type ExecuteRequest struct {
 	Attempt           Attempt
 	Kind              RequestKind
 	Body              []byte
+	AttemptTimeout    time.Duration
+	SingleAttempt     bool
 	StreamIdleTimeout time.Duration
 	// Exchange keeps a stateful conversation locked across private generations.
 	// These fields are internal and never enter the external driver protocol.

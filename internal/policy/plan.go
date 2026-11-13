@@ -11,8 +11,10 @@ type RuntimePlan struct {
 }
 
 type RuntimeProvider struct {
-	Cooldown      time.Duration
-	MaxConcurrent int
+	Cooldown       time.Duration
+	MaxConcurrent  int
+	AttemptTimeout time.Duration
+	SafeReplay     bool
 }
 
 // MaxBalanceWindow covers every reachable subroute as well as entry routes.

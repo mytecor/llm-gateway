@@ -262,6 +262,7 @@ func TestRaceReleasesInFlightGauge(t *testing.T) {
 		close(loserDone)
 		return nil, &model.CallError{Class: model.ErrorCancelled, Status: 499, Cause: ctx.Err()}
 	}})
+	defer runner.Close()
 	go func() {
 		_, _ = runner.Run(context.Background(), "standard", model.ExecuteRequest{Kind: model.RequestChat})
 	}()
@@ -277,6 +278,21 @@ func TestRaceReleasesInFlightGauge(t *testing.T) {
 	case <-loserDone:
 	case <-time.After(time.Second):
 		t.Fatal("loser never returned after being cancelled")
+	}
+	// The executor signals before returning to runBranch. Wait for the actual
+	// permit release (which also updates metrics), rather than racing its defer.
+	timeout := time.NewTimer(time.Second)
+	defer timeout.Stop()
+	for {
+		changed := runner.capacity.Changed()
+		if runner.capacity.Count("a") == 0 && runner.capacity.Count("b") == 0 {
+			break
+		}
+		select {
+		case <-changed:
+		case <-timeout.C:
+			t.Fatal("branch permits were not released")
+		}
 	}
 	body := scrape(t, runner.Metrics())
 	if strings.Contains(body, `llm_requests_in_flight{provider="a"} 1`) {

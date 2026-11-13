@@ -295,6 +295,10 @@ func (d *Driver) submit(ctx context.Context, target model.Target, request model.
 	if request.Kind != model.RequestChat && request.Kind != model.RequestResponses {
 		return nil, "", nil, &model.CallError{Class: model.ErrorInvalid, Status: 400, Replay: model.ReplayNotSent}
 	}
+	if request.SingleAttempt && !d.capabilities.SingleAttempt {
+		return nil, "", nil, &model.CallError{Class: model.ErrorInvalid, Status: 503,
+			Code: "single_attempt_unsupported", Scope: model.FailureScopeTarget, Replay: model.ReplayNotSent}
+	}
 	worker, err := d.currentWorker(ctx)
 	if err != nil {
 		return nil, "", nil, err
@@ -310,10 +314,15 @@ func (d *Driver) submit(ctx context.Context, target model.Target, request model.
 		return nil, "", nil, providerFailure(errors.New("external driver closed before request"))
 	default:
 	}
+	var requestTimeoutMs int64
+	if !stream && request.AttemptTimeout > 0 {
+		requestTimeoutMs = request.AttemptTimeout.Milliseconds()
+	}
 	if writeErr := worker.process.write(ctx, wireInbound{
 		Type: "request", ID: id, Provider: target.Provider, Model: target.Model,
 		Kind: string(request.Kind), Stream: stream, Body: json.RawMessage(request.Body),
-		StreamIdleTimeoutMs: request.StreamIdleTimeout.Milliseconds(),
+		RequestTimeoutMs: requestTimeoutMs, StreamIdleTimeoutMs: request.StreamIdleTimeout.Milliseconds(),
+		SingleAttempt: request.SingleAttempt,
 	}); writeErr != nil {
 		worker.unregister(id)
 		if ctx.Err() != nil {

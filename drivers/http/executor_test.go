@@ -7,11 +7,58 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
 )
+
+func TestUnaryEarlyCancellation(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+	executor, err := NewExecutor(context.Background(), testProviders(upstream.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer executor.Close()
+	for range 100 {
+		ctx, cancel := context.WithCancel(context.Background())
+		timer := time.AfterFunc(time.Microsecond, cancel)
+		_, callErr := executor.Do(ctx, "mock-openai", "native-model", "chat", []byte(`{"messages":[{"role":"user","content":"hi"}]}`))
+		timer.Stop()
+		cancel()
+		if callErr == nil {
+			t.Fatal("cancelled request unexpectedly succeeded")
+		}
+	}
+}
+
+func TestUnaryExplicitLegacyRetries(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"ok","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}`)
+	}))
+	defer upstream.Close()
+	providers := testProviders(upstream.URL)
+	providers[0].BifrostMaxRetries = 1
+	executor, err := NewExecutor(context.Background(), providers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer executor.Close()
+	_, callErr := executor.Do(context.Background(), "mock-openai", "native-model", "chat", []byte(`{"messages":[{"role":"user","content":"hi"}]}`))
+	if callErr != nil || calls.Load() != 2 {
+		t.Fatalf("legacy retry failed: calls=%d err=%+v", calls.Load(), callErr)
+	}
+}
 
 func testProviders(upstreamURL string) []ProviderConfig {
 	return []ProviderConfig{{
@@ -438,4 +485,3 @@ func TestBifrostExecutorRejectsDuplicateStandardProvider(t *testing.T) {
 		t.Fatalf("expected duplicate standard provider error, got %v", err)
 	}
 }
-

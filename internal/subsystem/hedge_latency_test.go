@@ -18,6 +18,31 @@ func warmLatency(s *HedgeLatencyStore, latency time.Duration) {
 	}
 }
 
+func TestReadyThresholdRequiresFreshWarmProfile(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	s := NewHedgeLatencyStore(func() time.Time { return now }, nil)
+	if s.ReadyThreshold("a", "native", true) != 0 || len(s.profiles) != 0 {
+		t.Fatal("read created a cold profile")
+	}
+	for range 19 {
+		s.Begin("a", "native", true).Success(time.Second)
+	}
+	if s.ReadyThreshold("a", "native", true) != 0 {
+		t.Fatal("read used an untrained threshold")
+	}
+	s.Begin("a", "native", true).Success(time.Second)
+	if s.ReadyThreshold("a", "native", true) <= 0 {
+		t.Fatal("trained threshold unavailable")
+	}
+	if s.ReadyThreshold("a", "other", true) != 0 || s.ReadyThreshold("a", "native", false) != 0 {
+		t.Fatal("threshold crossed profile boundaries")
+	}
+	now = now.Add(hedgeRetention)
+	if s.ReadyThreshold("a", "native", true) != 0 {
+		t.Fatal("expired threshold reused")
+	}
+}
+
 func TestHedgeLatencyWarmupNearestRankAndIsolation(t *testing.T) {
 	s := NewHedgeLatencyStore(nil, nil)
 	for i := 1; i <= 20; i++ {

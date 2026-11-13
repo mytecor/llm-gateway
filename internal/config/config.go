@@ -28,8 +28,9 @@ type Config struct {
 	SessionFile                string              `json:"session_file,omitempty"`
 	SessionCheckpointRetention Duration            `json:"session_checkpoint_retention,omitempty"`
 	SessionCheckpointLimit     int                 `json:"session_checkpoint_limit,omitempty"`
-	Providers                  []provider.Provider `json:"providers"`
-	Rules                      policy.Rules        `json:"rules"`
+	Providers                  []provider.Provider         `json:"providers"`
+	Models                     map[string]policy.ModelSpec `json:"models,omitempty"`
+	Rules                      policy.Rules                `json:"rules,omitempty"`
 }
 
 // ClientKey is one named client credential. ID is the non-secret identity
@@ -68,9 +69,12 @@ type CompiledConfig struct {
 func (c *CompiledConfig) RoutingPlan() policy.RuntimePlan {
 	providers := make(map[string]policy.RuntimeProvider, len(c.Providers))
 	for id, p := range c.Providers {
+		safeReplay := p.Description == nil || (!p.Capabilities().Stateful && p.Capabilities().SafeReplay)
 		providers[id] = policy.RuntimeProvider{
-			Cooldown:      p.Cooldown.Duration,
-			MaxConcurrent: p.MaxConcurrent,
+			Cooldown:       p.Cooldown.Duration,
+			MaxConcurrent:  p.MaxConcurrent,
+			AttemptTimeout: p.AttemptTimeout.Duration,
+			SafeReplay:     safeReplay,
 		}
 	}
 	models := make(map[string]*policy.CompiledRoute, len(c.Models))

@@ -321,6 +321,13 @@ func (s *Server) refresh(writer http.ResponseWriter, request *http.Request) {
 
 func writeCallError(writer http.ResponseWriter, callErr *model.CallError) {
 	status := model.CallErrorStatus(callErr)
+	if callErr != nil && callErr.RetryAfter > 0 && (status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable) {
+		seconds := int((callErr.RetryAfter + time.Second - 1) / time.Second)
+		if seconds < 1 {
+			seconds = 1
+		}
+		writer.Header().Set("Retry-After", strconv.Itoa(seconds))
+	}
 	typeName := "upstream_error"
 	if callErr != nil {
 		typeName = string(callErr.Class)

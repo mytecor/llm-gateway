@@ -27,6 +27,8 @@ type Runner struct {
 	// lazy: no timer rearms it, entries are checked at request time and an
 	// expired entry is dropped on the pair's next success.
 	cooling      map[cooldownKey]time.Time
+	halfOpen     map[cooldownKey]*halfOpenState
+	probeSeq     uint64
 	authStreaks  map[string]int
 	leases       *subsystem.LeaseStore
 	scores       *subsystem.ScoreStore
@@ -98,7 +100,7 @@ func New(plan policy.RuntimePlan, deps Dependencies) *Runner {
 	runner := &Runner{
 		plan: plan, catalog: deps.Catalog, executor: deps.Executor, logger: deps.Logger,
 		now: time.Now, sleep: sleepContext, cooling: make(map[cooldownKey]time.Time),
-		authStreaks: make(map[string]int),
+		halfOpen: make(map[cooldownKey]*halfOpenState), authStreaks: make(map[string]int),
 		metrics:     deps.Metrics, capacity: deps.Capacity, scores: deps.Scores,
 		hedgeLatency: deps.HedgeLatency,
 		leases:       deps.Leases, affinity: deps.Affinity, admission: deps.Admission, ownsAffinity: ownsAffinity,
@@ -182,7 +184,7 @@ func (r *Runner) RecordStreamFailure(ctx context.Context, logical, provider, nat
 	if entry, ok := r.plan.Models[logical]; ok {
 		r.observeLeaseFailure(logical, entry, provider, callErr)
 	}
-	r.scores.Observe(provider, callErr, 0)
+	r.scores.ObserveMode(provider, true, callErr, 0)
 	r.capacity.ObserveOutcome(provider, callErr)
 	r.metrics.ObserveAttempt(provider, nativeModel, string(callErr.Class))
 	r.metrics.ObserveStreamBreak(provider, nativeModel, string(callErr.Class))
@@ -331,11 +333,15 @@ func (r *Runner) RunWithResult(ctx context.Context, logical string, request mode
 // RunGeneration executes one complete non-stream route graph and preserves
 // attempt metadata even on failure, without observing a client completion.
 func (r *Runner) RunGeneration(ctx context.Context, logical string, request model.ExecuteRequest) (*model.RunOutcome, *model.CallError) {
+	return r.runGeneration(ctx, logical, request, nil)
+}
+
+func (r *Runner) runGeneration(ctx context.Context, logical string, request model.ExecuteRequest, budget *RequestBudget) (*model.RunOutcome, *model.CallError) {
 	entry, ok := r.plan.Models[logical]
 	if !ok {
 		return nil, &model.CallError{Class: model.ErrorInvalid, Status: 404, Scope: model.FailureScopeRequest}
 	}
-	runtime := newRouteRuntime(entry)
+	runtime := newRouteRuntimeWithBudget(entry, budget)
 	release, admitErr := r.admit(ctx, logical, runtime)
 	if admitErr != nil {
 		return nil, admitErr
@@ -372,6 +378,9 @@ func (r *Runner) executeRoute(ctx context.Context, logical string, route *policy
 		transitions = append(transitions, routeTransition{kind: "fallback", target: route.FallbackTarget, attempts: 1})
 	}
 	for _, transition := range transitions {
+		if outcome.fallbackOnly && transition.kind == "retry" {
+			continue
+		}
 		outcome = r.followTransition(ctx, logical, route, transition, request, streamMode, runtime, outcome, original)
 		if terminalOutcome(outcome) {
 			return outcome
@@ -508,17 +517,17 @@ func (r *Runner) applyLease(logical string, route *policy.CompiledRoute, pool []
 // default to equal (1): provider priority does not feed the runtime choice —
 // f7-13 showed priority-weighted selection concentrates on one provider —
 // it only shapes the compile-time pool order.
-func (r *Runner) applyBalance(route string, routeConfig *policy.CompiledRoute, pool []model.Target) []model.Target {
+func (r *Runner) applyBalance(route string, routeConfig *policy.CompiledRoute, pool []model.Target, stream bool) []model.Target {
 	// The health snapshot is recorded whether or not the pool is large enough
 	// for the balance action to reorder it: the pool state is observable even
 	// for a single-provider balance route.
 	if routeConfig.Balance.Enabled {
-		r.observeBalanceHealth(routeConfig, pool)
+		r.observeBalanceHealth(routeConfig, pool, stream)
 	}
 	if !routeConfig.Balance.Enabled || len(pool) < 2 {
 		return pool
 	}
-	selected := r.scores.Select(route, pool, routeConfig.Balance)
+	selected := r.scores.SelectForMode(route, pool, routeConfig.Balance, stream)
 	// The balanced choice is the front of the returned order; record it so the
 	// cursor movement is observable.
 	if len(selected) > 0 {
@@ -531,9 +540,9 @@ func (r *Runner) applyBalance(route string, routeConfig *policy.CompiledRoute, p
 // member under the route's policy. It must not be confused with the
 // request-level outcome: it describes the provider pool state, not the final
 // winner.
-func (r *Runner) observeBalanceHealth(routeConfig *policy.CompiledRoute, pool []model.Target) {
+func (r *Runner) observeBalanceHealth(routeConfig *policy.CompiledRoute, pool []model.Target, stream bool) {
 	for _, target := range pool {
-		health := r.scores.Health(target.Provider, routeConfig.Balance.Window, routeConfig.Balance.ErrorBudget)
+		health := r.scores.HealthForMode(target.Provider, stream, routeConfig.Balance.Window, routeConfig.Balance.ErrorBudget)
 		r.metrics.ObserveBalanceHealth(target.Provider, health)
 	}
 }
@@ -557,9 +566,10 @@ func (r *Runner) availableTargets(targets []model.Target) []model.Target {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
+	r.promoteExpiredCoolingLocked(now)
 	available := make([]model.Target, 0, len(targets))
 	for _, target := range targets {
-		if !r.coolingLocked(target.Provider, target.Model, now) {
+		if !r.unavailableLocked(target.Provider, target.Model, now) {
 			available = append(available, target)
 		}
 	}
@@ -585,20 +595,35 @@ func (r *Runner) coolingLocked(providerID, model string, now time.Time) bool {
 
 func (r *Runner) record(ctx context.Context, providerID, nativeModel string, callErr *model.CallError) {
 	key := cooldownKey{provider: providerID, model: nativeModel}
+	providerKey := cooldownKey{provider: providerID, model: ""}
 	before := r.cooldownUntil(providerID, nativeModel)
 	r.mu.Lock()
 	newUntil := time.Time{}
 	var cooldown time.Duration
+	wasHalfOpen := false
+	halfOpenDomain := "inference"
+	if st := r.halfOpen[providerKey]; st != nil {
+		wasHalfOpen = true
+		halfOpenDomain = st.domain
+	} else if st := r.halfOpen[key]; st != nil {
+		wasHalfOpen = true
+		halfOpenDomain = st.domain
+	}
+	domain := failureDomain(callErr)
 	if callErr == nil {
 		delete(r.cooling, key)
-		delete(r.cooling, cooldownKey{provider: providerID, model: ""})
+		delete(r.cooling, providerKey)
+		delete(r.halfOpen, key)
+		delete(r.halfOpen, providerKey)
 		delete(r.authStreaks, providerID)
 	} else if policy.AllRetryableClasses()[callErr.Class] {
+		delete(r.halfOpen, key)
+		delete(r.halfOpen, providerKey)
 		cooldown = r.plan.Providers[providerID].Cooldown
 		// Auth/billing failures (401/402/403) affect the entire provider across models
 		// and back off exponentially (10m -> 20m -> 40m -> ... -> 6h) so dead keys
 		// or empty balances stop poisoning live requests every 10 minutes.
-		if callErr.Status == 401 || callErr.Status == 402 || callErr.Status == 403 {
+		if isAuthBillingStatus(callErr.Status) {
 			const (
 				authBillingCooldown    = 10 * time.Minute
 				maxAuthBillingCooldown = 6 * time.Hour
@@ -613,12 +638,23 @@ func (r *Runner) record(ctx context.Context, providerID, nativeModel string, cal
 			if cooldown < expCooldown {
 				cooldown = expCooldown
 			}
-			key = cooldownKey{provider: providerID, model: ""}
+			key = providerKey
 		}
 		newUntil = r.now().Add(cooldown)
 		r.cooling[key] = newUntil
 	}
 	r.mu.Unlock()
+	if wasHalfOpen {
+		if callErr == nil {
+			r.metrics.ObserveHalfOpenProbe(providerID, halfOpenDomain, "recovered")
+			telemetry.LogEvent(ctx, r.logger, slog.LevelInfo, "half_open_recovered",
+				"provider", providerID,
+				"native_model", nativeModel,
+			)
+		} else if policy.AllRetryableClasses()[callErr.Class] {
+			r.metrics.ObserveHalfOpenProbe(providerID, halfOpenDomain, "failed")
+		}
+	}
 	// Snapshot the cooldown gauge on every cooldown-state transition the
 	// request produced: enter, extend and clear. The gauge carries the absolute
 	// deadline; a panel computes the remaining window at scrape time with
@@ -642,6 +678,8 @@ func (r *Runner) record(ctx context.Context, providerID, nativeModel string, cal
 	telemetry.LogEvent(ctx, r.logger, slog.LevelWarn, "cooldown_put",
 		"provider", providerID,
 		"native_model", nativeModel,
+		"domain", domain,
+		"half_open_failed", wasHalfOpen,
 		"error_type", string(callErr.Class),
 		"cooldown_ms", int64(cooldown.Milliseconds()),
 	)

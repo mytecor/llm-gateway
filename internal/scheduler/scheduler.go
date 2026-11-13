@@ -9,6 +9,7 @@ import (
 	"github.com/mytecor/llm-gateway/internal/telemetry"
 	"github.com/mytecor/llm-gateway/internal/transform"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -44,6 +45,7 @@ type routeOutcome struct {
 	err             *model.CallError
 	pinned          bool
 	empty           bool
+	fallbackOnly    bool
 	failedProvider  string
 	failedModel     string
 	failedTargets   map[targetKey]bool
@@ -62,28 +64,18 @@ func emptyPoolError() *model.CallError {
 	return &model.CallError{Class: model.ErrorInvalid, Status: 502, Cause: errors.New("route has no available targets")}
 }
 
-// semaphore enforces the per-request safety bounds. It is owned by the single
-// scheduler goroutine, so it needs no internal synchronization.
-type semaphore struct {
-	maxCalls            int
-	maxInFlight         int
-	maxCallsPerProvider int
-	calls               int
-	perProvider         map[string]int
-}
-
-// routeRuntime owns request-wide state shared by the whole route graph. The
+// targetKey identifies a concrete (provider, model) pair in the request graph.
 type targetKey struct {
 	provider string
 	model    string
 }
 
-// deadline is absolute so backoff and every transition consume the same
-// timeout budget; semaphore counters and the used-provider set are monotonic
-// for the request and never reset when entering a subroute.
+// routeRuntime owns request-wide state shared by the whole route graph.
+// Its deadline and RequestBudget counters plus the used-provider set are
+// monotonic for the request and never reset when entering a subroute or tier.
 type routeRuntime struct {
 	deadline time.Time
-	sem      semaphore
+	budget   *RequestBudget
 	used     map[string]bool
 	// exclude is a request-scoped, provider-independent exclusion set seeded by
 	// a continuation (the "continue" rule): providers in this set must never
@@ -106,54 +98,36 @@ type routeRuntime struct {
 }
 
 func newRouteRuntime(entry *policy.CompiledRoute) *routeRuntime {
+	return newRouteRuntimeWithBudget(entry, nil)
+}
+
+func newRouteRuntimeWithBudget(entry *policy.CompiledRoute, budget *RequestBudget) *routeRuntime {
 	runtime := &routeRuntime{
 		used:           make(map[string]bool),
 		exclude:        make(map[string]bool),
 		excludeTargets: make(map[targetKey]bool),
 	}
-	if entry == nil {
-		return runtime
+	var deadline time.Time
+	if entry != nil && entry.RouteTimeout > 0 {
+		deadline = time.Now().Add(entry.RouteTimeout)
 	}
-	if entry.RouteTimeout > 0 {
-		runtime.deadline = time.Now().Add(entry.RouteTimeout)
+	if budget == nil {
+		fresh := newRequestBudget(entry, deadline)
+		budget = &fresh
 	}
-	runtime.sem = semaphore{
-		maxCalls:            entry.Semaphore.MaxCalls,
-		maxInFlight:         entry.Semaphore.MaxInFlight,
-		maxCallsPerProvider: entry.Semaphore.MaxCallsPerProvider,
-		perProvider:         make(map[string]int),
-	}
+	runtime.budget = budget
+	runtime.deadline = budget.deadline
 	return runtime
 }
 
 func (r *routeRuntime) expired() bool {
-	return !r.deadline.IsZero() && !time.Now().Before(r.deadline)
+	return r.budget.expired()
 }
 
 // Call counters never recover with time. Avoid holding a client stream open
 // when no reachable provider can obtain another request-wide call permit.
 func (r *routeRuntime) hasCallBudget(entry *policy.CompiledRoute) bool {
-	if r.sem.maxCalls > 0 && r.sem.calls >= r.sem.maxCalls {
-		return false
-	}
-	if r.sem.maxCallsPerProvider <= 0 {
-		return true
-	}
-	seen := make(map[*policy.CompiledRoute]bool)
-	var available func(*policy.CompiledRoute) bool
-	available = func(route *policy.CompiledRoute) bool {
-		if route == nil || seen[route] {
-			return false
-		}
-		seen[route] = true
-		for _, target := range route.Pool {
-			if r.sem.perProvider[target.Provider] < r.sem.maxCallsPerProvider {
-				return true
-			}
-		}
-		return available(route.RetryTarget) || available(route.FallbackTarget) || available(route.HedgeTarget)
-	}
-	return available(entry)
+	return r.budget.hasCallBudget(entry)
 }
 
 func (r *routeRuntime) deadlineTimer() (<-chan time.Time, func()) {
@@ -283,21 +257,6 @@ func failurePriority(class model.ErrorClass) int {
 	}
 }
 
-func (s *semaphore) acquire(provider string, inFlight int) bool {
-	if s.maxCalls > 0 && s.calls >= s.maxCalls {
-		return false
-	}
-	if s.maxInFlight > 0 && inFlight >= s.maxInFlight {
-		return false
-	}
-	if s.maxCallsPerProvider > 0 && s.perProvider[provider] >= s.maxCallsPerProvider {
-		return false
-	}
-	s.calls++
-	s.perProvider[provider]++
-	return true
-}
-
 // schedule owns the per-request branch launcher of one route execution: the
 // route's race batch (group 0) plus, when configured and armed, the hedge
 // target batch (group 1). It is owned by the single scheduler goroutine except
@@ -307,6 +266,8 @@ type activeBranch struct {
 	started     time.Time
 	group       int
 	observation *subsystem.HedgeObservation
+	probe       probeLease
+	timing      adaptiveAttemptPlan
 }
 
 type schedule struct {
@@ -331,10 +292,11 @@ type schedule struct {
 	launched       []bool
 	request        model.ExecuteRequest
 	stream         bool
+	pinned         bool
 	results        chan *branchResult
 	cancels        map[int]context.CancelFunc
 	activeBranches map[int]activeBranch
-	sem            *semaphore
+	budget         *RequestBudget
 	runtime        *routeRuntime
 	active         int
 	seq            int
@@ -342,6 +304,7 @@ type schedule struct {
 	hedgeC         <-chan time.Time
 	hedgeTimer     *time.Timer
 	capacityDenied bool
+	halfOpenBusy   bool
 }
 
 // launch starts the not-yet-started members of group g that still have a
@@ -351,6 +314,25 @@ type schedule struct {
 // Locally catalog-rejected members are reported as pre-failed results without
 // an upstream call or a semaphore slot. Returns whether any branch started or
 // was reported pre-failed.
+func (sc *schedule) hasEligibleTargetAfter(g, afterIdx int) bool {
+	if g < 0 || g >= len(sc.groups) {
+		return false
+	}
+	for j := afterIdx + 1; j < len(sc.groups[g]); j++ {
+		if sc.started[g][j] {
+			continue
+		}
+		candidate := sc.groups[g][j]
+		if sc.excludeUsed[g] && sc.runtime.used[candidate.Provider] {
+			continue
+		}
+		if sc.r.targetEligible(candidate.Provider, candidate.Model) {
+			return true
+		}
+	}
+	return false
+}
+
 func (sc *schedule) launch(g int) bool {
 	if sc.ctx.Err() != nil || sc.runtime.expired() || g < 0 || g >= len(sc.groups) || !sc.armed[g] || sc.launched[g] {
 		return false
@@ -395,8 +377,16 @@ func (sc *schedule) launch(g int) bool {
 			sc.dispatched[g]++
 			continue
 		}
+		allowFailOpen := sc.route.FallbackTarget == nil && !sc.runtime.strictAvailability && !sc.hasEligibleTargetAfter(g, i)
+		probe, ok := sc.r.acquireHalfOpenProbe(sc.ctx, target.Provider, target.Model, allowFailOpen)
+		if !ok {
+			sc.halfOpenBusy = true
+			sc.started[g][i] = true
+			continue
+		}
 		permit := sc.r.capacity.Acquire(target.Provider)
 		if permit == nil {
+			sc.r.releaseHalfOpenProbe(probe)
 			sc.capacityDenied = true
 			telemetry.LogEvent(sc.ctx, sc.r.logger, slog.LevelDebug, "provider_capacity_denied",
 				"route", sc.route.Name,
@@ -406,7 +396,8 @@ func (sc *schedule) launch(g int) bool {
 			allStarted = false
 			continue
 		}
-		if !sc.sem.acquire(target.Provider, sc.active) {
+		if !sc.budget.acquire(target.Provider, sc.active, g == sc.hedgeG) {
+			sc.r.releaseHalfOpenProbe(probe)
 			permit.Release()
 			telemetry.LogEvent(sc.ctx, sc.r.logger, slog.LevelDebug, "semaphore_denied",
 				"route", sc.route.Name,
@@ -427,7 +418,9 @@ func (sc *schedule) launch(g int) bool {
 		branchCtx, cancel := context.WithCancel(sc.ctx)
 		sc.cancels[id] = cancel
 		active := activeBranch{provider: target.Provider, started: sc.r.now(), group: g,
-			observation: sc.r.hedgeLatency.Begin(target.Provider, target.Model, sc.stream)}
+			observation: sc.r.hedgeLatency.Begin(target.Provider, target.Model, sc.stream),
+			probe:       probe}
+		active.timing = sc.planAdaptiveAttempt(target, active.observation.Threshold)
 		sc.activeBranches[id] = active
 		if g == sc.hedgeG {
 			sc.r.metrics.ObserveHedge(sc.route.Name)
@@ -489,6 +482,9 @@ func (sc *schedule) armHedge() {
 	if sc.hedgeG < 0 || sc.armed[sc.hedgeG] || sc.launched[sc.hedgeG] {
 		return
 	}
+	if sc.runtime != nil && !sc.runtime.budget.canHedge() {
+		return
+	}
 	var deadline time.Time
 	for _, active := range sc.activeBranches {
 		if active.group != 0 {
@@ -503,6 +499,9 @@ func (sc *schedule) armHedge() {
 		}
 	}
 	if deadline.IsZero() {
+		return
+	}
+	if !sc.canAffordHedge(deadline) {
 		return
 	}
 	delay := max(time.Duration(0), deadline.Sub(sc.r.now()))
@@ -521,15 +520,24 @@ func (sc *schedule) cancelOthers(except int) {
 				}
 			}
 			cancel()
+			if active, ok := sc.activeBranches[id]; ok {
+				// Selection exits after choosing a winner. A loser's buffered
+				// result may never be consumed, so retire its lease after cancel.
+				sc.r.releaseHalfOpenProbe(active.probe)
+			}
 		}
 	}
 }
 
 func (r *Runner) observeProviderOutcome(provider string, callErr *model.CallError, latency time.Duration) {
+	r.observeProviderOutcomeMode(provider, false, callErr, latency)
+}
+
+func (r *Runner) observeProviderOutcomeMode(provider string, stream bool, callErr *model.CallError, latency time.Duration) {
 	if provider == "" {
 		return
 	}
-	r.scores.Observe(provider, callErr, latency)
+	r.scores.ObserveMode(provider, stream, callErr, latency)
 	r.capacity.ObserveOutcome(provider, callErr)
 	if r.metrics != nil {
 		r.metrics.ObserveProviderEWMATTFT(provider, time.Duration(r.scores.LatencyOf(provider)*float64(time.Second)))
@@ -539,6 +547,7 @@ func (r *Runner) observeProviderOutcome(provider string, callErr *model.CallErro
 func (sc *schedule) cancelAll() {
 	for _, active := range sc.activeBranches {
 		active.observation.Discard()
+		sc.r.releaseHalfOpenProbe(active.probe)
 	}
 	for _, cancel := range sc.cancels {
 		cancel()
@@ -557,7 +566,8 @@ func (sc *schedule) observeRouteTimeouts() {
 			latency = now.Sub(active.started)
 		}
 		active.observation.Censor(latency)
-		sc.r.observeProviderOutcome(active.provider, timeoutErr, latency)
+		sc.r.observeProviderOutcomeMode(active.provider, sc.stream, timeoutErr, latency)
+		sc.r.releaseHalfOpenProbe(active.probe)
 		delete(sc.activeBranches, id)
 	}
 }
@@ -570,10 +580,14 @@ func (sc *schedule) runBranch(ctx context.Context, id int, cancel context.Cancel
 	// SelectedStream.Cancel because its upstream call remains active after the
 	// first meaningful event.
 	handedOff := false
+	deliveredToLoop := false
 	releaseProvider := permit.Release
 	defer func() {
 		if !handedOff {
 			releaseProvider()
+		}
+		if !deliveredToLoop {
+			sc.r.releaseHalfOpenProbe(active.probe)
 		}
 	}()
 
@@ -582,11 +596,35 @@ func (sc *schedule) runBranch(ctx context.Context, id int, cancel context.Cancel
 	if entry := sc.r.plan.Models[sc.logical]; entry != nil {
 		executor = transform.Wrap(executor, entry.Transforms)
 	}
+	// Each scheduler permit covers one physical call. A driver must not spend
+	// additional calls behind a bounded request's accounting.
+	singleAttempt := sc.budget.boundedCalls()
 	var res *branchResult
 	if sc.stream {
 		request := sc.request
 		request.Attempt = model.Attempt{ID: id, Target: target}
-		res = sc.r.probeStream(ctx, target, request, executor)
+		request.SingleAttempt = singleAttempt
+		provCfg := sc.r.plan.Providers[target.Provider]
+		attemptTimeout, enforcedAttemptTimeout, adaptiveSliced := sc.attemptTimeoutFor(provCfg.AttemptTimeout, provCfg.SafeReplay, active.timing)
+		if attemptTimeout > 0 {
+			request.AttemptTimeout = attemptTimeout
+		}
+		callCtx := ctx
+		attemptCancel := func() {}
+		stopSelection := func() {}
+		if enforcedAttemptTimeout {
+			callCtx, attemptCancel, stopSelection = streamAttemptContext(ctx, attemptTimeout)
+		}
+		res = sc.r.probeStream(callCtx, target, request, executor)
+		stopSelection()
+		res.err = sc.normalizeAttemptError(ctx, callCtx, enforcedAttemptTimeout, provCfg.SafeReplay, res.err)
+		if adaptiveSliced && res.err != nil && res.err.Code == "attempt_timeout" {
+			sc.r.metrics.ObserveAdaptiveTimeout(sc.route.Name, target.Provider)
+		}
+		if res.err != nil {
+			res.winner = false
+			res.selected = nil
+		}
 		if res.selected != nil {
 			// A selected result can lose the race or be abandoned before its
 			// caller accepts ownership. Parent cancellation must release its
@@ -595,18 +633,38 @@ func (sc *schedule) runBranch(ctx context.Context, id int, cancel context.Cancel
 			res.selected.Provider = target.Provider
 			res.selected.Model = target.Model
 			res.selected.Cancel = func() {
+				attemptCancel()
 				cancel()
 				releaseProvider()
 			}
 			// The selected upstream stream is still physically active after the
 			// probe returns. Its provider slot is handed to SelectedStream.Cancel.
 			handedOff = true
+		} else {
+			attemptCancel()
 		}
 	} else {
 		request := sc.request
 		request.Attempt = model.Attempt{ID: id, Target: target}
-		body, callErr := executor.Do(ctx, target, request)
-		callErr = normalizeContextError(ctx, callErr)
+		request.SingleAttempt = singleAttempt
+		provCfg := sc.r.plan.Providers[target.Provider]
+		attemptTimeout, enforcedAttemptTimeout, adaptiveSliced := sc.attemptTimeoutFor(provCfg.AttemptTimeout, provCfg.SafeReplay, active.timing)
+		if attemptTimeout > 0 {
+			request.AttemptTimeout = attemptTimeout
+		}
+		callCtx := ctx
+		var attemptCancel context.CancelFunc
+		if enforcedAttemptTimeout {
+			callCtx, attemptCancel = context.WithTimeout(ctx, attemptTimeout)
+		}
+		body, callErr := executor.Do(callCtx, target, request)
+		if attemptCancel != nil {
+			attemptCancel()
+		}
+		callErr = sc.normalizeAttemptError(ctx, callCtx, enforcedAttemptTimeout, provCfg.SafeReplay, callErr)
+		if adaptiveSliced && callErr != nil && callErr.Code == "attempt_timeout" {
+			sc.r.metrics.ObserveAdaptiveTimeout(sc.route.Name, target.Provider)
+		}
 		res = &branchResult{winner: callErr == nil, body: body, err: callErr}
 	}
 	res.id = id
@@ -630,8 +688,68 @@ func (sc *schedule) runBranch(ctx context.Context, id int, cancel context.Cancel
 	}
 	select {
 	case sc.results <- res:
+		deliveredToLoop = true
 	case <-ctx.Done():
 	}
+}
+
+// streamAttemptContext bounds selection without imposing that deadline on the
+// selected stream. Stopping selection synchronizes with an already firing timer,
+// so its callback cannot cancel a winner after ownership has been transferred.
+func streamAttemptContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc, func()) {
+	ctx, cancel := context.WithCancelCause(parent)
+	var mu sync.Mutex
+	stopped := false
+	timer := time.AfterFunc(timeout, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if !stopped {
+			cancel(context.DeadlineExceeded)
+		}
+	})
+	stop := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		stopped = true
+		timer.Stop()
+	}
+	return ctx, func() { stop(); cancel(context.Canceled) }, stop
+}
+
+func (sc *schedule) normalizeAttemptError(ctx context.Context, callCtx context.Context, enforcedAttemptTimeout, safeReplay bool, callErr *model.CallError) *model.CallError {
+	if ctx.Err() != nil {
+		return normalizeContextError(ctx, callErr)
+	}
+	if enforcedAttemptTimeout && errors.Is(context.Cause(callCtx), context.DeadlineExceeded) {
+		if sc.runtime != nil && sc.runtime.expired() {
+			return &model.CallError{
+				Code:   "route_timeout",
+				Class:  model.ErrorTimeout,
+				Status: 504,
+				Replay: model.ReplayUnknown,
+				Cause:  context.Cause(callCtx),
+			}
+		}
+		out := &model.CallError{
+			Code:   "attempt_timeout",
+			Class:  model.ErrorTimeout,
+			Status: 504,
+			Scope:  model.FailureScopeProvider,
+			Cause:  context.Cause(callCtx),
+		}
+		if !safeReplay {
+			out.Replay = model.ReplayUnknown
+		}
+		return out
+	}
+	if callErr != nil && callErr.Class == model.ErrorTimeout && callErr.Scope == model.FailureScopeProvider && callErr.Replay == "" {
+		if !safeReplay || (sc.runtime != nil && sc.runtime.expired()) {
+			cloned := *callErr
+			cloned.Replay = model.ReplayUnknown
+			return &cloned
+		}
+	}
+	return callErr
 }
 
 // drain buffered terminal results into the aggregate. At the terminal point no
@@ -684,6 +802,9 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 		return &routeOutcome{err: callErr, pinned: pinned}
 	}
 	if len(pool) == 0 {
+		if route.FallbackTarget != nil && !runtime.strictAvailability && r.poolHasHalfOpenProbeInFlight(route.Pool) {
+			return &routeOutcome{fallbackOnly: true, err: halfOpenBusyError()}
+		}
 		return &routeOutcome{err: emptyPoolError(), empty: true}
 	}
 	pool = r.capacity.Available(pool)
@@ -691,7 +812,7 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 		return &routeOutcome{capacityBlocked: true}
 	}
 	ordered := r.applyLease(logical, route, pool)
-	ordered = r.applyBalance(route.Name, route, ordered)
+	ordered = r.applyBalance(route.Name, route, ordered, streamMode)
 	raceN := route.RaceCount
 	if raceN <= 0 || raceN > len(ordered) {
 		raceN = len(ordered)
@@ -730,10 +851,11 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 		groups:         groups,
 		request:        request,
 		stream:         streamMode,
+		pinned:         pinned,
 		results:        make(chan *branchResult, totalTargets),
 		cancels:        make(map[int]context.CancelFunc),
 		activeBranches: make(map[int]activeBranch, totalTargets),
-		sem:            &runtime.sem,
+		budget:         runtime.budget,
 		runtime:        runtime,
 		hedgeG:         hedgeG,
 	}
@@ -775,6 +897,9 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 		if runtime.expired() {
 			return &routeOutcome{err: model.RouteTimeoutError()}
 		}
+		if sc.halfOpenBusy && !runtime.strictAvailability {
+			return &routeOutcome{fallbackOnly: route.FallbackTarget != nil, err: halfOpenBusyError()}
+		}
 		if sc.capacityDenied {
 			return &routeOutcome{capacityBlocked: true}
 		}
@@ -800,6 +925,7 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 	for {
 		select {
 		case res := <-sc.results:
+			active := sc.activeBranches[res.id]
 			delete(sc.activeBranches, res.id)
 			if !res.winner && res.err == nil {
 				res.err = &model.CallError{Class: model.ErrorInvalid, Status: 502}
@@ -820,11 +946,12 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 					if !res.finished.IsZero() && !res.started.IsZero() {
 						latency = res.finished.Sub(res.started)
 					}
-					r.observeProviderOutcome(res.provider, res.err, latency)
+					r.observeProviderOutcomeMode(res.provider, streamMode, res.err, latency)
 				}
 			} else {
 				r.observeBranchCancelled(res)
 			}
+			r.releaseHalfOpenProbe(active.probe)
 			if res.winner {
 				r.observeLeaseWinner(logical, route, res.provider, res)
 				if !res.finished.IsZero() && !res.started.IsZero() {
@@ -867,13 +994,13 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 				sc.cancelAll()
 				return &routeOutcome{err: model.RouteTimeoutError()}
 			}
-			if sc.hedgeG >= 0 {
+			if sc.hedgeG >= 0 && sc.runtime.budget.canHedge() {
 				if route.Hedge.Internal && route.HedgeTarget == nil {
 					pool, _, hedgeErr := r.buildPool(logical, route, request, runtime)
 					if hedgeErr == nil {
 						pool = r.capacity.Available(pool)
 						pool = r.applyLease(logical, route, pool)
-						pool = r.applyBalance(route.Name, route, pool)
+						pool = r.applyBalance(route.Name, route, pool, sc.stream)
 						unused := make([]model.Target, 0, len(pool))
 						for _, target := range pool {
 							if !runtime.used[target.Provider] {
@@ -886,8 +1013,15 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 						sc.limits[sc.hedgeG] = 1
 					}
 				}
-				sc.armed[sc.hedgeG] = true
-				sc.launch(sc.hedgeG)
+				if route.AdaptiveTiming && sc.runtime != nil && !sc.runtime.deadline.IsZero() {
+					filtered := r.filterWorthwhileHedgeTargets(sc.groups[sc.hedgeG], sc.stream, time.Until(sc.runtime.deadline))
+					sc.groups[sc.hedgeG] = filtered
+					sc.started[sc.hedgeG] = make([]bool, len(filtered))
+				}
+				if len(sc.groups[sc.hedgeG]) > 0 {
+					sc.armed[sc.hedgeG] = true
+					sc.launch(sc.hedgeG)
+				}
 			}
 		case <-deadlineCh:
 			sc.observeRouteTimeouts()

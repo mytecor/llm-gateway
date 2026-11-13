@@ -44,6 +44,8 @@ type Capabilities struct {
 	Fork       bool `json:"fork,omitempty"`
 	Resume     bool `json:"resume,omitempty"`
 	SafeReplay bool `json:"safe_replay,omitempty"`
+	// SingleAttempt advertises support for disabling internal retries per request.
+	SingleAttempt bool `json:"single_attempt,omitempty"`
 }
 
 type CallError struct {
@@ -72,6 +74,7 @@ type Command[C any] struct {
 	ModelsURL           string            `json:"models_url,omitempty"`
 	HasSession          bool              `json:"has_session,omitempty"`
 	RequestTimeoutMs    int64             `json:"request_timeout_ms,omitempty"`
+	SingleAttempt       bool              `json:"single_attempt,omitempty"`
 	Config              C                 `json:"config,omitempty"`
 	CWD                 string            `json:"cwd,omitempty"`
 	Provider            string            `json:"provider,omitempty"`

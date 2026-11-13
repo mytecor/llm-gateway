@@ -30,9 +30,11 @@ type Provider struct {
 	Env            map[string]string `json:"env,omitempty"`
 	Priority       int               `json:"priority,omitempty"`
 	Weight         int               `json:"weight,omitempty"`
+	Labels         map[string]string `json:"labels,omitempty"`
 	MaxConcurrent  int               `json:"max_concurrent,omitempty"`
 	Cooldown       Duration          `json:"cooldown,omitempty"`
 	RequestTimeout Duration          `json:"request_timeout,omitempty"`
+	AttemptTimeout Duration          `json:"-"`
 	ModelsURL      string            `json:"models_url,omitempty"`
 	ToolStrategy   string            `json:"tool_strategy,omitempty"`
 	Session        *SessionSettings  `json:"session,omitempty"`
@@ -48,6 +50,7 @@ var providerCoreKeys = map[string]bool{
 	"env":             true,
 	"priority":        true,
 	"weight":          true,
+	"labels":          true,
 	"max_concurrent":  true,
 	"cooldown":        true,
 	"request_timeout": true,

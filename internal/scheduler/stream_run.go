@@ -69,6 +69,10 @@ func (r *Runner) RunStream(ctx context.Context, logical string, request model.Ex
 }
 
 func (r *Runner) runStream(ctx context.Context, logical string, request model.ExecuteRequest, started time.Time, sink StreamSink, generation bool) *model.RunOutcome {
+	return r.runStreamWithBudget(ctx, logical, request, started, sink, generation, nil)
+}
+
+func (r *Runner) runStreamWithBudget(ctx context.Context, logical string, request model.ExecuteRequest, started time.Time, sink StreamSink, generation bool, budget *RequestBudget) *model.RunOutcome {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	continuation, _ := r.ContinuePolicy(logical)
@@ -76,7 +80,7 @@ func (r *Runner) runStream(ctx context.Context, logical string, request model.Ex
 	x := &streamRun{
 		generation: generation, runner: r, ctx: ctx, cancel: cancel, logical: logical, request: request, started: started,
 		sink: sink, partial: subsystem.NewPartialStreamOutput(continuation.Enabled, continuation.MaxBufferBytes),
-		runtime:      newRouteRuntime(r.plan.Models[logical]),
+		runtime:      newRouteRuntimeWithBudget(r.plan.Models[logical], budget),
 		continuation: continuation, idleTimeout: r.StreamIdleTimeout(logical),
 		rules:            subsystem.NewRuntimeRules(continuation, repetition),
 		chainRetriesLeft: continuation.Retries, holdRecoveriesLeft: max(1, continuation.Retries),

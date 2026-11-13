@@ -39,6 +39,15 @@ func regressionRequest(body string) model.ExecuteRequest {
 	return model.ExecuteRequest{Kind: model.RequestChat, Body: []byte(`{"operation":"` + body + `"}`)}
 }
 
+func TestSingleAttemptRequiresDriverCapability(t *testing.T) {
+	// No worker exists: an older driver must fail before any upstream work.
+	driver := &Driver{capabilities: model.Capabilities{Chat: true}}
+	_, _, _, callErr := driver.submit(context.Background(), model.Target{}, model.ExecuteRequest{Kind: model.RequestChat, SingleAttempt: true}, false)
+	if callErr == nil || callErr.Code != "single_attempt_unsupported" || callErr.Replay != model.ReplayNotSent {
+		t.Fatalf("expected a pre-dispatch capability error, got %+v", callErr)
+	}
+}
+
 func readWireLog(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)

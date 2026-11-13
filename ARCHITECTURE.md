@@ -56,7 +56,7 @@ flowchart TD
     
     SessionExec --> ExternalDriver
     ExternalDriver <--> MCPSystem
-    ExternalDriver --> Driver
+    ExternalDriver -->|NDJSON, negotiated single attempt| Driver
     
     Server -.-> Telemetry
     Scheduler -.-> Telemetry
@@ -125,7 +125,8 @@ engine, including applicability filters, backoff and replay-safety guards.
 `internal/policy` owns the routing DSL and compiles rules against prepared
 providers; it does not depend on the application config or load credentials.
 `CompiledConfig.RoutingPlan()` supplies the scheduler only with compiled models,
-provider concurrency/cooldown settings and stream idle timeout. Gateway startup
+provider concurrency/cooldown settings, explicit attempt timeouts, replay
+capabilities and stream idle timeout. Gateway startup
 owns store construction and persistence paths. Shared test builders and executor
 fakes live under `internal/testsupport`, outside the production dependency graph.
 
@@ -139,6 +140,12 @@ Transport exit cancels selection and releases the selected provider's capacity.
 The route deadline bounds selection and recovery dispatch, including continuation
 and held-stream recovery; a live selected stream may continue after that deadline
 and remains bounded by its idle timeout.
+Explicit provider attempt timeouts bound non-streaming calls and streaming
+selection through the first meaningful event. The streaming selection timer is
+disarmed before handing off the winner; it does not cut off an active response.
+Only providers advertising safe replay may recover from an expired attempt with
+an uncertain upstream outcome. Client cancellation and the route deadline still
+stop recovery.
 
 ---
 
@@ -215,6 +222,8 @@ flowchart TD
 2. **Prioritization & Load Balancing (`rank`, `balance`, `affinity`)**:
    - **`rank`**: Statically orders candidate targets by assigned priority or configured weight.
    - **`balance`**: Selects targets using real-time EWMA TTFT predictions (`expected-ttft`) with $\epsilon$-greedy exploration, or power-of-two-choices (`p2c`).
+     Health always uses the actual request's streaming mode, including when
+     `expected-completion` predicts latency from non-streaming observations.
    - **`affinity`**: Enforces provider stickiness based on session IDs or Responses API context.
 3. **Execution & Concurrency (`admission`, `lease`, `race`, `hedge`, `timeout`)**:
    - **`admission` & `lease`**: Guards upstream providers against saturation via queuing and bounded in-flight requests.
@@ -297,13 +306,17 @@ Strict Chat Completions use an outer validation/correction loop. Each generation
 runs the normal scheduler pipeline. HTTP corrections reroute the same logical
 model; stateful corrections retain the native session. The session runtime holds
 the conversation gate across generations and checkpoints only the accepted public
-transcript. The NDJSON driver protocol is unchanged.
+transcript. One `RequestRun` shares the physical-call, per-provider and hedge
+budgets across every generation, including schema corrections. Generations keep
+their own routing exclusions and observations, while retaining the original
+deadline. Bounded stateless calls require the driver's negotiated `single_attempt`
+capability and disable driver-internal retries for that request.
 
 ```mermaid
 flowchart LR
     Client["Client<br/>Strict JSON Schema"] --> Structured["Structured Output Controller<br/>Compile, Buffer, Validate"]
     Structured --> Scheduler["Scheduler<br/>Route and Execute"]
-    Scheduler --> HTTP["HTTP Driver<br/>Stateless Generation"]
+    Scheduler -->|One physical attempt per dispatch| HTTP["HTTP Driver<br/>Stateless Generation"]
     Scheduler --> Session["Session Runtime<br/>Native Conversation Exchange"]
     Session --> Native["ACP / Web Driver<br/>Continue Native Chat"]
     HTTP --> Structured
@@ -313,7 +326,7 @@ flowchart LR
 ```
 
 Selected streaming events stay buffered until validation succeeds. The outer
-controller owns one client completion observation and the shared deadline;
+controller owns one client completion observation and the shared request budget;
 scheduler generations retain branch, provider usage, admission, and recovery
 accounting. See [strict response contracts](./docs/structured-outputs.md).
 
@@ -353,6 +366,13 @@ Degenerate models or recursive tool-call traps can trigger infinite output loops
 - Providers returning retryable errors (429 Rate Limit, 502/503/504 Bad Gateway, transport resets) are put into automatic cooldown.
 - While cooling, the provider is excluded from dynamic candidate pools.
 - If all providers in a tier are cooling, the scheduler activates fail-open logic to prevent total denial of service.
+- After cooldown expires, only one half-open probe may run for the affected
+  provider/model (or the whole provider for auth failures). Fail-open never
+  bypasses an occupied probe slot; other requests use a healthy candidate or
+  fallback, or receive 503 when neither is available.
+- Cancelling a racing probe releases its lease even if its result remains
+  buffered after another branch wins. Epoch checks keep late cleanup from
+  releasing a newer probe's lease.
 
 ---
 

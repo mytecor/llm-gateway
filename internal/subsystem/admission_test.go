@@ -78,8 +78,27 @@ func TestAdmissionControllerRejectsOnQueueFull(t *testing.T) {
 
 	// Waiter 2 exceeds maxPending=1 -> fast reject
 	_, err = ac.Admit(ctx, "standard", admPolicy, time.Time{})
-	if err == nil || err.Status != http.StatusTooManyRequests {
-		t.Fatalf("expected 429 Too Many Requests, got %#v", err)
+	if err == nil || err.Status != http.StatusTooManyRequests || err.Code != "route_queue_full" || err.RetryAfter <= 0 {
+		t.Fatalf("expected 429 route_queue_full with RetryAfter, got %#v", err)
+	}
+}
+
+func TestAdmissionWaitTimeoutIsRateLimitWithRetryAfter(t *testing.T) {
+	ac := NewAdmissionController(telemetry.NewMetrics(), time.Now)
+	admPolicy := policy.AdmissionConfig{
+		MaxInFlight: 1,
+		MaxPending:  1,
+		WaitTimeout: 25 * time.Millisecond,
+	}
+	rel, callErr := ac.Admit(context.Background(), "standard", admPolicy, time.Time{})
+	if callErr != nil {
+		t.Fatal(callErr)
+	}
+	defer rel()
+
+	_, callErr = ac.Admit(context.Background(), "standard", admPolicy, time.Time{})
+	if callErr == nil || callErr.Class != model.ErrorRateLimit || callErr.Status != http.StatusTooManyRequests || callErr.Code != "route_queue_wait_timeout" || callErr.RetryAfter <= 0 {
+		t.Fatalf("expected 429 route_queue_wait_timeout with RetryAfter, got %#v", callErr)
 	}
 }
 

@@ -41,10 +41,19 @@ type ScoreStore struct {
 	bucketCount int
 }
 
+type modeScore struct {
+	latency   float64 // EWMA latency, seconds
+	latencyOK bool
+	buckets   []scoreBucket
+}
+
 type providerScore struct {
 	latency   float64 // EWMA of first-meaningful success latency, seconds
 	latencyOK bool
 	buckets   []scoreBucket
+	stream    modeScore
+	nonStream modeScore
+	legacy    modeScore
 }
 
 type scoreBucket struct {
@@ -156,18 +165,46 @@ func (s *ScoreStore) Observe(provider string, callErr *model.CallError, latency 
 		s.providers[provider] = score
 	}
 	now := s.now()
+	applyScoreObservation(&score.buckets, &score.latency, &score.latencyOK, now, callErr, latency, s.bucketCount, s.bucketWidth)
+	applyScoreObservation(&score.legacy.buckets, &score.legacy.latency, &score.legacy.latencyOK, now, callErr, latency, s.bucketCount, s.bucketWidth)
+}
+
+// ObserveMode records an outcome tagged with transport mode (streaming vs
+// non-streaming). Mode-specific stats stay isolated from the opposite mode while
+// still updating the provider's overall aggregate.
+func (s *ScoreStore) ObserveMode(provider string, stream bool, callErr *model.CallError, latency time.Duration) {
+	if provider == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	score := s.providers[provider]
+	if score == nil {
+		score = &providerScore{}
+		s.providers[provider] = score
+	}
+	now := s.now()
+	applyScoreObservation(&score.buckets, &score.latency, &score.latencyOK, now, callErr, latency, s.bucketCount, s.bucketWidth)
+	ms := &score.nonStream
+	if stream {
+		ms = &score.stream
+	}
+	applyScoreObservation(&ms.buckets, &ms.latency, &ms.latencyOK, now, callErr, latency, s.bucketCount, s.bucketWidth)
+}
+
+func applyScoreObservation(buckets *[]scoreBucket, ewma *float64, ewmaOK *bool, now time.Time, callErr *model.CallError, latency time.Duration, bucketCount int, bucketWidth time.Duration) {
 	success := callErr == nil
 	healthErr := callErr != nil && balanceHealthErrors(callErr.Class)
 	if success || healthErr {
-		if score.buckets == nil {
-			score.buckets = make([]scoreBucket, s.bucketCount)
+		if *buckets == nil {
+			*buckets = make([]scoreBucket, bucketCount)
 		}
-		tick := now.UnixNano() / int64(s.bucketWidth)
-		index := tick % int64(len(score.buckets))
+		tick := now.UnixNano() / int64(bucketWidth)
+		index := tick % int64(len(*buckets))
 		if index < 0 {
-			index += int64(len(score.buckets))
+			index += int64(len(*buckets))
 		}
-		bucket := &score.buckets[index]
+		bucket := &(*buckets)[index]
 		if bucket.tick != tick || bucket.latest.IsZero() {
 			*bucket = scoreBucket{tick: tick}
 		}
@@ -183,11 +220,11 @@ func (s *ScoreStore) Observe(provider string, callErr *model.CallError, latency 
 		// influence instead of being cemented out by a long stale history.
 		const alpha = 0.3
 		seconds := latency.Seconds()
-		if !score.latencyOK {
-			score.latency = seconds
-			score.latencyOK = true
+		if !*ewmaOK {
+			*ewma = seconds
+			*ewmaOK = true
 		} else {
-			score.latency = alpha*seconds + (1-alpha)*score.latency
+			*ewma = alpha*seconds + (1-alpha)*(*ewma)
 		}
 	}
 }
@@ -436,8 +473,19 @@ func promoteFront(targets []model.Target, provider string) []model.Target {
 }
 
 func (s *ScoreStore) selectExpectedTTFT(targets []model.Target, policy policy.BalanceConfig) []model.Target {
+	return s.selectExpectedForMode(targets, policy, false, false)
+}
+
+func (s *ScoreStore) selectExpectedForMode(targets []model.Target, policy policy.BalanceConfig, modeAware bool, stream bool) []model.Target {
 	if len(targets) < 2 {
 		return targets
+	}
+	// Automatic stream/non-stream stats selection: "expected-completion" prefers
+	// non-stream full completion stats, while "expected-ttft" uses the request's
+	// own mode (TTFT EWMA for streaming, completion EWMA for non-streaming).
+	statStream := stream
+	if policy.Strategy == "expected-completion" {
+		statStream = false
 	}
 	type scoredTarget struct {
 		target  model.Target
@@ -448,8 +496,16 @@ func (s *ScoreStore) selectExpectedTTFT(targets []model.Target, policy policy.Ba
 	for i, target := range targets {
 		inFlight := s.capacity.Count(target.Provider)
 		maxConc := s.capacity.Limit(target.Provider)
-		ewma := s.latencyOf(target.Provider)
-		health := s.health(target.Provider, policy.Window, policy.ErrorBudget)
+		var ewma, health float64
+		if modeAware {
+			ewma = s.latencyOfMode(target.Provider, statStream)
+			// The latency objective can use another mode as a predictor, but
+			// availability must reflect the operation we are about to execute.
+			health = s.healthForMode(target.Provider, stream, policy.Window, policy.ErrorBudget)
+		} else {
+			ewma = s.latencyOf(target.Provider)
+			health = s.health(target.Provider, policy.Window, policy.ErrorBudget)
+		}
 		isHealthy := health > 0
 		if health <= 0 {
 			health = 0.05

@@ -112,6 +112,8 @@ type Metrics struct {
 	providerEWMATTFT       *gaugeVec
 	hedgeDelay             *gaugeVec
 	hedgesTotal            *counterVec
+	halfOpenProbes         *counterVec
+	adaptiveTimeouts       *counterVec
 
 	startTime time.Time
 }
@@ -158,6 +160,8 @@ func NewMetrics() *Metrics {
 		providerEWMATTFT:       newGaugeVec([]string{"provider"}),
 		hedgeDelay:             newGaugeVec([]string{"provider", "native_model", "stream"}),
 		hedgesTotal:            newCounterVec([]string{"route"}),
+		halfOpenProbes:         newCounterVec([]string{"provider", "domain", "result"}),
+		adaptiveTimeouts:       newCounterVec([]string{"route", "provider"}),
 		startTime:              time.Now(),
 	}
 }
@@ -179,6 +183,27 @@ func (m *Metrics) ObserveHedge(route string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.hedgesTotal.inc(route)
+}
+
+// ObserveHalfOpenProbe records half-open recovery probe lifecycle outcomes
+// ("admitted", "recovered", "failed", "released") per provider and failure domain.
+func (m *Metrics) ObserveHalfOpenProbe(provider, domain, result string) {
+	if m == nil || provider == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.halfOpenProbes.inc(provider, domain, result)
+}
+
+// ObserveAdaptiveTimeout counts scheduler-sliced attempt timeouts triggered on a route.
+func (m *Metrics) ObserveAdaptiveTimeout(route, provider string) {
+	if m == nil || route == "" || provider == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.adaptiveTimeouts.inc(route, provider)
 }
 
 // ObserveRequest records one completed client request at the request level.
@@ -420,6 +445,8 @@ func (m *Metrics) WriteExposition(writer io.Writer) error {
 	m.providerCapacity.write(buffered, "llm_provider_capacity", "Configured hard concurrency capacity of each provider.")
 	m.hedgeDelay.write(buffered, "llm_hedge_delay_seconds", "Adaptive p95 response selection threshold by provider, native model and streaming mode; absent during warmup.")
 	m.hedgesTotal.write(buffered, "llm_hedges_total", "Actual backup branch dispatches by route.")
+	m.halfOpenProbes.write(buffered, "llm_half_open_probes_total", "Half-open recovery probe outcomes by provider, failure domain and result.")
+	m.adaptiveTimeouts.write(buffered, "llm_adaptive_timeouts_total", "Scheduler-sliced adaptive attempt timeouts by route and provider.")
 	m.providerEWMATTFT.write(buffered, "llm_provider_ewma_ttft_seconds", "Current EWMA time to first token per provider.")
 
 	return buffered.Flush()

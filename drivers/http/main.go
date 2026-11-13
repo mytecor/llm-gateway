@@ -212,7 +212,13 @@ func serve(ctx context.Context, r io.Reader, w io.Writer) error {
 				}()
 
 				if !m.Stream {
-					data, callErr := exec.Do(rCtx, m.Provider, m.Model, m.Kind, m.Body)
+					doCtx := rCtx
+					if m.RequestTimeoutMs > 0 {
+						var cancelAttempt context.CancelFunc
+						doCtx, cancelAttempt = context.WithTimeout(rCtx, time.Duration(m.RequestTimeoutMs)*time.Millisecond)
+						defer cancelAttempt()
+					}
+					data, callErr := exec.do(doCtx, m.Provider, m.Model, m.Kind, m.Body, m.SingleAttempt)
 					if callErr != nil {
 						_ = emit(outboundMessage{Type: "error", ID: m.ID, CallError: callErr})
 						return
@@ -222,7 +228,7 @@ func serve(ctx context.Context, r io.Reader, w io.Writer) error {
 				}
 
 				idleTimeout := time.Duration(m.StreamIdleTimeoutMs) * time.Millisecond
-				stream, callErr := exec.Stream(rCtx, m.Provider, m.Model, m.Kind, m.Body, idleTimeout)
+				stream, callErr := exec.stream(rCtx, m.Provider, m.Model, m.Kind, m.Body, idleTimeout, m.SingleAttempt)
 				if callErr != nil {
 					_ = emit(outboundMessage{Type: "error", ID: m.ID, CallError: callErr})
 					return

@@ -2,10 +2,12 @@ package scheduler
 
 import (
 	"context"
+	"log/slog"
+	"time"
+
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/telemetry"
-	"log/slog"
 )
 
 type routeTransition struct {
@@ -22,12 +24,30 @@ func terminalOutcome(outcome *routeOutcome) bool {
 
 func (r *Runner) followTransition(ctx context.Context, logical string, source *policy.CompiledRoute, transition routeTransition, request model.ExecuteRequest, streamMode bool, runtime *routeRuntime, outcome *routeOutcome, original *model.CallError) *routeOutcome {
 	for attempt := 0; attempt < transition.attempts; attempt++ {
-		if transition.internal {
+		if runtime != nil {
+			if runtime.expired() {
+				return &routeOutcome{err: model.RouteTimeoutError()}
+			}
+			if !runtime.hasCallBudget(transition.target) {
+				break
+			}
+		}
+		if transition.internal || transition.target.ReschedulableOnly {
 			if !isReschedulableError(outcome.err) {
 				break
 			}
-		} else if !transition.target.Applicable(outcome.err, attempt) {
+		}
+		if !transition.internal && !transition.target.Applicable(outcome.err, attempt) {
 			break
+		}
+		if (source.AdaptiveTiming || transition.target.AdaptiveTiming) && runtime != nil && !runtime.deadline.IsZero() {
+			rem := time.Until(runtime.deadline)
+			if transition.kind == "retry" && backoffDuration(transition.backoff, attempt) >= rem {
+				break
+			}
+			if !r.worthTransitioning(transition.target, streamMode, rem) {
+				break
+			}
 		}
 		r.observeTransition(ctx, source, transition, outcome, attempt)
 		if transition.kind == "retry" {

@@ -38,6 +38,14 @@ Stateless response/chunk/error/done events echo the request `id`. Session
 `tool_call`/`tool_result` IDs identify tool calls. The legacy HTTP `start.providers`
 array remains accepted, while gateway startup uses one provider per worker.
 
+`capabilities.single_attempt: true` advertises support for the optional
+`request.single_attempt: true` flag. Such a request performs at most one upstream
+inference call: configured retries, fallbacks and implicit repair attempts inside
+the driver must be disabled. The gateway uses this negotiated mode for bounded
+request budgets, including every structured-output correction. Unsupported drivers
+are rejected before dispatch with `single_attempt_unsupported`; the optional flag
+must never silently weaken the budget. Unbounded legacy requests omit it.
+
 A `models` result contains objects with `id`, optional `name` and
 `reasoning_efforts`. An empty result means discovery is unavailable. The driver
 fetches current data; the gateway owns refresh scheduling, last-known-good

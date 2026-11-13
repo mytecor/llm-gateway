@@ -64,3 +64,56 @@ func TestTimeoutRuleExplicitIdleAndContinuePolicy(t *testing.T) {
 		t.Fatalf("continue policy retries = %d, want 2", policy.Retries)
 	}
 }
+
+func TestRoutingPlanPreservesExplicitAttemptTimeout(t *testing.T) {
+	explicit := testConfig()
+	for i := range explicit.Providers {
+		if explicit.Providers[i].ID == "a" {
+			explicit.Providers[i].RequestTimeout = Duration{Duration: 45 * time.Second}
+		}
+	}
+	explicit.Rules = []policy.Rule{
+		filterModel("smart", "smart"),
+		filterProvider("smart", "a"),
+		mapRule("smart", "native-model"),
+		rankRule("smart"),
+		raceRule("smart", 1),
+		timeoutRule("smart", 3*time.Minute),
+	}
+	compiledExplicit, err := PrepareAndCompile(explicit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := compiledExplicit.Providers["a"].RequestTimeout.Duration; got != 3*time.Minute {
+		t.Fatalf("provider ceiling request_timeout = %v, want 3m", got)
+	}
+	planExplicit := compiledExplicit.RoutingPlan()
+	if got := planExplicit.Providers["a"].AttemptTimeout; got != 45*time.Second {
+		t.Fatalf("RoutingPlan AttemptTimeout = %v, want 45s", got)
+	}
+	if !planExplicit.Providers["a"].SafeReplay {
+		t.Fatal("expected stateless driver provider to default to SafeReplay=true")
+	}
+
+	inherited := testConfig()
+	for i := range inherited.Providers {
+		if inherited.Providers[i].ID == "a" {
+			inherited.Providers[i].RequestTimeout = Duration{}
+		}
+	}
+	inherited.Rules = []policy.Rule{
+		filterModel("smart", "smart"),
+		filterProvider("smart", "a"),
+		mapRule("smart", "native-model"),
+		rankRule("smart"),
+		raceRule("smart", 1),
+		timeoutRule("smart", 3*time.Minute),
+	}
+	compiledInherited, err := PrepareAndCompile(inherited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := compiledInherited.RoutingPlan().Providers["a"].AttemptTimeout; got != 0 {
+		t.Fatalf("unset provider RequestTimeout must leave AttemptTimeout=0, got %v", got)
+	}
+}

@@ -1,4 +1,5 @@
 {"type":"ready","protocol_version":1,"tool_strategy":"prompt","capabilities":{"chat":true,"streaming":true,"tools":true,"stateful":true,"resume":true},"config":{"profile":"fixture.yaml"}}
+{"type":"ready","protocol_version":1,"capabilities":{"chat":true,"responses":true,"streaming":true,"tools":true,"safe_replay":true,"single_attempt":true}}
 {"type":"models","models":[{"id":"native-model","name":"Native Model","reasoning_efforts":["low","high"]}]}
 {"type":"chunk","id":"request-1","data":{"choices":[{"delta":{"content":"hello"}}]},"meaningful":true}
 {"type":"text","text":"hello"}

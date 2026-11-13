@@ -24,7 +24,7 @@ sequenceDiagram
     Note over GW,Driver: Provider worker startup
     GW->>Driver: start (provider config)
     Driver-->>GW: ready (stateful: false)
-    GW->>Driver: request (id, model, body, stream)
+    GW->>Driver: request (id, model, body, stream, single_attempt)
     Driver->>API: HTTP inference request
     alt Streaming
         Driver-->>GW: stream_opened (id)
@@ -43,6 +43,23 @@ Tool calls are returned to the gateway as part of the upstream response.
 Tool results arrive in the body of a subsequent gateway request. The driver keeps
 no native conversation session. While a request is in flight, the gateway can send
 `cancel (id)` to cancel its upstream context, leaving other request IDs running.
+Cancellation closes that request's physical upstream connection through Bifrost's
+context-aware transport. Unary requests invoke the prepared provider adapter
+directly, avoiding the mutable request queue in Bifrost Core's cancellation path.
+The default performs one upstream call; explicitly configured legacy
+`bifrost_max_retries` remains bounded and its backoff observes cancellation.
+When `single_attempt: true` is sent, both unary and streaming calls invoke the
+provider adapter once, bypassing configured retries and implicit core repair
+attempts. The gateway requires `capabilities.single_attempt: true` before sending
+this flag. A driver without that capability fails before upstream dispatch for
+requests whose call budget requires this guarantee; unbounded legacy routes
+retain their configured driver retries.
+
+For non-streaming requests, `request_timeout_ms` bounds the individual call.
+For streaming requests, the gateway bounds selection through the first meaningful
+content, reasoning or tool-call event. Empty and role-only events do not end that
+wait. Once a winner is selected, the selection timer is removed and the live
+stream follows its separate idle timeout and client cancellation.
 
 ## Source layout
 

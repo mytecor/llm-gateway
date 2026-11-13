@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"github.com/mytecor/llm-gateway/driverproto"
 	"io"
+	"math/rand/v2"
 	"net/url"
 	"strings"
 	"time"
@@ -109,11 +110,12 @@ type rawProviderConfig struct {
 
 func defaultCapabilities() *Capabilities {
 	return &Capabilities{
-		Chat:       true,
-		Responses:  true,
-		Streaming:  true,
-		Tools:      true,
-		SafeReplay: true,
+		Chat:          true,
+		Responses:     true,
+		Streaming:     true,
+		Tools:         true,
+		SafeReplay:    true,
+		SingleAttempt: true,
 	}
 }
 
@@ -175,8 +177,11 @@ func ValidateProviderConfig(msg inboundMessage) (ProviderConfig, *CatalogSource,
 	}
 
 	timeoutSeconds := raw.RequestTimeoutSeconds
-	if timeoutSeconds <= 0 && msg.RequestTimeoutMs > 0 {
-		timeoutSeconds = max(1, int((time.Duration(msg.RequestTimeoutMs)*time.Millisecond)/time.Second))
+	if msg.RequestTimeoutMs > 0 {
+		msgTimeoutSec := max(1, int((time.Duration(msg.RequestTimeoutMs)*time.Millisecond+time.Second-1)/time.Second))
+		if msgTimeoutSec > timeoutSeconds {
+			timeoutSeconds = msgTimeoutSec
+		}
 	}
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = 60
@@ -218,7 +223,7 @@ func ValidateProviderConfig(msg inboundMessage) (ProviderConfig, *CatalogSource,
 		VertexRegion:          raw.VertexRegion,
 		VertexAuthCredentials: raw.VertexAuthCredentials,
 		APIKey:                raw.APIKey,
-		RequestTimeoutSeconds: timeoutSeconds,
+		RequestTimeoutSeconds: raw.RequestTimeoutSeconds,
 		BifrostMaxRetries:     raw.BifrostMaxRetries,
 		AllowPrivateNetwork:   raw.AllowPrivateNetwork,
 		Headers:               raw.Headers,
@@ -395,10 +400,27 @@ func sortedProviderIDs(providers map[string]ProviderConfig) []string {
 }
 
 func (e *Executor) Do(ctx context.Context, providerID, nativeModel, kind string, body []byte) ([]byte, *CallError) {
+	return e.do(ctx, providerID, nativeModel, kind, body, false)
+}
+
+func (e *Executor) do(ctx context.Context, providerID, nativeModel, kind string, body []byte, singleAttempt bool) ([]byte, *CallError) {
 	if providerID == "" {
 		providerID = e.defaultProvider
 	}
 	bfContext := schemas.NewBifrostContext(ctx, schemas.NoDeadline)
+	provider := e.providers[providerID]
+	retries := provider.BifrostMaxRetries
+	if singleAttempt {
+		retries = 0
+	}
+	adapter := e.client.GetProviderByKey(e.bifrostProviders[providerID])
+	if adapter == nil {
+		return nil, &CallError{Class: "invalid_response", Status: 400, Log: "provider_request_rejected"}
+	}
+	key := bifrostKeyForProvider(provider, schemas.ModelProvider(provider.BaseProvider))
+	// Invoke the prepared adapter directly. Core's unary queue mutates the
+	// request model while its cancellation path reads it (including v1.9.1).
+	// The adapter keeps transport cancellation synchronous and request-local.
 	switch kind {
 	case "chat":
 		chatRequest, callErr := e.chatRequest(bfContext, providerID, nativeModel, body)
@@ -406,10 +428,10 @@ func (e *Executor) Do(ctx context.Context, providerID, nativeModel, kind string,
 			callErr.Log = "provider_request_rejected"
 			return nil, callErr
 		}
-		response, bfErr := e.client.ChatCompletionRequest(bfContext, chatRequest)
-		if bfErr != nil {
-			callErr := classifyBifrostError(ctx, bfErr)
-			callErr.Log = "upstream_request_failed"
+		response, callErr := callUnaryProvider(ctx, retries, func() (*schemas.BifrostChatResponse, *schemas.BifrostError) {
+			return adapter.ChatCompletion(bfContext, key, chatRequest)
+		})
+		if callErr != nil {
 			return nil, callErr
 		}
 		response.Model = nativeModel
@@ -421,10 +443,10 @@ func (e *Executor) Do(ctx context.Context, providerID, nativeModel, kind string,
 			callErr.Log = "provider_request_rejected"
 			return nil, callErr
 		}
-		response, bfErr := e.client.ResponsesRequest(bfContext, responsesRequest)
-		if bfErr != nil {
-			callErr := classifyBifrostError(ctx, bfErr)
-			callErr.Log = "upstream_request_failed"
+		response, callErr := callUnaryProvider(ctx, retries, func() (*schemas.BifrostResponsesResponse, *schemas.BifrostError) {
+			return adapter.Responses(bfContext, key, responsesRequest)
+		})
+		if callErr != nil {
 			return nil, callErr
 		}
 		response.Model = nativeModel
@@ -434,7 +456,42 @@ func (e *Executor) Do(ctx context.Context, providerID, nativeModel, kind string,
 	}
 }
 
+// Preserve explicitly configured legacy driver retries. The normal (zero)
+// setting makes exactly one physical call; gateway retries remain scheduler-owned.
+func callUnaryProvider[T any](ctx context.Context, retries int, call func() (*T, *schemas.BifrostError)) (*T, *CallError) {
+	delay := schemas.DefaultRetryBackoffInitial
+	for attempt := 0; ; attempt++ {
+		if ctx.Err() != nil {
+			return nil, classifyBifrostError(ctx, nil)
+		}
+		response, bfErr := call()
+		if bfErr == nil && ctx.Err() == nil {
+			return response, nil
+		}
+		callErr := classifyBifrostError(ctx, bfErr)
+		callErr.Log = "upstream_request_failed"
+		retryable := callErr.Class == "429" || callErr.Class == "timeout" || callErr.Class == "connection_error" ||
+			(callErr.Class == "5xx" && callErr.Status >= 500)
+		if ctx.Err() != nil || attempt >= retries || !retryable {
+			return nil, callErr
+		}
+		backoff := min(time.Duration(float64(delay)*(0.8+0.4*rand.Float64())), schemas.DefaultRetryBackoffMax)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, classifyBifrostError(ctx, nil)
+		case <-timer.C:
+		}
+		delay = min(delay*2, schemas.DefaultRetryBackoffMax)
+	}
+}
+
 func (e *Executor) Stream(ctx context.Context, providerID, nativeModel, kind string, body []byte, streamIdleTimeout time.Duration) (<-chan StreamChunk, *CallError) {
+	return e.stream(ctx, providerID, nativeModel, kind, body, streamIdleTimeout, false)
+}
+
+func (e *Executor) stream(ctx context.Context, providerID, nativeModel, kind string, body []byte, streamIdleTimeout time.Duration, singleAttempt bool) (<-chan StreamChunk, *CallError) {
 	if providerID == "" {
 		providerID = e.defaultProvider
 	}
@@ -443,6 +500,15 @@ func (e *Executor) Stream(ctx context.Context, providerID, nativeModel, kind str
 		bfContext.SetValue(schemas.BifrostContextKeyStreamIdleTimeout, streamIdleTimeout)
 	}
 	var source <-chan *schemas.BifrostStreamChunk
+	adapter := e.client.GetProviderByKey(e.bifrostProviders[providerID])
+	if adapter == nil {
+		return nil, &CallError{Class: "invalid_response", Status: 400, Log: "provider_request_rejected"}
+	}
+	provider := e.providers[providerID]
+	key := bifrostKeyForProvider(provider, schemas.ModelProvider(provider.BaseProvider))
+	identityHook := func(_ *schemas.BifrostContext, response *schemas.BifrostResponse, err *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError) {
+		return response, err
+	}
 	switch kind {
 	case "chat":
 		chatRequest, callErr := e.chatRequest(bfContext, providerID, nativeModel, body)
@@ -450,7 +516,15 @@ func (e *Executor) Stream(ctx context.Context, providerID, nativeModel, kind str
 			callErr.Log = "provider_request_rejected"
 			return nil, callErr
 		}
-		stream, bfErr := e.client.ChatCompletionStreamRequest(bfContext, chatRequest)
+		var stream chan *schemas.BifrostStreamChunk
+		var bfErr *schemas.BifrostError
+		if singleAttempt {
+			// Bypass core retries, including implicit repair attempts that can
+			// otherwise exceed MaxRetries=0. One scheduler permit is one call.
+			stream, bfErr = adapter.ChatCompletionStream(bfContext, identityHook, nil, key, chatRequest)
+		} else {
+			stream, bfErr = e.client.ChatCompletionStreamRequest(bfContext, chatRequest)
+		}
 		if bfErr != nil {
 			callErr := classifyBifrostError(ctx, bfErr)
 			callErr.Log = "upstream_request_failed"
@@ -463,7 +537,13 @@ func (e *Executor) Stream(ctx context.Context, providerID, nativeModel, kind str
 			callErr.Log = "provider_request_rejected"
 			return nil, callErr
 		}
-		stream, bfErr := e.client.ResponsesStreamRequest(bfContext, responsesRequest)
+		var stream chan *schemas.BifrostStreamChunk
+		var bfErr *schemas.BifrostError
+		if singleAttempt {
+			stream, bfErr = adapter.ResponsesStream(bfContext, identityHook, nil, key, responsesRequest)
+		} else {
+			stream, bfErr = e.client.ResponsesStreamRequest(bfContext, responsesRequest)
+		}
 		if bfErr != nil {
 			callErr := classifyBifrostError(ctx, bfErr)
 			callErr.Log = "upstream_request_failed"
@@ -649,7 +729,7 @@ func classifyBifrostError(ctx context.Context, err *schemas.BifrostError) *CallE
 	}
 	if ctx.Err() != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return &CallError{Class: "timeout", Status: 504, Detail: ctx.Err().Error()}
+			return &CallError{Class: "timeout", Status: 504, Scope: "provider", Detail: ctx.Err().Error()}
 		}
 		return &CallError{Class: "cancelled", Status: 499, Detail: ctx.Err().Error()}
 	}

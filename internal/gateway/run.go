@@ -21,7 +21,7 @@ import (
 	"github.com/mytecor/llm-gateway/internal/telemetry"
 )
 
-// Run executes the llm-gateway CLI commands ("check" or "serve").
+// Run executes the llm-gateway CLI commands ("check", "explain", or "serve").
 func Run(arguments []string) error {
 	flags := flag.NewFlagSet("llm-gateway", flag.ContinueOnError)
 	configPath := flags.String("config", "", "path to runtime JSON config")
@@ -31,14 +31,26 @@ func Run(arguments []string) error {
 		return err
 	}
 	if *configPath == "" || flags.NArg() != 1 {
-		return errors.New("usage: llm-gateway --config PATH <check|serve>")
+		return errors.New("usage: llm-gateway --config PATH <check|explain|serve>")
 	}
 	command := flags.Arg(0)
-	if command != "check" && command != "serve" {
-		return errors.New("usage: llm-gateway --config PATH <check|serve>")
+	if command != "check" && command != "explain" && command != "serve" {
+		return errors.New("usage: llm-gateway --config PATH <check|explain|serve>")
 	}
 	if command == "check" {
 		return config.CheckConfig(*configPath, *requireEnvSecrets, *allowedEnv)
+	}
+	if command == "explain" {
+		exp, err := config.ExplainConfig(*configPath, *requireEnvSecrets, *allowedEnv)
+		if err != nil {
+			return err
+		}
+		out, err := config.MarshalExplanation(exp)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(out))
+		return nil
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

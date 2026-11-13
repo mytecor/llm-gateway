@@ -30,6 +30,10 @@ type CompiledRoute struct {
 	// ProviderUnused restricts the compiled pool at runtime to providers not
 	// yet used by the current request graph (explicit routing policy).
 	ProviderUnused bool
+	// ReschedulableOnly restricts incoming fallback transitions into this route
+	// using isReschedulableError (used by declarative tier fallbacks so client-
+	// scoped 400 errors stop instead of retrying alternate models).
+	ReschedulableOnly bool
 	// Pool is the ranked candidate target pairs of the route after the
 	// filter/map/rank sequence; an immutable snapshot kept at the race action.
 	Pool []model.Target
@@ -56,6 +60,9 @@ type CompiledRoute struct {
 	RouteTimeout time.Duration
 	// StreamIdleTimeout bounds per-chunk silence on the relayed winner stream.
 	StreamIdleTimeout time.Duration
+	// AdaptiveTiming lets the scheduler dynamically slice attempt timeouts
+	// within remaining budget and gate hopeless hedges/transitions.
+	AdaptiveTiming bool
 
 	// Resolved transitions (compile stage).
 	RetryTarget    *CompiledRoute
@@ -111,6 +118,7 @@ type SemaphoreConfig struct {
 	MaxCalls            int
 	MaxInFlight         int
 	MaxCallsPerProvider int
+	MaxHedges           int
 }
 
 // ContinueConfig is the in-gateway stream takeover policy for a route. When

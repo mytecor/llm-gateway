@@ -62,6 +62,23 @@ func (s *HedgeLatencyStore) remove(key hedgeProfileKey) {
 	}
 }
 
+// ReadyThreshold reads a fresh trained profile without creating observations or
+// warming a missing profile. Zero means there is insufficient current evidence.
+func (s *HedgeLatencyStore) ReadyThreshold(provider, native string, stream bool) time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := hedgeProfileKey{provider, native, stream}
+	profile := s.profiles[key]
+	if profile == nil {
+		return 0
+	}
+	if s.now().Sub(profile.last) >= hedgeRetention {
+		s.remove(key)
+		return 0
+	}
+	return profile.threshold
+}
+
 // Begin snapshots the threshold after permits have been obtained. Stale profiles
 // are evicted lazily, including profiles belonging to targets no longer routed.
 func (s *HedgeLatencyStore) Begin(provider, native string, stream bool) *HedgeObservation {

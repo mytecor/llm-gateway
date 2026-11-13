@@ -41,4 +41,7 @@ func TestRunCheckValidConfig(t *testing.T) {
 	if err := Run([]string{"--config", cfgPath, "check"}); err != nil {
 		t.Fatalf("expected check to succeed, got %v", err)
 	}
+	if err := Run([]string{"--config", cfgPath, "explain"}); err != nil {
+		t.Fatalf("expected explain to succeed, got %v", err)
+	}
 }

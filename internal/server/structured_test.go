@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -43,6 +44,66 @@ func strictConfig() config.Config {
 	cfg.Providers = cfg.Providers[:1]
 	cfg.Rules = policytest.EntryRules([]string{"a"}, 1)
 	return cfg
+}
+
+func TestStrictCorrectionsShareRequestBudget(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, tc := range []struct {
+			name                          string
+			calls, perProvider, wantCalls int
+			validSecond                   bool
+		}{
+			{"total", 1, 3, 1, true},
+			{"per-provider", 3, 1, 1, true},
+			{"successful-correction", 2, 2, 2, true},
+			{"exhausted-corrections", 2, 3, 2, false},
+		} {
+			t.Run(fmt.Sprintf("stream=%t/%s", stream, tc.name), func(t *testing.T) {
+				cfg := strictConfig()
+				cfg.Rules = nil
+				zero := 0
+				cfg.Models = map[string]policy.ModelSpec{"standard": {
+					Budget: &policy.BudgetSpec{MaxCalls: tc.calls, MaxInFlight: 1, MaxCallsPerProvider: tc.perProvider, MaxHedges: &zero},
+					Tiers:  []policy.TierSpec{{Targets: []policy.TargetSpec{{Provider: "a", Native: "native-model"}}}},
+				}}
+				var calls atomic.Int32
+				answer := func() string {
+					if calls.Add(1) > 1 && tc.validSecond {
+						return `{"value":1}`
+					}
+					return `{"value":-1}`
+				}
+				exec := &fakeExecutor{
+					do: func(context.Context, model.Target, model.ExecuteRequest) ([]byte, *model.CallError) {
+						return strictCompletion(answer()), nil
+					},
+					stream: func(context.Context, model.Target, model.ExecuteRequest) (<-chan model.StreamEvent, *model.CallError) {
+						ch := make(chan model.StreamEvent, 2)
+						ch <- strictChunk(map[string]any{"content": answer()}, nil)
+						ch <- strictChunk(map[string]any{}, "stop")
+						close(ch)
+						return ch, nil
+					},
+				}
+				api, read := eventsTestServer(t, cfg, exec)
+				resp, body := postCompletion(t, api.URL, strictRequest(stream))
+				if calls.Load() != int32(tc.wantCalls) {
+					t.Fatalf("calls=%d, want %d, body=%s", calls.Load(), tc.wantCalls, body)
+				}
+				success := tc.validSecond && tc.wantCalls == 2
+				if (resp.StatusCode == 200) != success {
+					t.Fatalf("status=%d, want success=%t, body=%s", resp.StatusCode, success, body)
+				}
+				if success {
+					for _, event := range read() {
+						if event["event"] == "request_completed" && event["attempts"] != float64(2) {
+							t.Fatalf("double-counted generation attempts: %v", event)
+						}
+					}
+				}
+			})
+		}
+	}
 }
 
 func TestStrictHTTPReRoutesAndAccountsOnce(t *testing.T) {

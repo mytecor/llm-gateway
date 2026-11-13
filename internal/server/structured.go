@@ -70,13 +70,14 @@ func (s *Server) strictInference(writer http.ResponseWriter, request *http.Reque
 		defer executeRequest.Exchange.Abort()
 	}
 	generation := 0
+	run := s.runner.NewRequestRun(ctx, logical)
 	execute := func(ctx context.Context, req model.ExecuteRequest) (*structured.Generation, *model.CallError) {
 		if generation > 0 {
 			s.metrics.ObserveStructuredCorrection(logical)
 		}
 		generation++
 		if !stream {
-			result, err := s.runner.RunGeneration(ctx, logical, req)
+			result, err := run.RunGeneration(ctx, req)
 			if result == nil {
 				return nil, err
 			}
@@ -87,7 +88,7 @@ func (s *Server) strictInference(writer http.ResponseWriter, request *http.Reque
 		}
 		req.MaxBufferBytes = structured.MaxBufferBytes
 		buffer := &structured.Buffer{KeepWaiting: func() bool { return ctx.Err() == nil && sink.KeepAlive(scheduler.StreamHeartbeat{}) }}
-		outcome := s.runner.RunGenerationStream(ctx, logical, req, started, buffer)
+		outcome := run.RunGenerationStream(ctx, req, started, buffer)
 		outcome.Body = buffer.Body()
 		err := buffer.Err
 		if err == nil && !buffer.Completed {
