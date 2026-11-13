@@ -110,8 +110,9 @@ type FallbackConfig struct {
 // branches are still waiting for a meaningful response.
 type HedgeConfig struct {
 	Enabled  bool
-	Target   string // resolved to hedgeTarget at compile stage
-	Internal bool   // true when Target is empty (in-route scheduler dynamic hedge)
+	Target   string        // resolved to hedgeTarget at compile stage
+	Internal bool          // true when Target is empty (in-route scheduler dynamic hedge)
+	Delay    time.Duration // optional upper bound / cold-start fallback for adaptive hedge delay
 }
 
 type SemaphoreConfig struct {

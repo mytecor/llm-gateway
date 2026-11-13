@@ -163,3 +163,51 @@ func TestCompileModelsStatefulAndValidationErrors(t *testing.T) {
 		t.Fatal("expected DisallowUnknownFields error on unknown ModelSpec key")
 	}
 }
+
+func TestCompileModelsHedgeDelayAndValidation(t *testing.T) {
+	providers := testDeclarativeProviders()
+	zero := 0
+
+	compiled, err := CompileWithModels(nil, map[string]ModelSpec{
+		"standard": {
+			HedgeDelay: Duration{Duration: 10 * time.Second},
+			Tiers: []TierSpec{{
+				Targets: []TargetSpec{{Select: map[string]string{"pool": "gonka"}, Native: "ds-v4"}},
+			}},
+		},
+	}, providers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := compiled.Models["standard"].Hedge.Delay; got != 10*time.Second {
+		t.Fatalf("Hedge.Delay = %v, want 10s", got)
+	}
+
+	if _, err := CompileWithModels(nil, map[string]ModelSpec{
+		"bad-neg": {
+			HedgeDelay: Duration{Duration: -time.Second},
+			Tiers:      []TierSpec{{Targets: []TargetSpec{{Select: map[string]string{"pool": "gonka"}, Native: "ds-v4"}}}},
+		},
+	}, providers); err == nil {
+		t.Fatal("expected error for negative hedge_delay")
+	}
+
+	if _, err := CompileWithModels(nil, map[string]ModelSpec{
+		"bad-budget": {
+			HedgeDelay: Duration{Duration: 5 * time.Second},
+			Budget:     &BudgetSpec{MaxHedges: &zero},
+			Tiers:      []TierSpec{{Targets: []TargetSpec{{Select: map[string]string{"pool": "gonka"}, Native: "ds-v4"}}}},
+		},
+	}, providers); err == nil {
+		t.Fatal("expected error when hedge_delay is combined with max_hedges=0")
+	}
+
+	if _, err := CompileWithModels(nil, map[string]ModelSpec{
+		"bad-stateful": {
+			HedgeDelay: Duration{Duration: 5 * time.Second},
+			Tiers:      []TierSpec{{Targets: []TargetSpec{{Provider: "codex-session", Native: "codex"}}}},
+		},
+	}, providers); err == nil {
+		t.Fatal("expected error when hedge_delay is set on stateful model")
+	}
+}

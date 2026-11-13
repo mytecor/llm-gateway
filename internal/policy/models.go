@@ -24,6 +24,7 @@ type ModelSpec struct {
 	Profile           string           `json:"profile,omitempty"`
 	Timeout           Duration         `json:"timeout,omitempty"`
 	StreamIdleTimeout Duration         `json:"stream_idle_timeout,omitempty"`
+	HedgeDelay        Duration         `json:"hedge_delay,omitempty"`
 	SafeContinue      *bool            `json:"safe_continue,omitempty"`
 	Continue          *ContinueSpec    `json:"continue,omitempty"`
 	Budget            *BudgetSpec      `json:"budget,omitempty"`
@@ -162,7 +163,7 @@ func compileSingleModelSpec(logicalID string, spec ModelSpec, providers map[stri
 	if err != nil {
 		return fmt.Errorf("model %q: %w", logicalID, err)
 	}
-	if spec.Timeout.Duration < 0 || spec.StreamIdleTimeout.Duration < 0 {
+	if spec.Timeout.Duration < 0 || spec.StreamIdleTimeout.Duration < 0 || spec.HedgeDelay.Duration < 0 {
 		return fmt.Errorf("model %q: timeouts must not be negative", logicalID)
 	}
 	if len(spec.Tiers) == 0 {
@@ -182,6 +183,9 @@ func compileSingleModelSpec(logicalID string, spec ModelSpec, providers map[stri
 		}
 		tierPools[tierIdx] = pool
 		totalTargets += len(pool)
+	}
+	if hasStateful && spec.HedgeDelay.Duration > 0 {
+		return fmt.Errorf("model %q: hedge_delay is not supported for stateful providers", logicalID)
 	}
 
 	routeTimeout := prof.routeTimeout
@@ -208,6 +212,9 @@ func compileSingleModelSpec(logicalID string, spec ModelSpec, providers map[stri
 	semCfg, err := compileModelBudget(logicalID, spec.Budget, prof, totalTargets, hasStateful)
 	if err != nil {
 		return err
+	}
+	if spec.HedgeDelay.Duration > 0 && semCfg.MaxHedges == 0 {
+		return fmt.Errorf("model %q: hedge_delay requires budget.max_hedges > 0", logicalID)
 	}
 
 	tierRoutes := make([]*CompiledRoute, len(tierPools))
@@ -242,7 +249,7 @@ func compileSingleModelSpec(logicalID string, spec ModelSpec, providers map[stri
 				ExplorationRate: 0.10,
 			}
 			if prof.hedgeEnabled && semCfg.MaxHedges > 0 {
-				rt.Hedge = HedgeConfig{Enabled: true, Internal: true}
+				rt.Hedge = HedgeConfig{Enabled: true, Internal: true, Delay: spec.HedgeDelay.Duration}
 			}
 		}
 		if tierIdx+1 < len(tierRoutes) {

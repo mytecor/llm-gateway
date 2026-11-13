@@ -32,6 +32,7 @@ type ModelExplanation struct {
 	AdaptiveTiming    bool                    `json:"adaptive_timing"`
 	SafeContinue      bool                    `json:"safe_continue"`
 	HedgeEnabled      bool                    `json:"hedge_enabled"`
+	HedgeDelay        string                  `json:"hedge_delay,omitempty"`
 	Budget            BudgetExplanation       `json:"budget"`
 	Admission         AdmissionExplain        `json:"admission"`
 	Balance           BalanceExplain          `json:"balance"`
@@ -181,6 +182,9 @@ func ExplainCompiled(compiled *CompiledConfig) ConfigExplanation {
 		}
 		if entry.RouteTimeout > 0 {
 			me.RouteTimeout = entry.RouteTimeout.String()
+		}
+		if entry.Hedge.Delay > 0 {
+			me.HedgeDelay = entry.Hedge.Delay.String()
 		}
 		if entry.StreamIdleTimeout > 0 {
 			me.StreamIdleTimeout = entry.StreamIdleTimeout.String()

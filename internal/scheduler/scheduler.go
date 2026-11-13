@@ -497,10 +497,19 @@ func (sc *schedule) armHedge() {
 		if active.group != 0 {
 			continue
 		}
-		if active.observation.Threshold <= 0 {
+		var threshold time.Duration
+		if active.observation != nil {
+			threshold = active.observation.Threshold
+		}
+		if sc.route != nil {
+			if delay := sc.route.Hedge.Delay; delay > 0 && (threshold <= 0 || delay < threshold) {
+				threshold = delay
+			}
+		}
+		if threshold <= 0 {
 			return
 		}
-		due := active.started.Add(active.observation.Threshold)
+		due := active.started.Add(threshold)
 		if due.After(deadline) {
 			deadline = due
 		}
