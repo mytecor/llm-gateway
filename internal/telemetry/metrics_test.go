@@ -292,3 +292,24 @@ func TestAdmissionAndCapacityMetrics(t *testing.T) {
 		t.Errorf("missing or wrong route queue wait duration bucket:\n%s", body)
 	}
 }
+
+func TestHedgeMetricsProfilesAndExpiry(t *testing.T) {
+	m := NewMetrics()
+	m.ObserveHedgeDelay("a", "native", true, 2*time.Second)
+	m.ObserveHedgeDelay("a", "native", false, 4*time.Second)
+	m.ObserveHedge("main")
+	body := scrape(t, m)
+	for _, want := range []string{
+		`llm_hedge_delay_seconds{provider="a",native_model="native",stream="true"} 2`,
+		`llm_hedge_delay_seconds{provider="a",native_model="native",stream="false"} 4`,
+		`llm_hedges_total{route="main"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %s", want)
+		}
+	}
+	m.ObserveHedgeDelay("a", "native", true, 0)
+	if strings.Contains(scrape(t, m), `stream="true"`) {
+		t.Fatal("expired profile retained")
+	}
+}

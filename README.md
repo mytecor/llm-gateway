@@ -266,8 +266,45 @@ filter → map → admission → balance → affinity → race → retry → hed
 - **`affinity`**: Binds Responses API sequences to the winning provider using a session identifier.
 - **`race`**: Executes parallel requests (`count`) across top-ranked providers (first successful response wins).
 - **`retry`**: Reroutes on errors (429, 5xx, timeouts) to fallback routes with configurable exponential backoff.
-- **`hedge`**: Dispatches a parallel backup request if the primary target has not returned a response within the specified threshold (`after`).
+- **`hedge`**: Dispatches a parallel backup when all active primary branches exceed their learned p95 response-selection thresholds. No delay configuration is required.
 - **`timeout`**: Enforces request-wide deadlines (`duration`) and chunk idle timeouts (`idle`).
+
+### Adaptive hedging
+
+Enable hedging explicitly after `race`:
+
+```json
+{"route":"standard","action":"hedge"}
+```
+
+Without `target`, the scheduler selects one unused provider from the current
+pool when the hedge fires, rechecking current load, health, cooldown and capacity.
+An optional `target` selects a named hedge route whose existing race count and
+unused-provider policy apply. Routes without a hedge rule never hedge. The removed
+`after` field is rejected: delete it to migrate to adaptive timing.
+
+Each `(provider, native model, streaming mode)` profile first collects 20 successful
+measurements. Streaming measures time to the first meaningful content, reasoning
+or tool-call event; role-only and empty events do not count. Non-streaming measures
+the complete response duration. Dispatch timing starts after permits are acquired,
+so gateway admission/permit waiting is excluded. During warmup, hedging is disabled
+and the ordinary request timeout still applies. If any active primary profile is
+unready, the scheduler waits without arming a hedge timer.
+
+The initial threshold is the nearest-rank p95 of the 20 measurements. Subsequent
+observations update it with `q *= exp(0.1 * (overdue - 0.05))`, using each attempt's
+threshold snapshot to classify exceedances. Timely successes slowly lower the
+threshold; overdue successes, timeouts and race-loser cancellations above the
+threshold raise it. Early loser cancellations, client cancellations and unrelated
+errors are neutral. This aims for roughly 5% exceedances under stable traffic;
+it is not a hard backup-call or billing budget. All existing request call limits,
+capacity bounds, affinity and stateful executor restrictions still apply.
+
+Profiles are memory-only, separate from balance's provider-wide EWMA, and expire
+after five minutes without useful observations. Each profile retains a fixed
+warmup buffer; stale profiles are evicted lazily on traffic. The scheduler cancels
+the losers once a meaningful winner is selected and never waits for a hedge after
+a fast terminal failure. See [ARCHITECTURE.md](./ARCHITECTURE.md) for runtime details.
 
 Streaming rules use `policy.RuntimeRule.Evaluate(RuleContext, RuleEvent) RuleDecision`.
 Each client run creates its own rule instances from the compiled policy.
@@ -309,6 +346,8 @@ Key metrics include:
 - `llm_attempts_total` / `llm_stream_breaks_total` — Upstream attempts and mid-stream disconnections.
 - `llm_requests_in_flight` — Active concurrent requests per provider.
 - `llm_cooldown_until_seconds` — Timestamp indicating provider cooldown expiration on failure.
+- `llm_hedge_delay_seconds` — Learned p95 threshold by provider, native model and `stream` mode; absent during warmup and removed when a stale profile is evicted.
+- `llm_hedges_total` — Actual backup branch dispatches by source route, including deferred refills.
 
 ### Structured Logging
 

@@ -20,7 +20,7 @@ var version = "0.1.0"
 
 // Metrics is the gateway's numeric observability surface. It is deliberately
 // label-restricted (low cardinality only: api_key, route, model, provider,
-// native_model, status and error_type are the only dimensions) and rendered
+// native_model, stream, status and error_type are the only dimensions) and rendered
 // on demand in the Prometheus text exposition format. request_id, session_id,
 // client_ip or any prompt material never become labels. api_key is always the
 // non-secret client-key ID the request was authenticated with (empty when
@@ -110,6 +110,8 @@ type Metrics struct {
 	routeQueueRejections   *counterVec
 	providerCapacity       *gaugeVec
 	providerEWMATTFT       *gaugeVec
+	hedgeDelay             *gaugeVec
+	hedgesTotal            *counterVec
 
 	startTime time.Time
 }
@@ -154,8 +156,29 @@ func NewMetrics() *Metrics {
 		routeQueueRejections:   newCounterVec([]string{"route", "reason"}),
 		providerCapacity:       newGaugeVec([]string{"provider"}),
 		providerEWMATTFT:       newGaugeVec([]string{"provider"}),
+		hedgeDelay:             newGaugeVec([]string{"provider", "native_model", "stream"}),
+		hedgesTotal:            newCounterVec([]string{"route"}),
 		startTime:              time.Now(),
 	}
+}
+
+// ObserveHedgeDelay publishes a ready profile, or removes an expired one.
+func (m *Metrics) ObserveHedgeDelay(provider, native string, stream bool, delay time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	mode := strconv.FormatBool(stream)
+	if delay <= 0 {
+		delete(m.hedgeDelay.v, m.hedgeDelay.keyFor(provider, native, mode))
+	} else {
+		m.hedgeDelay.set(provider, native, mode, delay.Seconds())
+	}
+}
+
+// ObserveHedge counts actual backup dispatches, including delayed refills.
+func (m *Metrics) ObserveHedge(route string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hedgesTotal.inc(route)
 }
 
 // ObserveRequest records one completed client request at the request level.
@@ -395,6 +418,8 @@ func (m *Metrics) WriteExposition(writer io.Writer) error {
 	m.routeQueueWaitDuration.write(buffered, "llm_route_queue_wait_duration_seconds", "Histogram of duration spent waiting in route queue.")
 	m.routeQueueRejections.write(buffered, "llm_route_queue_rejections_total", "Route queue rejections by route and reason.")
 	m.providerCapacity.write(buffered, "llm_provider_capacity", "Configured hard concurrency capacity of each provider.")
+	m.hedgeDelay.write(buffered, "llm_hedge_delay_seconds", "Adaptive p95 response selection threshold by provider, native model and streaming mode; absent during warmup.")
+	m.hedgesTotal.write(buffered, "llm_hedges_total", "Actual backup branch dispatches by route.")
 	m.providerEWMATTFT.write(buffered, "llm_provider_ewma_ttft_seconds", "Current EWMA time to first token per provider.")
 
 	return buffered.Flush()

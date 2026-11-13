@@ -9,7 +9,6 @@ import (
 	"github.com/mytecor/llm-gateway/internal/telemetry"
 	"github.com/mytecor/llm-gateway/internal/transform"
 	"log/slog"
-	"strings"
 	"time"
 )
 
@@ -304,8 +303,10 @@ func (s *semaphore) acquire(provider string, inFlight int) bool {
 // target batch (group 1). It is owned by the single scheduler goroutine except
 // for branch goroutines sending on results.
 type activeBranch struct {
-	provider string
-	started  time.Time
+	provider    string
+	started     time.Time
+	group       int
+	observation *subsystem.HedgeObservation
 }
 
 type schedule struct {
@@ -325,6 +326,7 @@ type schedule struct {
 	// policy is applied at launch time, so the hedge group carries the full
 	// ordered pool and the race count caps the launches.
 	limits         []int
+	dispatched     []int
 	started        [][]bool
 	launched       []bool
 	request        model.ExecuteRequest
@@ -350,13 +352,13 @@ type schedule struct {
 // an upstream call or a semaphore slot. Returns whether any branch started or
 // was reported pre-failed.
 func (sc *schedule) launch(g int) bool {
-	if sc.runtime.expired() || g < 0 || g >= len(sc.groups) || !sc.armed[g] || sc.launched[g] {
+	if sc.ctx.Err() != nil || sc.runtime.expired() || g < 0 || g >= len(sc.groups) || !sc.armed[g] || sc.launched[g] {
 		return false
 	}
 	started := false
 	delivered := false
 	allStarted := true
-	launchedN := 0
+	launchedN := sc.dispatched[g]
 	limit := len(sc.groups[g])
 	if sc.limits[g] > 0 && sc.limits[g] < limit {
 		limit = sc.limits[g]
@@ -390,6 +392,7 @@ func (sc *schedule) launch(g int) bool {
 			sc.seq++
 			sc.deliverPreFailed(sc.seq, target, callErr)
 			launchedN++
+			sc.dispatched[g]++
 			continue
 		}
 		permit := sc.r.capacity.Acquire(target.Provider)
@@ -416,18 +419,24 @@ func (sc *schedule) launch(g int) bool {
 		sc.started[g][i] = true
 		started = true
 		launchedN++
+		sc.dispatched[g]++
 		sc.active++
 		sc.seq++
 		id := sc.seq
 		sc.runtime.used[target.Provider] = true
 		branchCtx, cancel := context.WithCancel(sc.ctx)
 		sc.cancels[id] = cancel
-		if sc.activeBranches != nil {
-			sc.activeBranches[id] = activeBranch{provider: target.Provider, started: sc.r.now()}
+		active := activeBranch{provider: target.Provider, started: sc.r.now(), group: g,
+			observation: sc.r.hedgeLatency.Begin(target.Provider, target.Model, sc.stream)}
+		sc.activeBranches[id] = active
+		if g == sc.hedgeG {
+			sc.r.metrics.ObserveHedge(sc.route.Name)
+			telemetry.LogEvent(sc.ctx, sc.r.logger, slog.LevelDebug, "hedge_launched",
+				"route", sc.route.Name, "providers", target.Provider)
 		}
 		// The permit owns the slot, the balancing load signal and its metric
 		// through the branch and any selected stream handed to the caller.
-		go sc.runBranch(branchCtx, id, cancel, target, permit)
+		go sc.runBranch(branchCtx, id, cancel, target, permit, active)
 	}
 	if allStarted {
 		sc.launched[g] = true
@@ -467,24 +476,50 @@ func (sc *schedule) refill() bool {
 	return started
 }
 
-func (sc *schedule) armHedge() {
-	if sc.hedgeG < 0 {
-		return
-	}
+func (sc *schedule) stopHedge() {
 	if sc.hedgeTimer != nil {
 		sc.hedgeTimer.Stop()
 		sc.hedgeTimer = nil
 	}
 	sc.hedgeC = nil
-	if !sc.armed[sc.hedgeG] && !sc.launched[sc.hedgeG] && sc.route.Hedge.After > 0 {
-		sc.hedgeTimer = time.NewTimer(sc.route.Hedge.After)
-		sc.hedgeC = sc.hedgeTimer.C
+}
+
+func (sc *schedule) armHedge() {
+	sc.stopHedge()
+	if sc.hedgeG < 0 || sc.armed[sc.hedgeG] || sc.launched[sc.hedgeG] {
+		return
 	}
+	var deadline time.Time
+	for _, active := range sc.activeBranches {
+		if active.group != 0 {
+			continue
+		}
+		if active.observation.Threshold <= 0 {
+			return
+		}
+		due := active.started.Add(active.observation.Threshold)
+		if due.After(deadline) {
+			deadline = due
+		}
+	}
+	if deadline.IsZero() {
+		return
+	}
+	delay := max(time.Duration(0), deadline.Sub(sc.r.now()))
+	sc.hedgeTimer = time.NewTimer(delay)
+	sc.hedgeC = sc.hedgeTimer.C
 }
 
 func (sc *schedule) cancelOthers(except int) {
 	for id, cancel := range sc.cancels {
 		if id != except {
+			if active, ok := sc.activeBranches[id]; ok {
+				if sc.ctx.Err() == nil {
+					active.observation.Censor(sc.r.now().Sub(active.started))
+				} else {
+					active.observation.Discard()
+				}
+			}
 			cancel()
 		}
 	}
@@ -502,6 +537,9 @@ func (r *Runner) observeProviderOutcome(provider string, callErr *model.CallErro
 }
 
 func (sc *schedule) cancelAll() {
+	for _, active := range sc.activeBranches {
+		active.observation.Discard()
+	}
 	for _, cancel := range sc.cancels {
 		cancel()
 	}
@@ -518,6 +556,7 @@ func (sc *schedule) observeRouteTimeouts() {
 		if !active.started.IsZero() {
 			latency = now.Sub(active.started)
 		}
+		active.observation.Censor(latency)
 		sc.r.observeProviderOutcome(active.provider, timeoutErr, latency)
 		delete(sc.activeBranches, id)
 	}
@@ -525,7 +564,7 @@ func (sc *schedule) observeRouteTimeouts() {
 
 // runBranch performs one upstream call and delivers exactly one terminal
 // result. The send never blocks the caller past cancellation.
-func (sc *schedule) runBranch(ctx context.Context, id int, cancel context.CancelFunc, target model.Target, permit *subsystem.Permit) {
+func (sc *schedule) runBranch(ctx context.Context, id int, cancel context.CancelFunc, target model.Target, permit *subsystem.Permit, active activeBranch) {
 	// Failed probes, non-streaming calls and cancelled losers release their
 	// provider slot on branch exit. A streaming winner transfers that release to
 	// SelectedStream.Cancel because its upstream call remains active after the
@@ -538,7 +577,7 @@ func (sc *schedule) runBranch(ctx context.Context, id int, cancel context.Cancel
 		}
 	}()
 
-	started := sc.r.now()
+	started := active.started
 	executor := sc.r.executor
 	if entry := sc.r.plan.Models[sc.logical]; entry != nil {
 		executor = transform.Wrap(executor, entry.Transforms)
@@ -576,6 +615,18 @@ func (sc *schedule) runBranch(ctx context.Context, id int, cancel context.Cancel
 	res.started = started
 	if res.finished.IsZero() {
 		res.finished = sc.r.now()
+	}
+	elapsed := res.finished.Sub(started)
+	switch {
+	case res.err == nil:
+		active.observation.Success(elapsed)
+	case sc.ctx.Err() != nil:
+		active.observation.Discard()
+	case res.err.Class == model.ErrorTimeout:
+		active.observation.Censor(elapsed)
+	default:
+		// Loser cancellation is reported by cancelOthers before cancelling its context.
+		active.observation.Discard()
 	}
 	select {
 	case sc.results <- res:
@@ -658,7 +709,7 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 			hedgeG = len(groups)
 			groups = append(groups, hedgeBatch)
 		}
-	} else if route.Hedge.Internal && route.Hedge.After > 0 && !pinned {
+	} else if route.Hedge.Enabled && route.Hedge.Internal && !pinned {
 		if len(ordered) > raceN {
 			// Keep only a placeholder here. The candidate set is rebuilt when
 			// the timer fires so load, health, cooldown and capacity are current.
@@ -686,6 +737,8 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 		runtime:        runtime,
 		hedgeG:         hedgeG,
 	}
+	defer sc.stopHedge()
+	sc.dispatched = make([]int, len(groups))
 	sc.armed = make([]bool, len(groups))
 	sc.excludeUsed = make([]bool, len(groups))
 	sc.limits = make([]int, len(groups))
@@ -797,6 +850,7 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 			// denied a permit while it was held (refills the race batch and the
 			// hedge batch alike).
 			sc.refill()
+			sc.armHedge()
 			if sc.active == 0 {
 				// No branch is in flight and the refill started nothing: no
 				// future event can free another slot, so the route is terminal.
@@ -834,10 +888,6 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 				}
 				sc.armed[sc.hedgeG] = true
 				sc.launch(sc.hedgeG)
-				telemetry.LogEvent(ctx, r.logger, slog.LevelDebug, "hedge_launched",
-					"route", route.Name,
-					"providers", hedgeProviderNames(sc.groups[sc.hedgeG]),
-				)
 			}
 		case <-deadlineCh:
 			sc.observeRouteTimeouts()
@@ -852,13 +902,3 @@ func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *polic
 
 // collectFailures is unused: prefailed results are accumulated through the
 // main loop and drained at the terminal point.
-
-// hedgeProviderNames renders the ordered provider names of a hedge batch for
-// the hedge_launched debug event (low cardinality: a provider id string).
-func hedgeProviderNames(targets []model.Target) string {
-	names := make([]string, 0, len(targets))
-	for _, target := range targets {
-		names = append(names, target.Provider)
-	}
-	return strings.Join(names, ",")
-}

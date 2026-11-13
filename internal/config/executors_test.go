@@ -186,7 +186,7 @@ func TestSessionDriverRejectsInvalidSettings(t *testing.T) {
 func TestSessionRoutesRejectSpeculationAndReplay(t *testing.T) {
 	for _, action := range []string{
 		`{"route":"main","action":"retry","attempts":2}`,
-		`{"route":"main","action":"hedge","after":"1s"}`,
+		`{"route":"main","action":"hedge"}`,
 		`{"route":"main","action":"continue"}`,
 		`{"route":"main","action":"repetition"}`,
 	} {

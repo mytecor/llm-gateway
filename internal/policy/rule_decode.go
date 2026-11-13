@@ -72,6 +72,15 @@ func decodeRule(data []byte, index int) (Rule, error) {
 		}
 		data = normalized
 	}
+	if action == ActionHedge {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			return nil, ruleErrf(index, route, action, "%v", err)
+		}
+		if _, present := fields["after"]; present {
+			return nil, ruleErrf(index, route, action, "remove after: hedge delay is calculated automatically")
+		}
+	}
 	rule := descriptor.new()
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()

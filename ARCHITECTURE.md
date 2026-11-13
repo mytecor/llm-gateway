@@ -23,6 +23,7 @@ flowchart TD
         subgraph Subsystems["Stateful Core Subsystems"]
             Catalog["Catalog Discovery"]
             ScoreStore["Score Store<br/>(EWMA TTFT / ε-Greedy)"]
+            HedgeLatency["Hedge Latency Store<br/>(Per-model adaptive p95)"]
             Admission["Admission & Queuing"]
             Lease["Lease & Capacity Store"]
             Affinity["Session Affinity"]
@@ -218,7 +219,29 @@ flowchart TD
 3. **Execution & Concurrency (`admission`, `lease`, `race`, `hedge`, `timeout`)**:
    - **`admission` & `lease`**: Guards upstream providers against saturation via queuing and bounded in-flight requests.
    - **`race`**: Dispatches $N$ parallel requests to the top-ranked providers; the first meaningful byte or completion wins, while losing branches are immediately cancelled.
-   - **`hedge`**: Spawns an auxiliary backup request if the primary branch has not returned a first token within the configured duration.
+   - **`hedge`**: Explicitly enables an adaptive backup batch when every active primary exceeds its own learned p95 selection latency; optional `target` preserves named-route selection. No fixed delay is accepted.
+
+     The separate, concurrency-safe Hedge Latency Store keys profiles by provider,
+     native model and streaming mode. It warms up from 20 successful dispatches,
+     seeds nearest-rank p95, then updates `q *= exp(0.1 * (overdue - 0.05))` against
+     each dispatch's immutable threshold snapshot. Streaming observes the first
+     meaningful event; non-streaming observes the full response. A primary without
+     a ready snapshot disarms the timer. Failures/refills recompute the latest due
+     time across active primaries; only one hedge batch can be armed per selection.
+     The timer is stopped when selection exits.
+
+     Branches report latency before handing results to the scheduler, so queued
+     successes are not lost when another branch wins. Exactly-once observations
+     classify loser cancellations and timeouts above their snapshots as censored
+     exceedances, while early cancellation, client cancellation and unrelated
+     failures are neutral. This feedback does not alter provider health or EWMA
+     balancing. Profiles expire after five minutes without useful observations,
+     with bounded warmup storage and lazy stale-profile eviction. The p95 target
+     approximates 5% exceedances under stable traffic, rather than imposing a hard
+     extra-call budget. `llm_hedge_delay_seconds` exposes ready thresholds and
+     `llm_hedges_total` counts actual dispatches; `hedge_launched` fires only when
+     a backup obtains permits, including later refills.
+
    - **`timeout`**: Bounds admission, provider selection and recovery transitions with one deadline; an already selected live stream follows its separately configured idle timeout.
 4. **Error Recovery & Flow Control (`retry`, `fallback`, `continue`, `repetition`)**:
    - **`retry` & `fallback`**: On error (429, 5xx, network timeout), transitions execution to dedicated subroutes with exponential backoff.

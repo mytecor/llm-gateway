@@ -99,10 +99,10 @@ type FallbackConfig struct {
 	Target string // resolved to fallbackTarget at compile stage
 }
 
-// HedgeConfig is a latency transition: after the delay the target route's
-// batch may start while the current route is still executing.
+// HedgeConfig enables an adaptive latency transition while the primary
+// branches are still waiting for a meaningful response.
 type HedgeConfig struct {
-	After    time.Duration
+	Enabled  bool
 	Target   string // resolved to hedgeTarget at compile stage
 	Internal bool   // true when Target is empty (in-route scheduler dynamic hedge)
 }

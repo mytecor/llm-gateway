@@ -47,7 +47,7 @@ func boundedPipeline(model string) []policy.Rule {
 		affinity,
 		raceRule("standard", 2),
 		retryRuleBackoff("standard", "standard.retry", 2, backoff),
-		hedgeRule("standard", 3*time.Second, "standard.hedge"),
+		hedgeRule("standard", "standard.hedge"),
 		semaphoreRule("standard", 4, 3, 1),
 		timeoutRule("standard", 60*time.Second),
 		filterError("standard.retry", "429", "5xx", "timeout", "connection_error", "invalid_response"),
@@ -118,7 +118,7 @@ func TestCompileConfigBoundedPipeline(t *testing.T) {
 	if !route.Affinity.Enabled || route.Affinity.TTL != 24*time.Hour || len(route.Affinity.Sources) != 2 {
 		t.Fatalf("affinity policy mismatch: %#v", route.Affinity)
 	}
-	if route.Hedge.After != 3*time.Second || route.Hedge.Target != "standard.hedge" {
+	if !route.Hedge.Enabled || route.Hedge.Target != "standard.hedge" {
 		t.Fatalf("hedge config mismatch: %#v", route.Hedge)
 	}
 	if route.Semaphore.MaxCalls != 4 || route.Semaphore.MaxInFlight != 3 || route.Semaphore.MaxCallsPerProvider != 1 {
@@ -187,19 +187,15 @@ func TestCompileConfigRejectsUnknownProvider(t *testing.T) {
 	}
 }
 
-func TestCompileConfigRejectsParameterlessHedge(t *testing.T) {
+func TestCompileConfigAcceptsParameterlessHedge(t *testing.T) {
 	cfg := testConfig()
-	cfg.Rules = append(cfg.Rules[:5],
-		hedgeRule("standard", 0, "standard.hedge"),
-		filterError("standard.hedge", "429"),
-		filterProvider("standard.hedge", "b", "c"),
-		mapRule("standard.hedge", "native-model"),
-		rankRule("standard.hedge"),
-		raceRule("standard.hedge", 1),
-	)
-	_, err := PrepareAndCompile(cfg)
-	if err == nil || !strings.Contains(err.Error(), "after") || !strings.Contains(err.Error(), "migration") {
-		t.Fatalf("expected precise hedge migration error, got %v", err)
+	cfg.Rules = append(cfg.Rules, hedgeRule("standard", ""))
+	compiled, err := PrepareAndCompile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.Models["standard"].Hedge.Enabled {
+		t.Fatal("hedge not enabled")
 	}
 }
 
@@ -623,7 +619,7 @@ func TestCompileBoundedPipelineJSON(t *testing.T) {
     {"route":"standard","action":"retry",
       "target":"standard.retry","attempts":2,
       "backoff":{"type":"exponential","initial":"200ms","max":"1s"}},
-    {"route":"standard","action":"hedge","after":"3s","target":"standard.hedge"},
+    {"route":"standard","action":"hedge","target":"standard.hedge"},
     {"route":"standard","action":"semaphore",
       "max_calls":4,"max_in_flight":3,"max_calls_per_provider":1},
     {"route":"standard","action":"timeout","duration":"60s"},
@@ -658,7 +654,7 @@ func TestCompileBoundedPipelineJSON(t *testing.T) {
 	if got := targetIDs(route.Pool); got != "a,b,c" {
 		t.Fatalf("ranking mismatch: %s", got)
 	}
-	if route.RaceCount != 2 || route.Hedge.After != 3*time.Second || route.RouteTimeout != 60*time.Second {
+	if route.RaceCount != 2 || !route.Hedge.Enabled || route.RouteTimeout != 60*time.Second {
 		t.Fatalf("schedule mismatch: %#v", route)
 	}
 	if route.Semaphore.MaxCalls != 4 || route.Semaphore.MaxInFlight != 3 || route.Semaphore.MaxCallsPerProvider != 1 {

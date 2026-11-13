@@ -30,6 +30,7 @@ type Runner struct {
 	authStreaks  map[string]int
 	leases       *subsystem.LeaseStore
 	scores       *subsystem.ScoreStore
+	hedgeLatency *subsystem.HedgeLatencyStore
 	capacity     *subsystem.ProviderCapacity
 	affinity     *subsystem.AffinityStore
 	metrics      *telemetry.Metrics
@@ -48,15 +49,16 @@ type cooldownKey struct {
 // Dependencies are owned by the application composition root. Defaults in New
 // are in-memory and make isolated runners straightforward to construct.
 type Dependencies struct {
-	Catalog   *subsystem.Catalog
-	Executor  model.Executor
-	Logger    *slog.Logger
-	Metrics   *telemetry.Metrics
-	Capacity  *subsystem.ProviderCapacity
-	Scores    *subsystem.ScoreStore
-	Leases    *subsystem.LeaseStore
-	Affinity  *subsystem.AffinityStore
-	Admission *subsystem.AdmissionController
+	Catalog      *subsystem.Catalog
+	Executor     model.Executor
+	Logger       *slog.Logger
+	Metrics      *telemetry.Metrics
+	Capacity     *subsystem.ProviderCapacity
+	Scores       *subsystem.ScoreStore
+	HedgeLatency *subsystem.HedgeLatencyStore
+	Leases       *subsystem.LeaseStore
+	Affinity     *subsystem.AffinityStore
+	Admission    *subsystem.AdmissionController
 }
 
 func NewRunner(plan policy.RuntimePlan, catalog *subsystem.Catalog, executor model.Executor) *Runner {
@@ -80,6 +82,9 @@ func New(plan policy.RuntimePlan, deps Dependencies) *Runner {
 	if deps.Scores == nil {
 		deps.Scores = subsystem.NewScoreStoreWithOptions(time.Now, deps.Capacity, subsystem.ScoreStoreOptions{MaxWindow: plan.MaxBalanceWindow()})
 	}
+	if deps.HedgeLatency == nil {
+		deps.HedgeLatency = subsystem.NewHedgeLatencyStore(time.Now, deps.Metrics)
+	}
 	if deps.Leases == nil {
 		deps.Leases = subsystem.NewLeaseStore(time.Now)
 	}
@@ -95,7 +100,8 @@ func New(plan policy.RuntimePlan, deps Dependencies) *Runner {
 		now: time.Now, sleep: sleepContext, cooling: make(map[cooldownKey]time.Time),
 		authStreaks: make(map[string]int),
 		metrics:     deps.Metrics, capacity: deps.Capacity, scores: deps.Scores,
-		leases: deps.Leases, affinity: deps.Affinity, admission: deps.Admission, ownsAffinity: ownsAffinity,
+		hedgeLatency: deps.HedgeLatency,
+		leases:       deps.Leases, affinity: deps.Affinity, admission: deps.Admission, ownsAffinity: ownsAffinity,
 	}
 	if registry, ok := deps.Executor.(interface {
 		UseCatalog(model.ProviderModelLister)

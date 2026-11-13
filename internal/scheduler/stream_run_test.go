@@ -239,7 +239,7 @@ func TestCancelledSelectedBranchReleasesCapacity(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sc := &schedule{r: runner, stream: true, request: streamRunRequest(), results: make(chan *branchResult, 1)}
-	sc.runBranch(ctx, 1, cancel, model.Target{Provider: "a", Model: "native-model"}, permit)
+	sc.runBranch(ctx, 1, cancel, model.Target{Provider: "a", Model: "native-model"}, permit, activeBranch{started: runner.now(), observation: runner.hedgeLatency.Begin("a", "native-model", true)})
 	result := <-sc.results
 	if result.selected == nil {
 		t.Fatal("branch did not produce a selected stream")

@@ -164,10 +164,9 @@ func fallbackRule(route, target string) Rule {
 	return r
 }
 
-func hedgeRule(route string, after time.Duration, target string) Rule {
+func hedgeRule(route string, target string) Rule {
 	r := &HedgeRule{}
 	r.setIdentity(route, "hedge")
-	r.After = Duration{Duration: after}
 	r.Target = target
 	return r
 }

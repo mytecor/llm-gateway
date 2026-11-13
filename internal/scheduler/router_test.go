@@ -541,7 +541,7 @@ func TestRouteTimeoutInterruptsRetryBackoff(t *testing.T) {
 
 func TestHedgeStartsOnlyTargetAfterDelay(t *testing.T) {
 	rules := append(policytest.EntryRules([]string{"a", "b"}, 2),
-		policytest.HedgeRuleHelper("standard", 40*time.Millisecond, "standard.hedge"))
+		policytest.HedgeRuleHelper("standard", "standard.hedge"))
 	rules = append(rules, policytest.FilterError("standard.hedge", "429", "5xx"))
 	rules = append(rules, policytest.FilterProviderUnused("standard.hedge", "b", "c"))
 	rules = append(rules, policytest.MapRuleHelper("standard.hedge", "native-model"), policytest.RankRuleHelper("standard.hedge"), policytest.RaceRuleHelper("standard.hedge", 1))
@@ -561,6 +561,7 @@ func TestHedgeStartsOnlyTargetAfterDelay(t *testing.T) {
 		}
 	}}
 	runner := NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), executor)
+	warmHedge(runner, "native-model", false, 40*time.Millisecond, "a", "b")
 	done := make(chan *model.CallError, 1)
 	go func() {
 		_, callErr := runner.Run(context.Background(), "standard", model.ExecuteRequest{Kind: model.RequestChat})
@@ -576,7 +577,7 @@ func TestHedgeStartsOnlyTargetAfterDelay(t *testing.T) {
 		}
 	}
 	// The hedge target (c, since b is already used) must start only after the
-	// delay while the first two branches are still running.
+	// learned thresholds while the first two branches are still running.
 	select {
 	case <-started:
 		startTimes = append(startTimes, time.Now())
@@ -604,7 +605,7 @@ func TestHedgeFastTerminalFailureSkipsHedgeAndTransitions(t *testing.T) {
 	// is made large so the test proves the retry runs well before it.
 	rules := append(policytest.EntryRules([]string{"a", "b"}, 2),
 		policytest.RetryRuleHelper("standard", "standard.retry", 1),
-		policytest.HedgeRuleHelper("standard", 5*time.Second, "standard.hedge"))
+		policytest.HedgeRuleHelper("standard", "standard.hedge"))
 	rules = append(rules, retryRulesUnused("standard", []string{"5xx"}, []string{"a", "b", "c"}, 1)...)
 	rules = append(rules, policytest.FilterError("standard.hedge", "5xx"))
 	rules = append(rules, policytest.FilterProviderUnused("standard.hedge", "b", "c"))
@@ -619,6 +620,7 @@ func TestHedgeFastTerminalFailureSkipsHedgeAndTransitions(t *testing.T) {
 		return nil, &model.CallError{Class: model.ErrorUpstream, Status: 503}
 	}}
 	runner := NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), executor)
+	warmHedge(runner, "native-model", false, 5*time.Second, "a", "b")
 	runner.sleep = func(context.Context, time.Duration) error { return nil }
 	begin := time.Now()
 	done := make(chan *model.CallError, 1)
@@ -715,7 +717,7 @@ func TestSemaphoreMaxCallsPerProviderAcrossRequest(t *testing.T) {
 
 func TestSemaphoreMaxInFlightGatesHedgeTarget(t *testing.T) {
 	rules := append(policytest.EntryRules([]string{"a", "b"}, 2),
-		policytest.HedgeRuleHelper("standard", 30*time.Millisecond, "standard.hedge"),
+		policytest.HedgeRuleHelper("standard", "standard.hedge"),
 		semaphoreRule("standard", 3, 2, 1))
 	rules = append(rules, policytest.FilterProviderUnused("standard.hedge", "a", "b", "c"))
 	rules = append(rules, policytest.MapRuleHelper("standard.hedge", "native-model"), policytest.RankRuleHelper("standard.hedge"), policytest.RaceRuleHelper("standard.hedge", 1))
@@ -740,6 +742,7 @@ func TestSemaphoreMaxInFlightGatesHedgeTarget(t *testing.T) {
 		}
 	}}
 	runner := NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), executor)
+	warmHedge(runner, "native-model", false, 30*time.Millisecond, "a", "b")
 	requestCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan *model.CallError, 1)
@@ -2018,7 +2021,7 @@ func TestSmart404FallbackToUnusedCarrier(t *testing.T) {
 		policytest.RaceRuleHelper("smart", 1),
 		// retry excludes 404/model_not_found exactly like primaryRules.
 		policytest.RetryRuleHelper("smart", "smart.retry", 2),
-		policytest.HedgeRuleHelper("smart", 10*time.Millisecond, "smart.hedge"),
+		policytest.HedgeRuleHelper("smart", "smart.hedge"),
 		policytest.FallbackRuleHelper("smart", "smart.fallback"),
 		// retry subroute: applies only to non-404 failures, re-selects unused.
 		policytest.FilterError("smart.retry", "429", "5xx", "timeout", "connection_error", "invalid_response"),
@@ -2253,5 +2256,14 @@ func TestRouteTimeoutRecordsHealthAndCapacity(t *testing.T) {
 	}
 	if lim := runner.capacity.Limit("a"); lim != 2 {
 		t.Fatalf("expected provider a effective capacity halved to 2, got %d", lim)
+	}
+}
+
+// warmHedge supplies successful branch observations without sleeping or changing policy.
+func warmHedge(runner *Runner, native string, stream bool, latency time.Duration, providers ...string) {
+	for _, provider := range providers {
+		for i := 0; i < 20; i++ {
+			runner.hedgeLatency.Begin(provider, native, stream).Success(latency)
+		}
 	}
 }

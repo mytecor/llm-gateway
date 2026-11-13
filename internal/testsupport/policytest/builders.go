@@ -148,10 +148,9 @@ func FallbackRuleHelper(route, target string) policy.Rule {
 	return r
 }
 
-func HedgeRuleHelper(route string, after time.Duration, target string) policy.Rule {
+func HedgeRuleHelper(route string, target string) policy.Rule {
 	r := &policy.HedgeRule{}
 	r.SetIdentity(route, "hedge")
-	r.After = policy.Duration{Duration: after}
 	r.Target = target
 	return r
 }

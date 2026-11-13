@@ -126,7 +126,7 @@ func TestInternalHedgeReevaluatesCapacityAtFireTime(t *testing.T) {
 		policytest.MapRuleDirect("standard", []string{"a", "b", "c"}, "model-x", 0),
 		policytest.RankRuleHelper("standard"),
 		policytest.RaceRuleHelper("standard", 1),
-		&policy.HedgeRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionHedge}, After: policy.Duration{Duration: 40 * time.Millisecond}},
+		&policy.HedgeRule{RuleBase: policy.RuleBase{Route: "standard", Action: policy.ActionHedge}},
 	}
 	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
@@ -146,6 +146,7 @@ func TestInternalHedgeReevaluatesCapacityAtFireTime(t *testing.T) {
 		return nil, &model.CallError{Class: model.ErrorUpstream, Status: 503, Scope: model.FailureScopeProvider}
 	}}
 	runner := NewRunner(compiled.RoutingPlan(), subsystem.NewCatalog(compiled), executor)
+	warmHedge(runner, "model-x", false, 40*time.Millisecond, "a")
 	done := make(chan *model.CallError, 1)
 	go func() {
 		_, callErr := runner.Run(context.Background(), "standard", model.ExecuteRequest{Kind: model.RequestChat})

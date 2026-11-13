@@ -1,76 +1,47 @@
 package policy
 
-import (
-	"strings"
-	"testing"
-	"time"
-)
+import "testing"
 
 func TestHedgeRuleDecode(t *testing.T) {
-	r := decodeRuleJSON(t, `{
-		"route":"standard","action":"hedge","after":"3s","target":"standard.hedge"
-	}`)
+	r := decodeRuleJSON(t, `{"route":"standard","action":"hedge","target":"standard.hedge"}`)
 	hedged, ok := r.(*HedgeRule)
-	if !ok {
-		t.Fatalf("decoded rule is %T, want *HedgeRule", r)
-	}
-	if hedged.After.Duration != 3*time.Second || hedged.Target != "standard.hedge" {
-		t.Fatalf("hedge fields mismatch: %#v", hedged)
+	if !ok || hedged.Target != "standard.hedge" {
+		t.Fatalf("unexpected hedge: %#v", r)
 	}
 }
 
 func TestHedgeRuleCompileResolvesTarget(t *testing.T) {
 	result := mustCompile(t,
-		filterModel("standard", "standard"),
-		filterProvider("standard", "a", "b"),
-		mapRule("standard", "native-model"),
-		rankRule("standard"),
-		raceRule("standard", 2),
-		hedgeRule("standard", 3*time.Second, "standard.hedge"),
-		filterError("standard.hedge", "429", "5xx"),
-		filterProvider("standard.hedge", "b", "c"),
-		mapRule("standard.hedge", "native-model"),
-		rankRule("standard.hedge"),
-		raceRule("standard.hedge", 1),
+		filterModel("standard", "standard"), filterProvider("standard", "a", "b"),
+		mapRule("standard", "native-model"), rankRule("standard"), raceRule("standard", 2),
+		hedgeRule("standard", "standard.hedge"),
+		filterProvider("standard.hedge", "b", "c"), mapRule("standard.hedge", "native-model"),
+		rankRule("standard.hedge"), raceRule("standard.hedge", 1),
 	)
 	route := entryRoute(t, result, "standard")
-	if route.Hedge.After != 3*time.Second || route.Hedge.Target != "standard.hedge" {
-		t.Fatalf("hedge config mismatch: %#v", route.Hedge)
-	}
-	if route.HedgeTarget == nil {
-		t.Fatalf("hedge target not resolved at compile stage")
+	if !route.Hedge.Enabled || route.Hedge.Target != "standard.hedge" || route.HedgeTarget == nil {
+		t.Fatalf("hedge target not resolved: %#v", route.Hedge)
 	}
 	if got := targetIDs(route.HedgeTarget.Pool); got != "b,c" {
-		t.Fatalf("hedge subroute pool mismatch: %s", got)
+		t.Fatalf("hedge pool: %s", got)
 	}
 }
 
 func TestHedgeRuleDecodeRejectsForeignField(t *testing.T) {
-	decodeRuleError(t, `{
-		"route":"standard","action":"hedge","after":"3s","target":"standard.hedge","count":2
-	}`, "unknown field \"count\"", `action "hedge"`)
+	decodeRuleError(t, `{"route":"standard","action":"hedge","count":2}`, `unknown field "count"`, `action "hedge"`)
 }
 
-func TestHedgeRuleRejectsZeroAfter(t *testing.T) {
-	_, err := compileRules(append(standardEntry(),
-		hedgeRule("standard", 0, "standard.hedge"),
-		filterError("standard.hedge", "429"),
-		filterProvider("standard.hedge", "c"),
-		mapRule("standard.hedge", "native-model"),
-		rankRule("standard.hedge"),
-		raceRule("standard.hedge", 1),
-	)...)
-	if err == nil || !strings.Contains(err.Error(), "after") || !strings.Contains(err.Error(), "migration") {
-		t.Fatalf("expected parameterless hedge error, got %v", err)
+func TestHedgeRuleRejectsAfter(t *testing.T) {
+	for _, value := range []string{`"3s"`, `"0s"`, `null`, `123`} {
+		decodeRuleError(t, `{"route":"standard","action":"hedge","after":`+value+`}`,
+			"remove after: hedge delay is calculated automatically", `action "hedge"`)
 	}
 }
 
 func TestHedgeRuleWithoutTargetEnablesInternalHedge(t *testing.T) {
-	result := mustCompile(t, append(standardEntry(),
-		hedgeRule("standard", 3*time.Second, ""),
-	)...)
+	result := mustCompile(t, append(standardEntry(), hedgeRule("standard", ""))...)
 	route := entryRoute(t, result, "standard")
-	if !route.Hedge.Internal || route.Hedge.After != 3*time.Second {
-		t.Fatalf("expected internal hedge with 3s delay, got %#v", route.Hedge)
+	if !route.Hedge.Internal || !route.Hedge.Enabled {
+		t.Fatalf("expected adaptive internal hedge: %#v", route.Hedge)
 	}
 }
