@@ -39,6 +39,10 @@ func (r *RequestRun) ExcludeProvider(provider string) {
 	r.excluded[provider] = true
 }
 
+func (r *RequestRun) HasExcludedProviders() bool {
+	return r != nil && len(r.excluded) > 0
+}
+
 // CanFailoverProvider reports whether another non-excluded, non-cooling
 // provider with remaining request budget is reachable along the entry route's
 // fallback chain.
@@ -53,12 +57,57 @@ func (r *RequestRun) CanFailoverProvider(excludeProvider string) bool {
 	return r.runner.hasSelectableRoute(entry, excludeProvider, r.excluded, r.budget)
 }
 
+// PrepareFailover advances exclusion state for a structured output failover.
+// It tries every unexcluded non-cooling peer first, and when a multi-provider
+// route exhausts unexcluded peers while per-provider call budget remains, it
+// resets exclusions so load-balanced aggregators can roll a fresh upstream shard.
+func (r *RequestRun) PrepareFailover(failedProvider string) bool {
+	if r == nil || r.runner == nil || r.budget == nil || r.budget.expired() || r.budget.callsExhausted() {
+		return false
+	}
+	entry := r.runner.plan.Models[r.logical]
+	if entry == nil || entry.Stateful {
+		return false
+	}
+	if r.runner.hasSelectableRoute(entry, failedProvider, r.excluded, r.budget) {
+		r.ExcludeProvider(failedProvider)
+		return true
+	}
+	if !r.runner.hasMultipleRouteTargets(entry) {
+		return false
+	}
+	if r.runner.hasSelectableRoute(entry, failedProvider, nil, r.budget) {
+		r.excluded = map[string]bool{failedProvider: true}
+		return true
+	}
+	if r.runner.hasSelectableRoute(entry, "", nil, r.budget) {
+		r.excluded = make(map[string]bool)
+		return true
+	}
+	return false
+}
+
 func (r *RequestRun) RunGeneration(ctx context.Context, request model.ExecuteRequest) (*model.RunOutcome, *model.CallError) {
 	return r.runner.runGeneration(ctx, r.logical, request, r.budget, r.excluded)
 }
 
 func (r *RequestRun) RunGenerationStream(ctx context.Context, request model.ExecuteRequest, started time.Time, sink StreamSink) *model.RunOutcome {
 	return r.runner.runStreamWithBudget(ctx, r.logical, request, started, sink, true, r.budget, r.excluded)
+}
+
+func (r *Runner) hasMultipleRouteTargets(entry *policy.CompiledRoute) bool {
+	providers := make(map[string]bool)
+	seen := make(map[*policy.CompiledRoute]bool)
+	for route := entry; route != nil && !seen[route]; route = route.FallbackTarget {
+		seen[route] = true
+		for _, target := range route.Pool {
+			providers[target.Provider] = true
+			if len(providers) > 1 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (r *Runner) hasSelectableRoute(entry *policy.CompiledRoute, excludeExtra string, excluded map[string]bool, budget *RequestBudget) bool {

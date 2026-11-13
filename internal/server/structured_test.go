@@ -393,13 +393,14 @@ func TestStrictIncompleteOutputFailsOverAcrossPoolAndTiers(t *testing.T) {
 					},
 				}}
 				var calls []string
+				var firstTier0 atomic.Int32
 				exec := &fakeExecutor{
 					do: func(_ context.Context, target model.Target, req model.ExecuteRequest) ([]byte, *model.CallError) {
 						calls = append(calls, target.Provider)
 						if bytes.Contains(req.Body, []byte("invalid JSON Schema")) {
 							t.Fatalf("unexpected validation correction message on incomplete failover: %s", req.Body)
 						}
-						if target.Provider == "a" || (failSecondTierZero && target.Provider == "b") {
+						if target.Provider != "c" && (failSecondTierZero || firstTier0.Add(1) == 1) {
 							return strictLengthCompletion(`{"value":`), nil
 						}
 						return strictCompletion(`{"value":42}`), nil
@@ -410,7 +411,7 @@ func TestStrictIncompleteOutputFailsOverAcrossPoolAndTiers(t *testing.T) {
 							t.Fatalf("unexpected validation correction message on incomplete failover: %s", req.Body)
 						}
 						ch := make(chan model.StreamEvent, 2)
-						if target.Provider == "a" || (failSecondTierZero && target.Provider == "b") {
+						if target.Provider != "c" && (failSecondTierZero || firstTier0.Add(1) == 1) {
 							ch <- strictChunk(map[string]any{"content": `{"value":`}, nil)
 							ch <- strictChunk(map[string]any{}, "length")
 						} else {
@@ -521,5 +522,40 @@ func TestStrictValidationErrorFailoverMovesCorrectionToPeer(t *testing.T) {
 	}
 	if !strings.Contains(metrics.String(), `llm_structured_corrections_total{model="standard"} 1`) {
 		t.Fatalf("missing correction metric: %s", metrics.String())
+	}
+}
+
+func TestStrictIncompleteOutputRollsPeerWhenCoolingWithPerProviderBudget(t *testing.T) {
+	cfg := configtest.TestConfig()
+	cfg.Providers = cfg.Providers[:2]
+	cfg.Rules = nil
+	zero := 0
+	cfg.Models = map[string]policy.ModelSpec{"standard": {
+		Profile: "balanced",
+		Budget:  &policy.BudgetSpec{MaxCalls: 4, MaxInFlight: 1, MaxCallsPerProvider: 2, MaxHedges: &zero},
+		Tiers: []policy.TierSpec{
+			{Targets: []policy.TargetSpec{{Provider: "a", Native: "native-model"}, {Provider: "b", Native: "native-model"}}},
+		},
+	}}
+	var aCalls, bCalls atomic.Int32
+	exec := &fakeExecutor{
+		do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
+			if target.Provider == "b" {
+				bCalls.Add(1)
+				return nil, &model.CallError{Class: model.ErrorTimeout, Status: 504, Scope: model.FailureScopeProvider, Replay: model.ReplayNotSent}
+			}
+			if aCalls.Add(1) == 1 {
+				return strictLengthCompletion(`{`), nil
+			}
+			return strictCompletion(`{"value":99}`), nil
+		},
+	}
+	api, _ := eventsTestServer(t, cfg, exec)
+	resp, body := postCompletion(t, api.URL, strictRequest(false))
+	if resp.StatusCode != 200 || !strings.Contains(body, `99`) {
+		t.Fatalf("status=%d body=%s aCalls=%d bCalls=%d", resp.StatusCode, body, aCalls.Load(), bCalls.Load())
+	}
+	if aCalls.Load() != 2 || bCalls.Load() != 1 {
+		t.Fatalf("expected second roll on a after b cooled, got aCalls=%d bCalls=%d", aCalls.Load(), bCalls.Load())
 	}
 }

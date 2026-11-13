@@ -99,11 +99,13 @@ func (s *Server) strictInference(writer http.ResponseWriter, request *http.Reque
 			s.runner.RecordStructuredFailure(ctx, logical, outcome.Provider, outcome.Model, stream, code)
 		},
 		Failover: func(ctx context.Context, outcome model.RunOutcome, code string) bool {
-			if !run.CanFailoverProvider(outcome.Provider) {
+			// When scheduler returned a CallError directly (outcome.Provider == ""),
+			// only retry via structured failover if earlier structured attempts had
+			// excluded valid providers from executeRoute.
+			if outcome.Provider == "" && !run.HasExcludedProviders() {
 				return false
 			}
-			run.ExcludeProvider(outcome.Provider)
-			return true
+			return run.PrepareFailover(outcome.Provider)
 		},
 		OnCorrection: func() {
 			s.metrics.ObserveStructuredCorrection(logical)

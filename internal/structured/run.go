@@ -88,6 +88,16 @@ func RunWithOptions(ctx context.Context, c *Contract, request model.ExecuteReque
 			return final, contextError(ctx)
 		}
 		if callErr != nil {
+			if failovers < MaxFailovers && request.Exchange == nil && retryableCallError(callErr) && opts.Failover != nil {
+				var outcome model.RunOutcome
+				if result != nil {
+					outcome = result.Outcome
+				}
+				if opts.Failover(ctx, outcome, callErr.Code) {
+					failovers++
+					continue
+				}
+			}
 			return final, callErr
 		}
 		if result == nil {
@@ -169,6 +179,18 @@ func RunWithOptions(ctx context.Context, c *Contract, request model.ExecuteReque
 		i++
 	}
 	panic("unreachable correction loop")
+}
+
+func retryableCallError(err *model.CallError) bool {
+	if err == nil || err.Replay == model.ReplayUnknown {
+		return false
+	}
+	switch err.Class {
+	case model.ErrorUpstream, model.ErrorTimeout, model.ErrorRateLimit, model.ErrorConnection:
+		return true
+	default:
+		return false
+	}
 }
 
 func contextError(ctx context.Context) *model.CallError {
