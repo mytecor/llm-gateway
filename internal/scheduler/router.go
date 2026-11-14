@@ -476,13 +476,16 @@ func (r *Runner) buildDynamicPool(route *policy.CompiledRoute, _ model.ExecuteRe
 	// re-dispatch must never re-hit an upstream that already failed a previous
 	// round of the same request, even when the route does not carry the unused
 	// policy. Empty for fresh requests, so the normal path is untouched.
-	if len(runtime.exclude) > 0 || len(runtime.excludeTargets) > 0 {
+	if len(runtime.exclude) > 0 || len(runtime.excludeTargets) > 0 || (runtime.budget != nil && runtime.budget.maxCallsPerProvider > 0) {
 		filtered := make([]model.Target, 0, len(pool))
 		for _, target := range pool {
 			if runtime.exclude[target.Provider] {
 				continue
 			}
 			if runtime.excludeTargets[targetKey{provider: target.Provider, model: target.Model}] {
+				continue
+			}
+			if runtime.budget != nil && runtime.budget.maxCallsPerProvider > 0 && runtime.budget.perProvider[target.Provider] >= runtime.budget.maxCallsPerProvider {
 				continue
 			}
 			filtered = append(filtered, target)

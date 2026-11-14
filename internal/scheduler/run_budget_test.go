@@ -166,3 +166,39 @@ func TestRecoveryReleasesBrokenProviderBeforeReselecting(t *testing.T) {
 		t.Fatal("recovery leaked provider permit")
 	}
 }
+
+func TestStructuredFailoverSkipsPerProviderBudgetExhaustedTarget(t *testing.T) {
+	plan := budgetPlan("a", "b")
+	plan.Models["standard"].Semaphore.MaxCalls = 4
+	plan.Models["standard"].Semaphore.MaxCallsPerProvider = 1
+	plan.Models["standard"].Balance = policy.BalanceConfig{Enabled: true, Strategy: "expected-ttft", Window: time.Minute, ErrorBudget: 0.2}
+	counts := map[string]int{}
+	exec := &fakeExecutor{
+		do: func(_ context.Context, target model.Target, _ model.ExecuteRequest) ([]byte, *model.CallError) {
+			counts[target.Provider]++
+			return []byte(`{"id":"ok","choices":[{"finish_reason":"stop","message":{"content":"{\"ok\":true}"}}]}`), nil
+		},
+	}
+	runner := NewRunner(plan, subsystem.NewCatalogWithSources(nil), exec)
+	defer runner.Close()
+
+	run := runner.NewRequestRun(context.Background(), "standard")
+	first, callErr := run.RunGeneration(context.Background(), model.ExecuteRequest{Kind: model.RequestChat})
+	if callErr != nil || first == nil {
+		t.Fatalf("first generation failed: outcome=%+v err=%v", first, callErr)
+	}
+	other := "b"
+	if first.Provider == "b" {
+		other = "a"
+	}
+	// Clear exclusions while first.Provider still has 1/1 per-provider budget
+	// spent; the dynamic pool must skip first.Provider and route to other.
+	run.excluded = map[string]bool{}
+	second, callErr := run.RunGeneration(context.Background(), model.ExecuteRequest{Kind: model.RequestChat})
+	if callErr != nil || second == nil || second.Provider != other {
+		t.Fatalf("expected generation to route to %q instead of exhausted %q, got outcome=%+v err=%v", other, first.Provider, second, callErr)
+	}
+	if counts[first.Provider] != 1 || counts[other] != 1 {
+		t.Fatalf("unexpected provider call counts: %+v", counts)
+	}
+}
