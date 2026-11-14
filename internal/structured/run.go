@@ -158,7 +158,7 @@ func RunWithOptions(ctx context.Context, c *Contract, request model.ExecuteReque
 		if opts.RecordFailure != nil && result.Outcome.Provider != "" {
 			opts.RecordFailure(ctx, result.Outcome, "structured_output_validation_failed")
 		}
-		if errors.Is(validation, errMalformedJSON) && request.Exchange == nil && failovers < MaxFailovers && result.Outcome.Provider != "" && opts.Failover != nil && opts.Failover(ctx, result.Outcome, "structured_output_validation_failed") {
+		if (errors.Is(validation, errMalformedJSON) || errors.Is(validation, errUnrelatedJSON)) && request.Exchange == nil && failovers < MaxFailovers && result.Outcome.Provider != "" && opts.Failover != nil && opts.Failover(ctx, result.Outcome, "structured_output_validation_failed") {
 			failovers++
 			continue
 		}

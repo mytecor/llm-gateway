@@ -25,6 +25,7 @@ const maxFeedbackErrors = 10
 type Contract struct {
 	Schema    string
 	validator *jsonschema.Schema
+	rootProps map[string]struct{}
 }
 
 type noExternalResources struct{}
@@ -90,17 +91,62 @@ func Parse(body []byte) (*Contract, *model.CallError) {
 	if err != nil {
 		return nil, Error(400, "invalid_json_schema")
 	}
-	return &Contract{Schema: string(format.JSONSchema.Schema), validator: schema}, nil
+	return &Contract{
+		Schema:    string(format.JSONSchema.Schema),
+		validator: schema,
+		rootProps: extractRootProps(doc),
+	}, nil
 }
 
-var errMalformedJSON = errors.New("response must contain exactly one JSON document")
+var (
+	errMalformedJSON = errors.New("response must contain exactly one JSON document")
+	errUnrelatedJSON = errors.New("response JSON shares no properties with target schema")
+)
+
+func extractRootProps(doc any) map[string]struct{} {
+	obj, ok := doc.(map[string]any)
+	if !ok {
+		return nil
+	}
+	rawProps, ok := obj["properties"].(map[string]any)
+	if !ok || len(rawProps) == 0 {
+		return nil
+	}
+	props := make(map[string]struct{}, len(rawProps))
+	for k := range rawProps {
+		props[k] = struct{}{}
+	}
+	return props
+}
+
+func (c *Contract) sharesRootProperty(value any) bool {
+	if len(c.rootProps) == 0 {
+		return true
+	}
+	obj, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	for k := range obj {
+		if _, ok := c.rootProps[k]; ok {
+			return true
+		}
+	}
+	return false
+}
 
 func (c *Contract) Validate(content string) error {
 	value, err := jsonschema.UnmarshalJSON(strings.NewReader(content))
 	if err != nil {
 		return errMalformedJSON
 	}
-	return c.validator.Validate(value)
+	if err := c.validator.Validate(value); err != nil {
+		if !c.sharesRootProperty(value) {
+			return fmt.Errorf("%w: %w", errUnrelatedJSON, err)
+		}
+		return err
+	}
+	return nil
 }
 
 // Feedback is bounded and sent only to the model, never to logs or the client.
