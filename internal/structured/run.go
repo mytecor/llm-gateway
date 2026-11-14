@@ -2,6 +2,7 @@ package structured
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/mytecor/llm-gateway/internal/model"
@@ -24,7 +25,7 @@ type Observation struct {
 
 // MaxFailovers caps clean provider-failover attempts per structured request when
 // upstream aggregators return incomplete or invalid structured output.
-const MaxFailovers = 8
+const MaxFailovers = 16
 
 type RunOptions struct {
 	Observe       func(Observation)
@@ -156,6 +157,10 @@ func RunWithOptions(ctx context.Context, c *Contract, request model.ExecuteReque
 		}
 		if opts.RecordFailure != nil && result.Outcome.Provider != "" {
 			opts.RecordFailure(ctx, result.Outcome, "structured_output_validation_failed")
+		}
+		if errors.Is(validation, errMalformedJSON) && request.Exchange == nil && failovers < MaxFailovers && result.Outcome.Provider != "" && opts.Failover != nil && opts.Failover(ctx, result.Outcome, "structured_output_validation_failed") {
+			failovers++
+			continue
 		}
 		if i == MaxCorrections {
 			return final, Error(502, "structured_output_validation_failed")

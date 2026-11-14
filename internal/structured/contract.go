@@ -93,10 +93,12 @@ func Parse(body []byte) (*Contract, *model.CallError) {
 	return &Contract{Schema: string(format.JSONSchema.Schema), validator: schema}, nil
 }
 
+var errMalformedJSON = errors.New("response must contain exactly one JSON document")
+
 func (c *Contract) Validate(content string) error {
 	value, err := jsonschema.UnmarshalJSON(strings.NewReader(content))
 	if err != nil {
-		return errors.New("response must contain exactly one JSON document")
+		return errMalformedJSON
 	}
 	return c.validator.Validate(value)
 }

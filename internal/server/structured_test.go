@@ -559,3 +559,45 @@ func TestStrictIncompleteOutputRollsPeerWhenCoolingWithPerProviderBudget(t *test
 		t.Fatalf("expected second roll on a after b cooled, got aCalls=%d bCalls=%d", aCalls.Load(), bCalls.Load())
 	}
 }
+
+func TestStrictMalformedJSONFailsOverCleanlyBeyondMaxCorrections(t *testing.T) {
+	cfg := configtest.TestConfig()
+	cfg.Providers = cfg.Providers[:2]
+	cfg.Rules = nil
+	zero := 0
+	cfg.Models = map[string]policy.ModelSpec{"standard": {
+		Profile: "balanced",
+		Budget:  &policy.BudgetSpec{MaxCalls: 6, MaxInFlight: 1, MaxCallsPerProvider: 3, MaxHedges: &zero},
+		Tiers: []policy.TierSpec{
+			{Targets: []policy.TargetSpec{{Provider: "a", Native: "native-model"}, {Provider: "b", Native: "native-model"}}},
+		},
+	}}
+	var totalCalls atomic.Int32
+	exec := &fakeExecutor{
+		do: func(_ context.Context, _ model.Target, req model.ExecuteRequest) ([]byte, *model.CallError) {
+			if bytes.Contains(req.Body, []byte("JSON schema validation")) || bytes.Contains(req.Body, []byte("response must contain exactly one JSON document")) {
+				t.Errorf("unexpected correction feedback in clean failover request body: %s", req.Body)
+			}
+			n := totalCalls.Add(1)
+			if n <= 4 {
+				return strictCompletion("not json output"), nil
+			}
+			return strictCompletion(`{"value":42}`), nil
+		},
+	}
+	api, _ := eventsTestServer(t, cfg, exec)
+	resp, body := postCompletion(t, api.URL, strictRequest(false))
+	if resp.StatusCode != 200 || !strings.Contains(body, `42`) {
+		t.Fatalf("status=%d body=%s calls=%d", resp.StatusCode, body, totalCalls.Load())
+	}
+	if totalCalls.Load() != 5 {
+		t.Fatalf("expected 5 calls (4 clean failovers + 1 valid), got %d", totalCalls.Load())
+	}
+	var metrics bytes.Buffer
+	if err := api.Config.Handler.(*Server).metrics.WriteExposition(&metrics); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(metrics.String(), `llm_structured_corrections_total{model="standard"}`) {
+		t.Fatalf("expected zero structured corrections for clean malformed-JSON failovers, got %s", metrics.String())
+	}
+}
