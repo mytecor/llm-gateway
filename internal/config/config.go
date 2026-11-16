@@ -21,13 +21,13 @@ type Config struct {
 	// non-secret label) in the request/usage metrics; an empty list disables
 	// client authentication entirely (keyless loopback mode). Key values are
 	// literal secrets or "env.VARNAME" references resolved at load time.
-	ClientAPIKeys              []ClientKey         `json:"client_api_keys"`
-	CatalogRefreshInterval     Duration            `json:"catalog_refresh_interval"`
-	StreamIdleTimeout          Duration            `json:"stream_idle_timeout"`
-	AffinityFile               string              `json:"affinity_file,omitempty"`
-	SessionFile                string              `json:"session_file,omitempty"`
-	SessionCheckpointRetention Duration            `json:"session_checkpoint_retention,omitempty"`
-	SessionCheckpointLimit     int                 `json:"session_checkpoint_limit,omitempty"`
+	ClientAPIKeys              []ClientKey                 `json:"client_api_keys"`
+	CatalogRefreshInterval     Duration                    `json:"catalog_refresh_interval"`
+	StreamIdleTimeout          Duration                    `json:"stream_idle_timeout"`
+	AffinityFile               string                      `json:"affinity_file,omitempty"`
+	SessionFile                string                      `json:"session_file,omitempty"`
+	SessionCheckpointRetention Duration                    `json:"session_checkpoint_retention,omitempty"`
+	SessionCheckpointLimit     int                         `json:"session_checkpoint_limit,omitempty"`
 	Providers                  []provider.Provider         `json:"providers"`
 	Models                     map[string]policy.ModelSpec `json:"models,omitempty"`
 	Rules                      policy.Rules                `json:"rules,omitempty"`
@@ -70,7 +70,13 @@ func (c *CompiledConfig) RoutingPlan() policy.RuntimePlan {
 	providers := make(map[string]policy.RuntimeProvider, len(c.Providers))
 	for id, p := range c.Providers {
 		safeReplay := p.Description == nil || (!p.Capabilities().Stateful && p.Capabilities().SafeReplay)
+		var capabilities *model.Capabilities
+		if p.Description != nil {
+			c := p.Capabilities()
+			capabilities = &c
+		}
 		providers[id] = policy.RuntimeProvider{
+			Capabilities:   capabilities,
 			Cooldown:       p.Cooldown.Duration,
 			MaxConcurrent:  p.MaxConcurrent,
 			AttemptTimeout: p.AttemptTimeout.Duration,

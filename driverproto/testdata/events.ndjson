@@ -7,3 +7,5 @@
 {"type":"usage","input_tokens":12,"output_tokens":3}
 {"type":"error","id":"request-1","call_error":{"class":"429","status":429,"scope":"provider","replay":"not_sent","detail":"rate limited"}}
 {"type":"done","id":"request-1"}
+{"type":"ready","protocol_version":1,"capabilities":{"systemone":true,"systemone_images":true,"systemone_box":true,"systemone_long_context":true,"safe_replay":true,"single_attempt":true}}
+{"type":"error","id":"decision-1","call_error":{"class":"429","status":429,"scope":"provider","replay":"completed","retry_after_ms":2000}}

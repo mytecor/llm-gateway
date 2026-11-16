@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"github.com/mytecor/llm-gateway/driverproto/systemone"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/subsystem"
@@ -674,6 +675,16 @@ func (sc *schedule) runBranch(ctx context.Context, id int, cancel context.Cancel
 			callCtx, attemptCancel = context.WithTimeout(ctx, attemptTimeout)
 		}
 		body, callErr := executor.Do(callCtx, target, request)
+		if callErr == nil && request.Kind == model.RequestSystemOne {
+			var contract systemone.Request
+			if systemone.Decode(request.Body, &contract) != nil {
+				callErr = &model.CallError{Class: model.ErrorInvalid, Status: 400, Code: "invalid_systemone_request", Scope: model.FailureScopeRequest, Replay: model.ReplayNotSent}
+			} else if validated, err := contract.ValidateResponse(body, "typesafe"); err != nil {
+				callErr = &model.CallError{Class: model.ErrorInvalid, Status: 502, Code: "invalid_systemone_response", Scope: model.FailureScopeTarget, Replay: model.ReplayCompleted}
+			} else {
+				body = validated
+			}
+		}
 		if attemptCancel != nil {
 			attemptCancel()
 		}
@@ -815,6 +826,12 @@ func (r *Runner) raceRoute(ctx context.Context, logical string, route *policy.Co
 func (r *Runner) raceRouteOnce(ctx context.Context, logical string, route *policy.CompiledRoute, request model.ExecuteRequest, streamMode bool, runtime *routeRuntime) *routeOutcome {
 	pool, pinned, callErr := r.buildPool(logical, route, request, runtime)
 	if callErr != nil {
+		// A named hedge can be the only compatible branch (for example images
+		// on a route whose primary pool is text-only). Dispatch it immediately.
+		if callErr.Code == "no_compatible_provider" && route.HedgeTarget != nil && !pinned {
+			return r.executeRoute(ctx, logical, route.HedgeTarget, request, streamMode, runtime)
+		}
+
 		return &routeOutcome{err: callErr, pinned: pinned}
 	}
 	if len(pool) == 0 {

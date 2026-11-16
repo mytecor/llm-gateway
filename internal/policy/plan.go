@@ -1,6 +1,9 @@
 package policy
 
-import "time"
+import (
+	"github.com/mytecor/llm-gateway/internal/model"
+	"time"
+)
 
 // RuntimePlan contains only routing data needed after startup. It carries no
 // credentials, driver configuration, persistence paths or decoding state.
@@ -11,6 +14,7 @@ type RuntimePlan struct {
 }
 
 type RuntimeProvider struct {
+	Capabilities   *model.Capabilities
 	Cooldown       time.Duration
 	MaxConcurrent  int
 	AttemptTimeout time.Duration

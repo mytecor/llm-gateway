@@ -27,6 +27,7 @@ type Runner struct {
 	// lazy: no timer rearms it, entries are checked at request time and an
 	// expired entry is dropped on the pair's next success.
 	cooling      map[cooldownKey]time.Time
+	retryAfter   map[cooldownKey]time.Time
 	halfOpen     map[cooldownKey]*halfOpenState
 	probeSeq     uint64
 	authStreaks  map[string]int
@@ -100,8 +101,8 @@ func New(plan policy.RuntimePlan, deps Dependencies) *Runner {
 	runner := &Runner{
 		plan: plan, catalog: deps.Catalog, executor: deps.Executor, logger: deps.Logger,
 		now: time.Now, sleep: sleepContext, cooling: make(map[cooldownKey]time.Time),
-		halfOpen: make(map[cooldownKey]*halfOpenState), authStreaks: make(map[string]int),
-		metrics:     deps.Metrics, capacity: deps.Capacity, scores: deps.Scores,
+		retryAfter: make(map[cooldownKey]time.Time), halfOpen: make(map[cooldownKey]*halfOpenState), authStreaks: make(map[string]int),
+		metrics: deps.Metrics, capacity: deps.Capacity, scores: deps.Scores,
 		hedgeLatency: deps.HedgeLatency,
 		leases:       deps.Leases, affinity: deps.Affinity, admission: deps.Admission, ownsAffinity: ownsAffinity,
 	}
@@ -366,6 +367,9 @@ func (r *Runner) runGeneration(ctx context.Context, logical string, request mode
 	if !ok {
 		return nil, &model.CallError{Class: model.ErrorInvalid, Status: 404, Scope: model.FailureScopeRequest}
 	}
+	if !r.hasCompatibleRoute(entry, request, make(map[*policy.CompiledRoute]bool)) {
+		return nil, noCompatibleProvider()
+	}
 	runtime := newRouteRuntimeWithExclude(entry, budget, exclude)
 	release, admitErr := r.admit(ctx, logical, runtime)
 	if admitErr != nil {
@@ -436,6 +440,9 @@ func (r *Runner) buildPool(logical string, route *policy.CompiledRoute, request 
 				} else {
 					for _, target := range route.Pool {
 						if target.Provider == provider {
+							if len(r.compatiblePool([]model.Target{target}, request)) == 0 {
+								return nil, true, noCompatibleProvider()
+							}
 							return []model.Target{target}, true, nil
 						}
 					}
@@ -458,8 +465,11 @@ func (r *Runner) buildPool(logical string, route *policy.CompiledRoute, request 
 // unused-provider policy (explicit routing policy, not a hidden retry
 // property) and the cooling fail-open. An all-used pool returns empty with no
 // error, so the caller can report the route as not applicable.
-func (r *Runner) buildDynamicPool(route *policy.CompiledRoute, _ model.ExecuteRequest, runtime *routeRuntime) ([]model.Target, *model.CallError) {
-	pool := route.Pool
+func (r *Runner) buildDynamicPool(route *policy.CompiledRoute, request model.ExecuteRequest, runtime *routeRuntime) ([]model.Target, *model.CallError) {
+	pool := r.compatiblePool(route.Pool, request)
+	if len(pool) == 0 {
+		return nil, noCompatibleProvider()
+	}
 	if route.ProviderUnused {
 		filtered := make([]model.Target, 0, len(pool))
 		for _, target := range pool {
@@ -495,6 +505,10 @@ func (r *Runner) buildDynamicPool(route *policy.CompiledRoute, _ model.ExecuteRe
 		}
 		pool = filtered
 	}
+	pool, retryErr := r.respectRetryAfter(pool)
+	if retryErr != nil {
+		return nil, retryErr
+	}
 	return r.availableFromPool(pool, runtime.strictAvailability), nil
 }
 
@@ -507,6 +521,7 @@ func (r *Runner) buildDynamicPool(route *policy.CompiledRoute, _ model.ExecuteRe
 // just broke. The caller then decides (chain-retry budget, terminal error)
 // instead of burning the re-dispatch on known-dead carriers.
 func (r *Runner) availableFromPool(pool []model.Target, strict bool) []model.Target {
+	pool, _ = r.respectRetryAfter(pool)
 	available := r.availableTargets(pool)
 	if len(available) == 0 && !strict {
 		return append([]model.Target(nil), pool...)
@@ -519,8 +534,8 @@ func (r *Runner) availableFromPool(pool []model.Target, strict bool) []model.Tar
 // and race count are applied at launch time, because the request's used set
 // grows while the source route races. Here only cooling (honoring
 // strictAvailability) and the lease promotion are applied.
-func (r *Runner) buildHedgeBatch(logical string, target *policy.CompiledRoute, _ model.ExecuteRequest, runtime *routeRuntime) []model.Target {
-	pool := r.availableFromPool(target.Pool, runtime.strictAvailability)
+func (r *Runner) buildHedgeBatch(logical string, target *policy.CompiledRoute, request model.ExecuteRequest, runtime *routeRuntime) []model.Target {
+	pool := r.availableFromPool(r.compatiblePool(target.Pool, request), runtime.strictAvailability)
 	if len(pool) == 0 {
 		return nil
 	}
@@ -641,6 +656,7 @@ func (r *Runner) record(ctx context.Context, providerID, nativeModel string, cal
 	domain := failureDomain(callErr)
 	if callErr == nil {
 		delete(r.cooling, key)
+		delete(r.retryAfter, key)
 		delete(r.cooling, providerKey)
 		delete(r.halfOpen, key)
 		delete(r.halfOpen, providerKey)
@@ -648,7 +664,7 @@ func (r *Runner) record(ctx context.Context, providerID, nativeModel string, cal
 	} else if policy.AllRetryableClasses()[callErr.Class] {
 		delete(r.halfOpen, key)
 		delete(r.halfOpen, providerKey)
-		cooldown = r.plan.Providers[providerID].Cooldown
+		cooldown = max(r.plan.Providers[providerID].Cooldown, callErr.RetryAfter)
 		// Auth/billing failures (401/402/403) affect the entire provider across models
 		// and back off exponentially (10m -> 20m -> 40m -> ... -> 6h) so dead keys
 		// or empty balances stop poisoning live requests every 10 minutes.
@@ -668,6 +684,9 @@ func (r *Runner) record(ctx context.Context, providerID, nativeModel string, cal
 				cooldown = expCooldown
 			}
 			key = providerKey
+		}
+		if callErr.RetryAfter > 0 {
+			r.retryAfter[key] = r.now().Add(callErr.RetryAfter)
 		}
 		newUntil = r.now().Add(cooldown)
 		r.cooling[key] = newUntil

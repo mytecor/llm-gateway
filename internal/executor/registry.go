@@ -97,13 +97,20 @@ func (r *Registry) binding(target model.Target, req model.ExecuteRequest, stream
 		return Binding{}, &model.CallError{Class: model.ErrorInvalid, Status: 503, Scope: model.FailureScopeTarget, Replay: model.ReplayNotSent}
 	}
 	c := binding.Capabilities
-	if (req.Kind != model.RequestChat && req.Kind != model.RequestResponses) || (req.Kind == model.RequestChat && !c.Chat) || (req.Kind == model.RequestResponses && !c.Responses) || (stream && !c.Streaming) {
+	if (req.Kind != model.RequestChat && req.Kind != model.RequestResponses && req.Kind != model.RequestSystemOne) || (req.Kind == model.RequestChat && !c.Chat) || (req.Kind == model.RequestResponses && !c.Responses) || (stream && !c.Streaming) || (req.Kind == model.RequestSystemOne && (!c.SystemOne || (req.SystemOneFeatures.Images && !c.SystemOneImages) || (req.SystemOneFeatures.Box && !c.SystemOneBox) || (req.SystemOneFeatures.LongContext && !c.SystemOneLongContext))) {
 		return Binding{}, &model.CallError{Class: model.ErrorInvalid, Status: 400, Scope: model.FailureScopeRequest, Replay: model.ReplayNotSent}
 	}
 	return binding, nil
 }
 func (r *Registry) prepare(ctx context.Context, target model.Target, request model.ExecuteRequest) (model.ExecuteRequest, *model.CallError) {
 	request.Body = append([]byte(nil), request.Body...)
+	if request.Headers != nil {
+		headers := make(map[string]string, len(request.Headers))
+		for k, v := range request.Headers {
+			headers[k] = v
+		}
+		request.Headers = headers
+	}
 	for _, m := range r.middleware {
 		if m.Prepare != nil {
 			if err := m.Prepare(ctx, target, &request); err != nil {

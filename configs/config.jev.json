@@ -1,0 +1,28 @@
+{
+  "host": "127.0.0.1",
+  "port": 9208,
+  "metrics_host": "127.0.0.1",
+  "metrics_port": 9209,
+  "client_api_keys": [{"id": "client", "key": "env.LLM_GATEWAY_CLIENT_KEY"}],
+  "providers": [
+    {
+      "id": "jev-gonka",
+      "driver": "jev",
+      "config": {"dialect": "gonka", "inference_url": "https://api.proxy.gonka.gg/v1", "api_key": "env.GONKA_API_KEY"}
+    },
+    {
+      "id": "jev-typesafe",
+      "driver": "jev",
+      "config": {"dialect": "typesafe", "inference_url": "https://api.typesafe.ai/v1", "api_key": "env.TYPESAFE_API_KEY"}
+    }
+  ],
+  "models": {
+    "jev": {
+      "profile": "balanced",
+      "tiers": [{"targets": [
+        {"provider": "jev-gonka", "native": "jev"},
+        {"provider": "jev-typesafe", "native": "jev-latest"}
+      ]}]
+    }
+  }
+}

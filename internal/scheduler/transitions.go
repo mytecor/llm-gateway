@@ -19,7 +19,7 @@ type routeTransition struct {
 }
 
 func terminalOutcome(outcome *routeOutcome) bool {
-	return outcome.err == nil || outcome.err.Class == model.ErrorCancelled || outcome.err.Replay == model.ReplayUnknown || outcome.pinned
+	return outcome.err == nil || outcome.err.Class == model.ErrorCancelled || outcome.err.Replay == model.ReplayUnknown || outcome.err.Scope == model.FailureScopeRequest || outcome.pinned
 }
 
 func (r *Runner) followTransition(ctx context.Context, logical string, source *policy.CompiledRoute, transition routeTransition, request model.ExecuteRequest, streamMode bool, runtime *routeRuntime, outcome *routeOutcome, original *model.CallError) *routeOutcome {

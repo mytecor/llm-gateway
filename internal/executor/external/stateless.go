@@ -292,7 +292,7 @@ func (d *Driver) currentWorker(ctx context.Context) (*statelessWorker, *model.Ca
 }
 
 func (d *Driver) submit(ctx context.Context, target model.Target, request model.ExecuteRequest, stream bool) (*statelessWorker, string, *pendingRequest, *model.CallError) {
-	if request.Kind != model.RequestChat && request.Kind != model.RequestResponses {
+	if request.Kind != model.RequestChat && request.Kind != model.RequestResponses && request.Kind != model.RequestSystemOne {
 		return nil, "", nil, &model.CallError{Class: model.ErrorInvalid, Status: 400, Replay: model.ReplayNotSent}
 	}
 	if request.SingleAttempt && !d.capabilities.SingleAttempt {
@@ -319,7 +319,7 @@ func (d *Driver) submit(ctx context.Context, target model.Target, request model.
 		requestTimeoutMs = request.AttemptTimeout.Milliseconds()
 	}
 	if writeErr := worker.process.write(ctx, wireInbound{
-		Type: "request", ID: id, Provider: target.Provider, Model: target.Model,
+		Type: "request", ID: id, Provider: target.Provider, Model: target.Model, Headers: request.Headers,
 		Kind: string(request.Kind), Stream: stream, Body: json.RawMessage(request.Body),
 		RequestTimeoutMs: requestTimeoutMs, StreamIdleTimeoutMs: request.StreamIdleTimeout.Milliseconds(),
 		SingleAttempt: request.SingleAttempt,

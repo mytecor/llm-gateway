@@ -36,26 +36,31 @@ type FunctionDefinition struct {
 }
 
 type Capabilities struct {
-	Chat       bool `json:"chat,omitempty"`
-	Responses  bool `json:"responses,omitempty"`
-	Streaming  bool `json:"streaming,omitempty"`
-	Tools      bool `json:"tools,omitempty"`
-	Stateful   bool `json:"stateful,omitempty"`
-	Fork       bool `json:"fork,omitempty"`
-	Resume     bool `json:"resume,omitempty"`
-	SafeReplay bool `json:"safe_replay,omitempty"`
+	SystemOne            bool `json:"systemone,omitempty"`
+	SystemOneImages      bool `json:"systemone_images,omitempty"`
+	SystemOneBox         bool `json:"systemone_box,omitempty"`
+	SystemOneLongContext bool `json:"systemone_long_context,omitempty"`
+	Chat                 bool `json:"chat,omitempty"`
+	Responses            bool `json:"responses,omitempty"`
+	Streaming            bool `json:"streaming,omitempty"`
+	Tools                bool `json:"tools,omitempty"`
+	Stateful             bool `json:"stateful,omitempty"`
+	Fork                 bool `json:"fork,omitempty"`
+	Resume               bool `json:"resume,omitempty"`
+	SafeReplay           bool `json:"safe_replay,omitempty"`
 	// SingleAttempt advertises support for disabling internal retries per request.
 	SingleAttempt bool `json:"single_attempt,omitempty"`
 }
 
 type CallError struct {
-	Code   string `json:"code,omitempty"`
-	Class  string `json:"class"`
-	Status int    `json:"status"`
-	Scope  string `json:"scope,omitempty"`
-	Replay string `json:"replay,omitempty"`
-	Detail string `json:"detail,omitempty"`
-	Log    string `json:"log,omitempty"`
+	RetryAfterMs int64  `json:"retry_after_ms,omitempty"`
+	Code         string `json:"code,omitempty"`
+	Class        string `json:"class"`
+	Status       int    `json:"status"`
+	Scope        string `json:"scope,omitempty"`
+	Replay       string `json:"replay,omitempty"`
+	Detail       string `json:"detail,omitempty"`
+	Log          string `json:"log,omitempty"`
 }
 
 type ModelInfo struct {
@@ -65,6 +70,7 @@ type ModelInfo struct {
 }
 
 type Command[C any] struct {
+	Headers             map[string]string `json:"headers,omitempty"`
 	ProtocolVersion     int               `json:"protocol_version,omitempty"`
 	Command             []string          `json:"command,omitempty"`
 	Providers           []json.RawMessage `json:"providers,omitempty"`

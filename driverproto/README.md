@@ -60,3 +60,20 @@ fallback, hedge, continuation and racing multiple targets.
 The fixture files cover the session subset, stateless operations and output
 events. Changes to the wire must update the shared fixtures and keep Go and Rust
 contract tests passing.
+
+## Native decision requests
+
+`kind: "systemone"` uses the same stateless request/response/cancel operations.
+Capabilities `systemone`, `systemone_images`, `systemone_box` and
+`systemone_long_context` explicitly identify compatible providers. Missing flags
+mean unsupported. These optional fields preserve protocol v1 compatibility.
+
+The optional `headers` map is restricted to `TypeSafe-Danger-Zone-Images` and
+`TypeSafe-Danger-Zone-Long-Context`, both with value `true`. Bodies contain the
+canonical native JSON contract; multipart images are carried as base64 assets.
+System One commands allow 64 MiB; all other command limits remain 16 MiB, and
+response events retain the existing 16 MiB limit. `call_error.retry_after_ms`
+transmits an optional non-negative retry deadline interval to the scheduler.
+
+See [System One](./../docs/systemone.md) and the
+[JEV driver](./../drivers/jev/README.md).

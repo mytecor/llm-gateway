@@ -33,12 +33,13 @@ func fromWireCallError(ctx context.Context, w *wireCallError, fallbackErr string
 		cause = errors.New(w.Detail)
 	}
 	return &model.CallError{
-		Code:   w.Code,
-		Class:  model.ErrorClass(w.Class),
-		Status: w.Status,
-		Cause:  cause,
-		Scope:  model.FailureScope(w.Scope),
-		Replay: model.ReplaySafety(w.Replay),
+		RetryAfter: time.Duration(w.RetryAfterMs) * time.Millisecond,
+		Code:       w.Code,
+		Class:      model.ErrorClass(w.Class),
+		Status:     w.Status,
+		Cause:      cause,
+		Scope:      model.FailureScope(w.Scope),
+		Replay:     model.ReplaySafety(w.Replay),
 	}
 }
 

@@ -44,6 +44,8 @@ func NewServer(config *config.CompiledConfig, catalog *subsystem.Catalog, runner
 	server.mux.HandleFunc("GET /v1/models", server.auth(server.models))
 	server.mux.HandleFunc("POST /v1/chat/completions", server.auth(server.chat))
 	server.mux.HandleFunc("POST /v1/responses", server.auth(server.responses))
+	server.mux.HandleFunc("POST /v1/systemone", server.auth(server.systemOne))
+	server.mux.HandleFunc("POST /v1/decisions", server.auth(server.systemOne))
 	server.mux.HandleFunc("POST /admin/models/refresh", server.auth(server.refresh))
 	return server
 }

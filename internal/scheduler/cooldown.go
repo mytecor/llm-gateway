@@ -128,6 +128,12 @@ func (r *Runner) acquireHalfOpenProbe(ctx context.Context, providerID, nativeMod
 	r.mu.Lock()
 	now := r.now()
 	r.promoteExpiredCoolingLocked(now)
+	for key, until := range r.retryAfter {
+		if matchesCooldownKey(key, providerID, nativeModel) && now.Before(until) {
+			r.mu.Unlock()
+			return probeLease{}, false
+		}
+	}
 
 	var matchedKeys []cooldownKey
 	domain := "inference"
@@ -213,4 +219,30 @@ func (r *Runner) hasHealthyOrHalfOpenIdlePool(pool []model.Target) bool {
 // isRetryableProviderError mirrors policy.AllRetryableClasses for cooldown bookkeeping.
 func isRetryableProviderError(callErr *model.CallError) bool {
 	return callErr != nil && policy.AllRetryableClasses()[callErr.Class]
+}
+
+// Retry-After is a provider instruction and cannot be bypassed by cooldown fail-open.
+func (r *Runner) respectRetryAfter(pool []model.Target) ([]model.Target, *model.CallError) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	result := make([]model.Target, 0, len(pool))
+	var earliest time.Time
+	for _, target := range pool {
+		var blockedUntil time.Time
+		for key, until := range r.retryAfter {
+			if matchesCooldownKey(key, target.Provider, target.Model) && now.Before(until) && until.After(blockedUntil) {
+				blockedUntil = until
+			}
+		}
+		if blockedUntil.IsZero() {
+			result = append(result, target)
+		} else if earliest.IsZero() || blockedUntil.Before(earliest) {
+			earliest = blockedUntil
+		}
+	}
+	if len(pool) > 0 && len(result) == 0 {
+		return nil, &model.CallError{Class: model.ErrorRateLimit, Status: 429, Code: "jev_rate_limited", Scope: model.FailureScopeProvider, Replay: model.ReplayNotSent, RetryAfter: earliest.Sub(now)}
+	}
+	return result, nil
 }

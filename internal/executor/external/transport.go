@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mytecor/llm-gateway/driverproto"
+	"github.com/mytecor/llm-gateway/driverproto/systemone"
 )
 
 type wireCapabilities = driverproto.Capabilities
@@ -110,6 +111,13 @@ func (p *processTransport) write(ctx context.Context, value any) error {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return err
+	}
+	limit := 16 << 20
+	if cmd, ok := value.(wireInbound); ok && cmd.Kind == "systemone" {
+		limit = systemone.MaxCommandBytes
+	}
+	if len(data)+1 > limit {
+		return errors.New("external driver command exceeds limit")
 	}
 	select {
 	case <-ctx.Done():

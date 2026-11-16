@@ -1,4 +1,4 @@
-.PHONY: all build build-core build-all build-drivers build-http build-acp build-web test test-unit test-core test-http test-acp test-web-unit test-race lint run clean check-config test-web
+.PHONY: build-jev test-jev all build build-core build-all build-drivers build-http build-acp build-web test test-unit test-core test-http test-acp test-web-unit test-race lint run clean check-config test-web
 
 APP_NAME := llm-gateway
 CMD_DIR := ./cmd/llm-gateway
@@ -8,7 +8,7 @@ HTTP_DRIVER := $(BIN_DIR)/http-driver
 ACP_DRIVER := $(BIN_DIR)/acp-driver
 WEB_DRIVER := $(BIN_DIR)/web-driver
 CONFIG ?= configs/config.example.json
-DRIVERS ?= http acp web
+DRIVERS ?= http acp web jev
 
 all: build
 
@@ -32,6 +32,9 @@ build-http: | $(BIN_DIR)
 build-acp: | $(BIN_DIR)
 	cd drivers/acp && go build -v -o ../../$(ACP_DRIVER) .
 
+build-jev: | $(BIN_DIR)
+	cd drivers/jev && go build -v -o ../../$(BIN_DIR)/jev-driver .
+
 build-web: | $(BIN_DIR)
 	cargo build --release --locked --manifest-path drivers/web/Cargo.toml
 	cp drivers/web/target/release/web-driver $(WEB_DRIVER)
@@ -44,7 +47,7 @@ check-config: build
 
 # These unit packages never discover or start a bundled driver.
 test-unit:
-	go test ./driverproto ./internal/model ./internal/policy ./internal/session ./internal/structured ./internal/transform ./internal/telemetry
+	go test ./driverproto/... ./internal/model ./internal/policy ./internal/session ./internal/structured ./internal/transform ./internal/telemetry
 
 # The core integration suite validates all bundled driver contracts.
 test-core: build-drivers
@@ -59,24 +62,30 @@ test-acp:
 test-web-unit:
 	cargo test --locked --manifest-path drivers/web/Cargo.toml
 
-test: test-core test-http test-acp test-web-unit
+test-jev:
+	cd drivers/jev && go test -v ./...
+
+test: test-core test-http test-acp test-web-unit test-jev
 
 test-race: build-drivers
 	go test -race -v ./...
 	cd drivers/http && go test -race -v ./...
 	cd drivers/acp && go test -race -v ./...
+	cd drivers/jev && go test -race -v ./...
 	cargo test --locked --manifest-path drivers/web/Cargo.toml
 
 lint:
 	@if command -v golangci-lint >/dev/null 2>&1; then \
 		golangci-lint run ./... && \
 		(cd drivers/http && golangci-lint run ./...) && \
-		(cd drivers/acp && golangci-lint run ./...); \
+		(cd drivers/acp && golangci-lint run ./...) && \
+		(cd drivers/jev && golangci-lint run ./...); \
 	else \
 		echo "golangci-lint is not installed, running go vet instead"; \
 		go vet ./... && \
 		(cd drivers/http && go vet ./...) && \
-		(cd drivers/acp && go vet ./...); \
+		(cd drivers/acp && go vet ./...) && \
+		(cd drivers/jev && go vet ./...); \
 	fi
 
 clean:

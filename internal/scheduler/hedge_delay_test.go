@@ -34,6 +34,10 @@ func TestDeclarativeHedgeDelayFiresBeforeWarmup(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// This test measures hedge delay, so exploration must not select the fast
+	// secondary as the primary before the hedge timer can run.
+	compiled.Models["standard"].Balance.ExplorationRate = 0
+
 	var callsA, callsB atomic.Int32
 	executor := &fakeExecutor{do: func(ctx context.Context, target model.Target, req model.ExecuteRequest) ([]byte, *model.CallError) {
 		if target.Provider == "a" {

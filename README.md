@@ -20,12 +20,13 @@ The gateway encapsulates upstream LLM providers: clients interact with virtual l
 
 ---
 
-## Modular External Drivers (`http`, `acp`, `web`, `custom`)
+## Modular External Drivers (`http`, `acp`, `web`, `jev`, `custom`)
 
 All provider integrations are isolated from the core gateway into standalone driver binaries under `drivers/` communicating over a unified NDJSON stdio protocol:
 - **`"driver": "http"` (default):** Stateless multiplexed HTTP/API driver ([`drivers/http/README.md`](drivers/http/README.md), binary `http-driver`) powered by Bifrost Core.
 - **`"driver": "acp"`:** Stateful ACP agent session driver ([`drivers/acp/README.md`](drivers/acp/README.md), binary `acp-driver`) powered by `agentrun` with session-scoped MCP tool bridging.
 - **`"driver": "web"`:** Stateful CDP browser automation driver ([`drivers/web/README.md`](drivers/web/README.md), binary `web-driver`) written in Rust with YAML site profiles (`profile`, `cdp_url`, `account`).
+- **`"driver": "jev"`:** Stateless native System One decisions through Gonka and TypeSafe, including images, Box and long context ([JEV driver](./drivers/jev/README.md), [API contract](./docs/systemone.md)).
 - **`"driver": "custom"`:** Custom external subprocess speaking the gateway NDJSON protocol directly (`command`, `tool_strategy`: `"auto"`, `"mcp"`, `"prompt"`, `"wire"`, `"both"`).
 
 Stateful session routes (`acp`, `web`, `custom`) support the text Chat Completions API and require a single target, `race count: 1`, and disabled retry/fallback/hedge/continue/repetition.
@@ -41,6 +42,7 @@ Stateful session routes (`acp`, `web`, `custom`) support the text Chat Completio
 | Method | Path | Description | Authorization |
 | --- | --- | --- | --- |
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions (streaming / non-streaming) | Bearer Token |
+| `POST` | `/v1/systemone`, `/v1/decisions` | Native typed JEV decisions (non-streaming) | Bearer Token |
 | `POST` | `/v1/responses` | OpenAI Responses API (streaming / non-streaming) | Bearer Token |
 | `GET` | `/v1/models` | List available logical models | Bearer Token |
 | `GET` | `/healthz` | Health check (`{"status":"ok"}`) | None |
@@ -81,7 +83,7 @@ source snapshot, so a sibling checkout is unnecessary. `make test-unit` checks
 the core unit packages without drivers; `make test` also builds drivers and runs
 the core integration and standalone driver suites.
 
-The default Docker image includes the HTTP and ACP drivers; `docker build
+The default Docker image includes the HTTP, ACP and JEV drivers; `docker build
 --target core .` produces a core-only image. `package.nix` packages the core only;
 install drivers alongside it or set `LLM_GATEWAY_DRIVERS_DIR`.
 

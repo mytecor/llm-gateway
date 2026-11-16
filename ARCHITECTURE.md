@@ -13,7 +13,7 @@ flowchart TD
     Client["Client Applications<br/>(OpenAI SDK, Pi, cURL)"]
     
     subgraph Gateway["LLM Gateway Runtime"]
-        Server["HTTP Server & Transport<br/>/v1/chat/completions, /v1/responses, /v1/models"]
+        Server["HTTP Server & Transport<br/>Chat, Responses, System One, Models"]
         Auth["Auth & Context<br/>Bearer Tokens, Request ID, Client Key"]
         
         Structured["Structured Output Controller<br/>(Validation, Buffering, Correction)"]
@@ -40,7 +40,10 @@ flowchart TD
         Telemetry["Telemetry & Observability<br/>(Prometheus on Loopback :9209, slog JSON)"]
     end
 
-    Driver["External Driver Binary<br/>(NDJSON over stdio)"]
+    Driver["External Driver Binary<br/>(HTTP, ACP, Web or JEV)"]
+    JevDriver["jev-driver<br/>(Native decisions and dialect adaptation)"]
+    GonkaJev["Gonka Proxy<br/>(Text decisions)"]
+    TypeSafe["TypeSafe API<br/>(Text, images, Box, long context)"]
 
     Client --> Server
     Server --> Auth
@@ -57,6 +60,9 @@ flowchart TD
     SessionExec --> ExternalDriver
     ExternalDriver <--> MCPSystem
     ExternalDriver -->|NDJSON, negotiated single attempt| Driver
+    ExternalDriver --> JevDriver
+    JevDriver --> GonkaJev
+    JevDriver --> TypeSafe
     
     Server -.-> Telemetry
     Scheduler -.-> Telemetry
@@ -88,6 +94,7 @@ llm-gateway/
 ├── docs/                       # Subsystem-specific deep-dives (e.g. session-executors.md)
 ├── drivers/                    # Isolated external provider driver binaries (NDJSON over stdio)
 │   ├── http/                   # Standalone Go module (http-driver: Bifrost HTTP upstream adapter)
+│   ├── jev/                    # Standalone Go module (jev-driver: native System One decisions)
 │   ├── acp/                    # Standalone Go module (acp-driver: agentrun ACP adapter)
 │   └── web/                    # Standalone Rust crate (web-driver: CDP browser automation)
 ├── internal/
@@ -267,6 +274,7 @@ Driver-specific architecture and request flows live alongside each driver:
 
 | Driver | Architecture and sequence diagrams |
 | --- | --- |
+| JEV | [Native decisions, capability filtering and dialect adaptation](./drivers/jev/README.md) |
 | HTTP | [Multiplexed HTTP requests and upstream streaming](drivers/http/README.md#architecture-and-request-flow) |
 | ACP | [ACP sessions and client tool calls through MCP](drivers/acp/README.md#architecture-and-tool-turns) |
 | Web | [CDP browser sessions and prompt-based client tool calls](drivers/web/README.md#architecture-and-tool-turns) |
@@ -426,3 +434,12 @@ All log events are emitted to `stdout` in structured JSON:
 - Every request is assigned a unique `request_id` propagated across all goroutines and upstream attempts.
 - **Data Protection**: Prompts, system messages, tool inputs/outputs, and authentication credentials are strictly excluded from logs.
 - Errors are sanitized through `telemetry.SafeLogDetail` to prevent unbounded log expansion and secret leakage.
+
+## Native System One decisions
+
+The [System One endpoints](./docs/systemone.md) use the existing scheduler with
+request-kind and feature filtering before health/balance selection in every route
+and recovery branch. Compatibility is never restored by cooling fail-open.
+[JEV drivers](./drivers/jev/README.md) execute one upstream decision per dispatch.
+The scheduler validates answer contracts before selecting a winner. Unlike Chat
+Completions, native responses retain the upstream's resolved model version.

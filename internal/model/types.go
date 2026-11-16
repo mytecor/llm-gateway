@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"errors"
+	"github.com/mytecor/llm-gateway/driverproto/systemone"
 	"time"
 )
 
@@ -54,7 +55,7 @@ func (e *CallError) HTTPStatus() int {
 	status := 502 // http.StatusBadGateway
 	if e != nil {
 		switch e.Status {
-		case 400, 401, 403, 404, 408, 409, 429, 499, 503, 504:
+		case 400, 401, 403, 404, 408, 409, 413, 415, 422, 429, 499, 503, 504:
 			status = e.Status
 		}
 	}
@@ -77,6 +78,7 @@ type Target struct {
 type RequestKind string
 
 const (
+	RequestSystemOne RequestKind = "systemone"
 	RequestChat      RequestKind = "chat"
 	RequestResponses RequestKind = "responses"
 )
@@ -100,6 +102,8 @@ const (
 )
 
 type ExecuteRequest struct {
+	Headers           map[string]string
+	SystemOneFeatures SystemOneFeatures
 	Call              Call
 	Attempt           Attempt
 	Kind              RequestKind
@@ -152,3 +156,6 @@ type RunOutcome struct {
 	Usage    UsageSummary
 	HasUsage bool
 }
+
+// SystemOneFeatures captures requirements once at the request boundary.
+type SystemOneFeatures = systemone.Features
