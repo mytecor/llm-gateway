@@ -78,6 +78,24 @@ func TestGenAISDKProtobufFieldNames(t *testing.T) {
 	}
 }
 
+func TestProtoJSONMediaBase64VariantsNormalizeToIdenticalBytes(t *testing.T) {
+	for _, encoded := range []string{"+/8=", "+/8", "-_8=", "-_8"} {
+		body := []byte(`{"requests":[{"model":"models/embedding","content":{"parts":[{"inline_data":{"mime_type":"image/png","data":"` + encoded + `"}}]}}]}`)
+		r, err := ParseGoogle(body, "embedding", true)
+		if err != nil {
+			t.Fatalf("%s: %v", encoded, err)
+		}
+		blob := r.Items[0].Parts[0].InlineData
+		if blob.Data != "+/8=" {
+			t.Fatalf("%s not normalized: %s", encoded, blob.Data)
+		}
+		decoded, err := base64.StdEncoding.Strict().DecodeString(blob.Data)
+		if err != nil || !reflect.DeepEqual(decoded, []byte{251, 255}) {
+			t.Fatal("media bytes changed")
+		}
+	}
+}
+
 func TestResponseContractAndBase64(t *testing.T) {
 	r, _, _ := ParseOpenAI([]byte(`{"model":"embedding","input":"hello","dimensions":128}`))
 	values := make([]float32, 128)

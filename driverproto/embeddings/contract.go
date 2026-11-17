@@ -70,7 +70,21 @@ func (b *Blob) UnmarshalJSON(data []byte) error {
 	if wire.MIME == "" {
 		wire.MIME = wire.SnakeMIME
 	}
-	*b = Blob{MIMEType: wire.MIME, Data: wire.Data}
+	// ProtoJSON bytes allow both alphabets, with or without padding. The
+	// canonical contract always uses padded standard base64, so runtimes need
+	// only one representation and strict decoders agree on the actual bytes.
+	encoding := base64.StdEncoding
+	if strings.ContainsAny(wire.Data, "-_") {
+		encoding = base64.URLEncoding
+	}
+	if !strings.Contains(wire.Data, "=") {
+		encoding = encoding.WithPadding(base64.NoPadding)
+	}
+	decoded, err := encoding.Strict().DecodeString(wire.Data)
+	if err != nil {
+		return errors.New("invalid media base64")
+	}
+	*b = Blob{MIMEType: wire.MIME, Data: base64.StdEncoding.EncodeToString(decoded)}
 	return nil
 }
 

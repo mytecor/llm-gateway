@@ -47,6 +47,9 @@ standard. Streaming and chat-generation parameters are rejected.
 Protobuf field-name aliases `inline_data`/`inlineData` and `mime_type`/`mimeType`
 are accepted and normalized; conflicting aliases and unknown fields are rejected.
 This includes the nested Content serialization used by Google GenAI SDKs.
+Media bytes accept standard and URL-safe base64, with or without padding, as
+specified by [ProtoJSON](https://protobuf.dev/programming-guides/json/). They
+normalize to padded standard base64 before crossing the driver/runtime boundary.
 
 The body accepts `content.parts`, optional `model: models/{logical_model}`,
 `taskType`, `title`, and `outputDimensionality`. Batch bodies use `requests`, an
