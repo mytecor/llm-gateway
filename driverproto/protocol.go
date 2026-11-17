@@ -36,6 +36,10 @@ type FunctionDefinition struct {
 }
 
 type Capabilities struct {
+	Embeddings           bool `json:"embeddings,omitempty"`
+	EmbeddingImages      bool `json:"embedding_images,omitempty"`
+	EmbeddingAudio       bool `json:"embedding_audio,omitempty"`
+	EmbeddingVideo       bool `json:"embedding_video,omitempty"`
 	SystemOne            bool `json:"systemone,omitempty"`
 	SystemOneImages      bool `json:"systemone_images,omitempty"`
 	SystemOneBox         bool `json:"systemone_box,omitempty"`
@@ -64,9 +68,11 @@ type CallError struct {
 }
 
 type ModelInfo struct {
-	ID               string   `json:"id"`
-	Name             string   `json:"name,omitempty"`
-	ReasoningEfforts []string `json:"reasoning_efforts,omitempty"`
+	InputModalities     []string `json:"input_modalities,omitempty"`
+	EmbeddingDimensions []int    `json:"embedding_dimensions,omitempty"`
+	ID                  string   `json:"id"`
+	Name                string   `json:"name,omitempty"`
+	ReasoningEfforts    []string `json:"reasoning_efforts,omitempty"`
 }
 
 type Command[C any] struct {

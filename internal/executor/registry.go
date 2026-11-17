@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/mytecor/llm-gateway/driverproto/embeddings"
 	"github.com/mytecor/llm-gateway/internal/config"
 	"github.com/mytecor/llm-gateway/internal/executor/external"
 	sessionexecutor "github.com/mytecor/llm-gateway/internal/executor/session"
@@ -97,7 +98,7 @@ func (r *Registry) binding(target model.Target, req model.ExecuteRequest, stream
 		return Binding{}, &model.CallError{Class: model.ErrorInvalid, Status: 503, Scope: model.FailureScopeTarget, Replay: model.ReplayNotSent}
 	}
 	c := binding.Capabilities
-	if (req.Kind != model.RequestChat && req.Kind != model.RequestResponses && req.Kind != model.RequestSystemOne) || (req.Kind == model.RequestChat && !c.Chat) || (req.Kind == model.RequestResponses && !c.Responses) || (stream && !c.Streaming) || (req.Kind == model.RequestSystemOne && (!c.SystemOne || (req.SystemOneFeatures.Images && !c.SystemOneImages) || (req.SystemOneFeatures.Box && !c.SystemOneBox) || (req.SystemOneFeatures.LongContext && !c.SystemOneLongContext))) {
+	if (req.Kind == model.RequestEmbeddings && (!c.Embeddings || c.Stateful || stream || !embeddings.Compatible(req.EmbeddingFeatures, c.EmbeddingImages, c.EmbeddingAudio, c.EmbeddingVideo))) || (req.Kind != model.RequestChat && req.Kind != model.RequestResponses && req.Kind != model.RequestSystemOne && req.Kind != model.RequestEmbeddings) || (req.Kind == model.RequestChat && !c.Chat) || (req.Kind == model.RequestResponses && !c.Responses) || (stream && !c.Streaming) || (req.Kind == model.RequestSystemOne && (!c.SystemOne || (req.SystemOneFeatures.Images && !c.SystemOneImages) || (req.SystemOneFeatures.Box && !c.SystemOneBox) || (req.SystemOneFeatures.LongContext && !c.SystemOneLongContext))) {
 		return Binding{}, &model.CallError{Class: model.ErrorInvalid, Status: 400, Scope: model.FailureScopeRequest, Replay: model.ReplayNotSent}
 	}
 	return binding, nil

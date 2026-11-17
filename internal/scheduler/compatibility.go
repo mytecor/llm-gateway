@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"github.com/mytecor/llm-gateway/driverproto/embeddings"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
 )
@@ -21,6 +22,8 @@ func (r *Runner) compatiblePool(pool []model.Target, request model.ExecuteReques
 		}
 		compatible := false
 		switch request.Kind {
+		case model.RequestEmbeddings:
+			compatible = caps.Embeddings && !caps.Stateful && embeddings.Compatible(request.EmbeddingFeatures, caps.EmbeddingImages, caps.EmbeddingAudio, caps.EmbeddingVideo)
 		case model.RequestSystemOne:
 			f := request.SystemOneFeatures
 			compatible = caps.SystemOne && !caps.Stateful && (!f.Images || caps.SystemOneImages) && (!f.Box || caps.SystemOneBox) && (!f.LongContext || caps.SystemOneLongContext)

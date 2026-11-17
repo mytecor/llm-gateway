@@ -42,6 +42,8 @@ func NewServer(config *config.CompiledConfig, catalog *subsystem.Catalog, runner
 	}
 	server.mux.HandleFunc("GET /healthz", server.health)
 	server.mux.HandleFunc("GET /v1/models", server.auth(server.models))
+	server.mux.HandleFunc("POST /v1/embeddings", server.auth(server.embeddings))
+	server.mux.HandleFunc("POST /v1beta/models/{action}", server.googleEmbeddingAuth(server.googleEmbeddings))
 	server.mux.HandleFunc("POST /v1/chat/completions", server.auth(server.chat))
 	server.mux.HandleFunc("POST /v1/responses", server.auth(server.responses))
 	server.mux.HandleFunc("POST /v1/systemone", server.auth(server.systemOne))
@@ -77,23 +79,33 @@ func (m *metricsOnly) serve(writer http.ResponseWriter, _ *http.Request) {
 	}
 }
 
+func (s *Server) authenticated(request *http.Request) (*http.Request, bool) {
+	if len(s.config.ClientKeys) == 0 {
+		return request, true
+	}
+	if len(request.Header.Values("Authorization")) != 1 {
+		return request, false
+	}
+	value := request.Header.Get("Authorization")
+	if !strings.HasPrefix(value, "Bearer ") {
+		return request, false
+	}
+	provided := strings.TrimPrefix(value, "Bearer ")
+	for id, expected := range s.config.ClientKeys {
+		if len(provided) == len(expected) && subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1 {
+			return request.WithContext(telemetry.WithClientKey(request.Context(), id)), true
+		}
+	}
+	return request, false
+}
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
-	return func(writer http.ResponseWriter, request *http.Request) {
-		if len(s.config.ClientKeys) == 0 {
-			next(writer, request)
+	return func(w http.ResponseWriter, r *http.Request) {
+		authenticated, ok := s.authenticated(r)
+		if !ok {
+			writeAPIError(w, http.StatusUnauthorized, "invalid_api_key")
 			return
 		}
-		provided := strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
-		for id, expected := range s.config.ClientKeys {
-			if len(provided) == len(expected) && subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1 {
-				// Pin the non-secret client key ID into the request context so
-				// the request- and usage-level metrics attribute this request to
-				// the key it was authenticated with.
-				next(writer, request.WithContext(telemetry.WithClientKey(request.Context(), id)))
-				return
-			}
-		}
-		writeAPIError(writer, http.StatusUnauthorized, "invalid_api_key")
+		next(w, authenticated)
 	}
 }
 
@@ -140,6 +152,11 @@ func (s *Server) models(writer http.ResponseWriter, request *http.Request) {
 	for _, id := range s.config.LogicalIDs {
 		entry := map[string]any{"id": id, "object": "model", "created": created, "owned_by": "lattice"}
 		if details, err := s.runner.ModelDetails(request.Context(), id); err == nil {
+			if len(details.EmbeddingDimensions) > 0 {
+				entry["capabilities"] = []string{"embeddings"}
+				entry["input_modalities"] = details.InputModalities
+				entry["embedding_dimensions"] = details.EmbeddingDimensions
+			}
 			if len(details.ReasoningEfforts) > 0 {
 				entry["reasoning_efforts"] = details.ReasoningEfforts
 				levels := map[string]string{}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mytecor/llm-gateway/driverproto"
+	"github.com/mytecor/llm-gateway/driverproto/embeddings"
 	"github.com/mytecor/llm-gateway/driverproto/systemone"
 )
 
@@ -115,6 +116,9 @@ func (p *processTransport) write(ctx context.Context, value any) error {
 	limit := 16 << 20
 	if cmd, ok := value.(wireInbound); ok && cmd.Kind == "systemone" {
 		limit = systemone.MaxCommandBytes
+	}
+	if cmd, ok := value.(wireInbound); ok && cmd.Kind == "embeddings" {
+		limit = embeddings.MaxCommandBytes
 	}
 	if len(data)+1 > limit {
 		return errors.New("external driver command exceeds limit")

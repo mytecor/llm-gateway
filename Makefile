@@ -1,4 +1,4 @@
-.PHONY: build-jev test-jev all build build-core build-all build-drivers build-http build-acp build-web test test-unit test-core test-http test-acp test-web-unit test-race lint run clean check-config test-web
+.PHONY: build-embeddings test-embeddings build-jev test-jev all build build-core build-all build-drivers build-http build-acp build-web test test-unit test-core test-http test-acp test-web-unit test-race lint run clean check-config test-web
 
 APP_NAME := llm-gateway
 CMD_DIR := ./cmd/llm-gateway
@@ -8,7 +8,7 @@ HTTP_DRIVER := $(BIN_DIR)/http-driver
 ACP_DRIVER := $(BIN_DIR)/acp-driver
 WEB_DRIVER := $(BIN_DIR)/web-driver
 CONFIG ?= configs/config.example.json
-DRIVERS ?= http acp web jev
+DRIVERS ?= http acp web jev embeddings
 
 all: build
 
@@ -31,6 +31,9 @@ build-http: | $(BIN_DIR)
 
 build-acp: | $(BIN_DIR)
 	cd drivers/acp && go build -v -o ../../$(ACP_DRIVER) .
+
+build-embeddings: | $(BIN_DIR)
+	cd drivers/embeddings && go build -v -o ../../$(BIN_DIR)/embeddings-driver .
 
 build-jev: | $(BIN_DIR)
 	cd drivers/jev && go build -v -o ../../$(BIN_DIR)/jev-driver .
@@ -62,12 +65,16 @@ test-acp:
 test-web-unit:
 	cargo test --locked --manifest-path drivers/web/Cargo.toml
 
+test-embeddings:
+	cd drivers/embeddings && go test -v ./...
+
 test-jev:
 	cd drivers/jev && go test -v ./...
 
-test: test-core test-http test-acp test-web-unit test-jev
+test: test-core test-http test-acp test-web-unit test-jev test-embeddings
 
 test-race: build-drivers
+	cd drivers/embeddings && go test -race ./...
 	go test -race -v ./...
 	cd drivers/http && go test -race -v ./...
 	cd drivers/acp && go test -race -v ./...
@@ -79,13 +86,15 @@ lint:
 		golangci-lint run ./... && \
 		(cd drivers/http && golangci-lint run ./...) && \
 		(cd drivers/acp && golangci-lint run ./...) && \
-		(cd drivers/jev && golangci-lint run ./...); \
+		(cd drivers/jev && golangci-lint run ./...) && \
+		(cd drivers/embeddings && golangci-lint run ./...); \
 	else \
 		echo "golangci-lint is not installed, running go vet instead"; \
 		go vet ./... && \
 		(cd drivers/http && go vet ./...) && \
 		(cd drivers/acp && go vet ./...) && \
-		(cd drivers/jev && go vet ./...); \
+		(cd drivers/jev && go vet ./...) && \
+		(cd drivers/embeddings && go vet ./...); \
 	fi
 
 clean:

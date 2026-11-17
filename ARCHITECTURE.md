@@ -13,7 +13,7 @@ flowchart TD
     Client["Client Applications<br/>(OpenAI SDK, Pi, cURL)"]
     
     subgraph Gateway["LLM Gateway Runtime"]
-        Server["HTTP Server & Transport<br/>Chat, Responses, System One, Models"]
+        Server["HTTP Server & Transport<br/>Chat, Responses, System One, Embeddings, Models"]
         Auth["Auth & Context<br/>Bearer Tokens, Request ID, Client Key"]
         
         Structured["Structured Output Controller<br/>(Validation, Buffering, Correction)"]
@@ -41,6 +41,8 @@ flowchart TD
     end
 
     Driver["External Driver Binary<br/>(HTTP, ACP, Web or JEV)"]
+    EmbeddingsDriver["embeddings-driver<br/>(Typed multimodal HTTP adapter)"]
+    EmbeddingRuntime["embedding-runtime<br/>(Lazy disposable CPU inference worker)"]
     JevDriver["jev-driver<br/>(Native decisions and dialect adaptation)"]
     GonkaJev["Gonka Proxy<br/>(Text decisions)"]
     TypeSafe["TypeSafe API<br/>(Text, images, Box, long context)"]
@@ -60,6 +62,8 @@ flowchart TD
     SessionExec --> ExternalDriver
     ExternalDriver <--> MCPSystem
     ExternalDriver -->|NDJSON, negotiated single attempt| Driver
+    ExternalDriver -->|NDJSON embeddings| EmbeddingsDriver
+    EmbeddingsDriver -->|Canonical HTTP embeddings| EmbeddingRuntime
     ExternalDriver --> JevDriver
     JevDriver --> GonkaJev
     JevDriver --> TypeSafe
@@ -443,3 +447,12 @@ and recovery branch. Compatibility is never restored by cooling fail-open.
 [JEV drivers](./drivers/jev/README.md) execute one upstream decision per dispatch.
 The scheduler validates answer contracts before selecting a winner. Unlike Chat
 Completions, native responses retain the upstream's resolved model version.
+
+## Embeddings
+
+OpenAI and Google HTTP dialects normalize into one typed, non-streaming operation.
+The scheduler filters providers by embedding modality capabilities before health
+and recovery routing. The independent driver forwards the canonical contract to
+a loopback runtime; worker loading, expansion and idle unloading belong to that
+service. See the [embedding API](./docs/embeddings.md) and
+[driver contract](./drivers/embeddings/README.md).

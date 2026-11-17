@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"errors"
+	"github.com/mytecor/llm-gateway/driverproto/embeddings"
 	"github.com/mytecor/llm-gateway/driverproto/systemone"
 	"time"
 )
@@ -78,9 +79,10 @@ type Target struct {
 type RequestKind string
 
 const (
-	RequestSystemOne RequestKind = "systemone"
-	RequestChat      RequestKind = "chat"
-	RequestResponses RequestKind = "responses"
+	RequestEmbeddings RequestKind = "embeddings"
+	RequestSystemOne  RequestKind = "systemone"
+	RequestChat       RequestKind = "chat"
+	RequestResponses  RequestKind = "responses"
 )
 
 // Call identifies a client invocation independently of an upstream attempt.
@@ -103,6 +105,7 @@ const (
 
 type ExecuteRequest struct {
 	Headers           map[string]string
+	EmbeddingFeatures embeddings.Features
 	SystemOneFeatures SystemOneFeatures
 	Call              Call
 	Attempt           Attempt

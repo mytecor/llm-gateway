@@ -292,7 +292,7 @@ func (d *Driver) currentWorker(ctx context.Context) (*statelessWorker, *model.Ca
 }
 
 func (d *Driver) submit(ctx context.Context, target model.Target, request model.ExecuteRequest, stream bool) (*statelessWorker, string, *pendingRequest, *model.CallError) {
-	if request.Kind != model.RequestChat && request.Kind != model.RequestResponses && request.Kind != model.RequestSystemOne {
+	if request.Kind != model.RequestChat && request.Kind != model.RequestResponses && request.Kind != model.RequestSystemOne && request.Kind != model.RequestEmbeddings {
 		return nil, "", nil, &model.CallError{Class: model.ErrorInvalid, Status: 400, Replay: model.ReplayNotSent}
 	}
 	if request.SingleAttempt && !d.capabilities.SingleAttempt {

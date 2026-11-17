@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"github.com/mytecor/llm-gateway/driverproto/embeddings"
 	"github.com/mytecor/llm-gateway/driverproto/systemone"
 	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
@@ -675,6 +676,14 @@ func (sc *schedule) runBranch(ctx context.Context, id int, cancel context.Cancel
 			callCtx, attemptCancel = context.WithTimeout(ctx, attemptTimeout)
 		}
 		body, callErr := executor.Do(callCtx, target, request)
+		if callErr == nil && request.Kind == model.RequestEmbeddings {
+			var contract embeddings.Request
+			if embeddings.Decode(request.Body, &contract) != nil {
+				callErr = &model.CallError{Class: model.ErrorInvalid, Status: 400, Code: "invalid_embedding_request", Scope: model.FailureScopeRequest, Replay: model.ReplayNotSent}
+			} else if _, err := contract.ValidateResponse(body); err != nil {
+				callErr = &model.CallError{Class: model.ErrorInvalid, Status: 502, Code: "invalid_embedding_response", Scope: model.FailureScopeTarget, Replay: model.ReplayCompleted}
+			}
+		}
 		if callErr == nil && request.Kind == model.RequestSystemOne {
 			var contract systemone.Request
 			if systemone.Decode(request.Body, &contract) != nil {

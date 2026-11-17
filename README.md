@@ -8,6 +8,7 @@ The gateway encapsulates upstream LLM providers: clients interact with virtual l
 
 ## Features
 
+- **Embeddings:** Text, native token IDs and ordered multimodal parts through OpenAI and Google APIs; independent embeddings driver. See [embeddings](./docs/embeddings.md).
 - **OpenAI Compatibility:** Full support for `/v1/chat/completions` and `/v1/responses` in both standard and streaming (SSE) modes.
 - **Response Transformations:** Opt-in `transform` rules separate inline thinking from final content for selected logical models; [configuration and streaming behavior](./docs/response-transforms.md).
 - **Strict Structured Outputs:** JSON Schema validation with up to two corrective generations across HTTP, ACP, and Web; [request contract and examples](./docs/structured-outputs.md).
@@ -43,6 +44,8 @@ Stateful session routes (`acp`, `web`, `custom`) support the text Chat Completio
 | --- | --- | --- | --- |
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions (streaming / non-streaming) | Bearer Token |
 | `POST` | `/v1/systemone`, `/v1/decisions` | Native typed JEV decisions (non-streaming) | Bearer Token |
+| `POST` | `/v1/embeddings` | Text and multimodal embeddings ([contract](./docs/embeddings.md)) | Bearer Token |
+| `POST` | `/v1beta/models/{model}:embedContent`, `:batchEmbedContents` | Google embedding dialect | Bearer / x-goog-api-key |
 | `POST` | `/v1/responses` | OpenAI Responses API (streaming / non-streaming) | Bearer Token |
 | `GET` | `/v1/models` | List available logical models | Bearer Token |
 | `GET` | `/healthz` | Health check (`{"status":"ok"}`) | None |

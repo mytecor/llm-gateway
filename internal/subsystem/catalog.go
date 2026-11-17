@@ -87,6 +87,8 @@ func (c *Catalog) Validate(providerID, native string) *model.CallError {
 func cloneModels(models []model.ModelInfo) []model.ModelInfo {
 	result := append([]model.ModelInfo(nil), models...)
 	for i := range result {
+		result[i].InputModalities = append([]string(nil), result[i].InputModalities...)
+		result[i].EmbeddingDimensions = append([]int(nil), result[i].EmbeddingDimensions...)
 		result[i].ReasoningEfforts = append([]string(nil), result[i].ReasoningEfforts...)
 	}
 	return result
