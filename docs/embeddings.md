@@ -44,6 +44,10 @@ standard. Streaming and chat-generation parameters are rejected.
 * `POST /v1beta/models/{logical_model}:embedContent`
 * `POST /v1beta/models/{logical_model}:batchEmbedContents`
 
+Protobuf field-name aliases `inline_data`/`inlineData` and `mime_type`/`mimeType`
+are accepted and normalized; conflicting aliases and unknown fields are rejected.
+This includes the nested Content serialization used by Google GenAI SDKs.
+
 The body accepts `content.parts`, optional `model: models/{logical_model}`,
 `taskType`, `title`, and `outputDimensionality`. Batch bodies use `requests`, an
 array of these request objects; every model must match the path. Task and

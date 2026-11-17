@@ -68,6 +68,7 @@ func TestEmbeddingsThroughInstalledDriverAndBothDialects(t *testing.T) {
 	}
 	for _, test := range []struct{ path, body string }{
 		{"/v1beta/models/embedding:embedContent", `{"content":{"parts":[{"text":"one"}]},"outputDimensionality":128}`},
+		{"/v1beta/models/embedding:batchEmbedContents", `{"requests":[{"content":{"parts":[{"inline_data":{"data":"YQ==","mime_type":"image/png"}}]},"outputDimensionality":128,"model":"models/embedding"}]}`},
 		{"/v1beta/models/embedding:batchEmbedContents", `{"requests":[{"content":{"parts":[{"text":"one"}]},"outputDimensionality":128},{"content":{"parts":[{"text":"two"}]},"outputDimensionality":256}]}`},
 	} {
 		status, b, _ := nativePost(t, api.URL, test.path, test.body, map[string]string{"Authorization": "", "x-goog-api-key": "client-fixture"})

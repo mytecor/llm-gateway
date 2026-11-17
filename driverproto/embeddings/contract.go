@@ -32,6 +32,48 @@ type Content struct {
 	Parts []Part `json:"parts"`
 	Role  string `json:"role,omitempty"`
 }
+
+// Protobuf JSON accepts original snake_case field names as well as lowerCamel.
+// GenAI SDKs can emit snake_case inside Content even with camelCase request
+// fields. Normalize only supported aliases; never ignore unknown media fields.
+func (p *Part) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Text        *string `json:"text"`
+		Inline      *Blob   `json:"inlineData"`
+		SnakeInline *Blob   `json:"inline_data"`
+	}
+	if err := Decode(data, &wire); err != nil {
+		return err
+	}
+	if wire.Inline != nil && wire.SnakeInline != nil {
+		return errors.New("duplicate inlineData aliases")
+	}
+	if wire.Inline == nil {
+		wire.Inline = wire.SnakeInline
+	}
+	*p = Part{Text: wire.Text, InlineData: wire.Inline}
+	return nil
+}
+
+func (b *Blob) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		MIME      string `json:"mimeType"`
+		SnakeMIME string `json:"mime_type"`
+		Data      string `json:"data"`
+	}
+	if err := Decode(data, &wire); err != nil {
+		return err
+	}
+	if wire.MIME != "" && wire.SnakeMIME != "" {
+		return errors.New("duplicate mimeType aliases")
+	}
+	if wire.MIME == "" {
+		wire.MIME = wire.SnakeMIME
+	}
+	*b = Blob{MIMEType: wire.MIME, Data: wire.Data}
+	return nil
+}
+
 type Item struct {
 	Parts      []Part `json:"parts,omitempty"`
 	TokenIDs   []int  `json:"token_ids,omitempty"`

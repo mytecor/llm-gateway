@@ -58,6 +58,26 @@ func TestGoogleAndOpenAIHaveIdenticalCanonicalInputs(t *testing.T) {
 	}
 }
 
+func TestGenAISDKProtobufFieldNames(t *testing.T) {
+	camel, err := ParseGoogle([]byte(`{"requests":[{"content":{"parts":[{"text":"caption"},{"inlineData":{"data":"YQ==","mimeType":"image/png"}}]},"outputDimensionality":128,"model":"models/embedding"}]}`), "embedding", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snake, err := ParseGoogle([]byte(`{"requests":[{"content":{"parts":[{"text":"caption"},{"inline_data":{"data":"YQ==","mime_type":"image/png"}}]},"outputDimensionality":128,"model":"models/embedding"}]}`), "embedding", true)
+	if err != nil || !reflect.DeepEqual(camel, snake) {
+		t.Fatalf("GenAI SDK body did not normalize: %v", err)
+	}
+	for _, input := range []string{
+		`{"parts":[{"inlineData":{"mimeType":"image/png","mime_type":"image/png","data":"YQ=="}}]}`,
+		`{"parts":[{"inlineData":{"mimeType":"image/png","data":"YQ=="},"inline_data":{"mime_type":"image/png","data":"YQ=="}}]}`,
+		`{"parts":[{"inline_data":{"mime_type":"image/png","data":"YQ==","unknown":true}}]}`,
+	} {
+		if _, _, err := ParseOpenAI([]byte(`{"model":"embedding","input":` + input + `}`)); err == nil {
+			t.Fatal("accepted ambiguous or unknown media field")
+		}
+	}
+}
+
 func TestResponseContractAndBase64(t *testing.T) {
 	r, _, _ := ParseOpenAI([]byte(`{"model":"embedding","input":"hello","dimensions":128}`))
 	values := make([]float32, 128)
