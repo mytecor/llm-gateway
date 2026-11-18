@@ -231,7 +231,10 @@ func (c *vertexBatchClient) upload(ctx context.Context, cmd batch.Command) *Call
 	case strings.HasSuffix(cmd.Object, ".png"):
 		mime = "image/png"
 	}
-	resp, callErr := c.request(ctx, http.MethodPost, endpoint, mime, f, info.Size())
+	// net/http closes its request body even on a rejected insert. Keep the
+	// spool file open for the checksum comparison after a duplicate upload.
+	body := io.NewSectionReader(f, 0, info.Size())
+	resp, callErr := c.request(ctx, http.MethodPost, endpoint, mime, body, info.Size())
 	if callErr == nil {
 		resp.Body.Close()
 		return nil
