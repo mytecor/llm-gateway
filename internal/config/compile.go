@@ -82,6 +82,9 @@ func CompileConfig(prepared PreparedConfig) (*CompiledConfig, error) {
 	compiled.Routes = result.Routes
 	compiled.Models = result.Models
 	compiled.LogicalIDs = result.LogicalIDs
+	if err := compiled.validateBatch(); err != nil {
+		return nil, err
+	}
 	return compiled, nil
 }
 

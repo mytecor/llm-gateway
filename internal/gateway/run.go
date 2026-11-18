@@ -92,9 +92,13 @@ func Run(arguments []string) error {
 		Admission: subsystem.NewAdmissionController(metrics, time.Now),
 	})
 	defer runner.Close()
+	handler := server.NewServer(compiled, catalog, runner)
+	if err := handler.EnableBatch(executors); err != nil {
+		return fmt.Errorf("batch startup: %w", err)
+	}
 	httpServer := &http.Server{
 		Addr:              net.JoinHostPort(compiled.Raw.Host, strconv.Itoa(compiled.Raw.Port)),
-		Handler:           server.NewServer(compiled, catalog, runner),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       90 * time.Second,
 		MaxHeaderBytes:    1 << 20,

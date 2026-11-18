@@ -114,14 +114,16 @@ func serve(ctx context.Context, r io.Reader, w io.Writer) error {
 
 		switch msg.Type {
 		case "init", "describe":
-			_, catalog, normalizedCfg, err := ValidateProviderConfig(msg)
+			provider, catalog, normalizedCfg, err := ValidateProviderConfig(msg)
 			if err != nil {
 				_ = emit(outboundMessage{Type: "error", Error: err.Error()})
 				return nil
 			}
+			capabilities := defaultCapabilities()
+			capabilities.Batch = supportsProviderBatch(provider)
 			_ = emit(outboundMessage{
 				Type:         "ready",
-				Capabilities: defaultCapabilities(),
+				Capabilities: capabilities,
 				Catalog:      catalog,
 				Config:       normalizedCfg,
 			})
@@ -167,9 +169,13 @@ func serve(ctx context.Context, r io.Reader, w io.Writer) error {
 				_ = emit(outboundMessage{Type: "error", Error: err.Error()})
 				return nil
 			}
+			capabilities := defaultCapabilities()
+			for _, provider := range providers {
+				capabilities.Batch = capabilities.Batch || supportsProviderBatch(provider)
+			}
 			_ = emit(outboundMessage{
 				Type:         "ready",
-				Capabilities: defaultCapabilities(),
+				Capabilities: capabilities,
 				Catalog:      catalog,
 				Config:       normalizedCfg,
 			})

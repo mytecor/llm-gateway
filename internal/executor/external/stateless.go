@@ -292,8 +292,11 @@ func (d *Driver) currentWorker(ctx context.Context) (*statelessWorker, *model.Ca
 }
 
 func (d *Driver) submit(ctx context.Context, target model.Target, request model.ExecuteRequest, stream bool) (*statelessWorker, string, *pendingRequest, *model.CallError) {
-	if request.Kind != model.RequestChat && request.Kind != model.RequestResponses && request.Kind != model.RequestSystemOne && request.Kind != model.RequestEmbeddings {
+	if request.Kind != model.RequestChat && request.Kind != model.RequestResponses && request.Kind != model.RequestSystemOne && request.Kind != model.RequestEmbeddings && request.Kind != model.RequestBatch {
 		return nil, "", nil, &model.CallError{Class: model.ErrorInvalid, Status: 400, Replay: model.ReplayNotSent}
+	}
+	if request.Kind == model.RequestBatch && (stream || !d.capabilities.Batch) {
+		return nil, "", nil, &model.CallError{Class: model.ErrorInvalid, Status: 503, Code: "batch_unsupported", Replay: model.ReplayNotSent}
 	}
 	if request.SingleAttempt && !d.capabilities.SingleAttempt {
 		return nil, "", nil, &model.CallError{Class: model.ErrorInvalid, Status: 503,

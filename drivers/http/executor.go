@@ -12,6 +12,7 @@ import (
 	"math/rand/v2"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	bifrost "github.com/maximhq/bifrost/core"
@@ -86,6 +87,7 @@ func (silentLogger) LogHTTPRequest(schemas.LogLevel, string) schemas.LogEventBui
 }
 
 type Executor struct {
+	batchClients     sync.Map
 	client           *bifrost.Bifrost
 	defaultProvider  string
 	providers        map[string]ProviderConfig
@@ -406,6 +408,9 @@ func (e *Executor) Do(ctx context.Context, providerID, nativeModel, kind string,
 func (e *Executor) do(ctx context.Context, providerID, nativeModel, kind string, body []byte, singleAttempt bool) ([]byte, *CallError) {
 	if providerID == "" {
 		providerID = e.defaultProvider
+	}
+	if kind == "batch" {
+		return e.doBatch(ctx, providerID, nativeModel, body)
 	}
 	bfContext := schemas.NewBifrostContext(ctx, schemas.NoDeadline)
 	provider := e.providers[providerID]

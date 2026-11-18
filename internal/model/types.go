@@ -83,6 +83,7 @@ const (
 	RequestSystemOne  RequestKind = "systemone"
 	RequestChat       RequestKind = "chat"
 	RequestResponses  RequestKind = "responses"
+	RequestBatch      RequestKind = "batch"
 )
 
 // Call identifies a client invocation independently of an upstream attempt.

@@ -31,6 +31,25 @@ type Config struct {
 	Providers                  []provider.Provider         `json:"providers"`
 	Models                     map[string]policy.ModelSpec `json:"models,omitempty"`
 	Rules                      policy.Rules                `json:"rules,omitempty"`
+	Batch                      *BatchConfig                `json:"batch,omitempty"`
+}
+
+// BatchConfig grants one named client access to a specific model and storage namespace.
+type BatchConfig struct {
+	Client          string                `json:"client"`
+	Model           string                `json:"model"`
+	Routes          map[string]BatchRoute `json:"routes"`
+	StorageProvider string                `json:"storage_provider,omitempty"`
+	Bucket          string                `json:"bucket,omitempty"`
+	Prefix          string                `json:"prefix"`
+	StateDir        string                `json:"state_dir"`
+}
+
+type BatchRoute struct {
+	Provider       string   `json:"provider"`
+	Native         string   `json:"native"`
+	Backend        string   `json:"backend"`
+	ImageProviders []string `json:"image_providers,omitempty"`
 }
 
 // ClientKey is one named client credential. ID is the non-secret identity

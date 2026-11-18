@@ -36,6 +36,7 @@ type FunctionDefinition struct {
 }
 
 type Capabilities struct {
+	Batch                bool `json:"batch,omitempty"`
 	Embeddings           bool `json:"embeddings,omitempty"`
 	EmbeddingImages      bool `json:"embedding_images,omitempty"`
 	EmbeddingAudio       bool `json:"embedding_audio,omitempty"`
