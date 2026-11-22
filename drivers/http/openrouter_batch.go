@@ -109,8 +109,11 @@ type openRouterInputRow struct {
 			Parts []struct{ Text string } `json:"parts"`
 		} `json:"systemInstruction"`
 		Config struct {
-			Max  int    `json:"maxOutputTokens"`
-			MIME string `json:"responseMimeType"`
+			Max      int    `json:"maxOutputTokens"`
+			MIME     string `json:"responseMimeType"`
+			Thinking *struct {
+				Level string `json:"thinkingLevel"`
+			} `json:"thinkingConfig"`
 		} `json:"generationConfig"`
 	} `json:"request"`
 }
@@ -195,6 +198,13 @@ func prepareOpenRouterBatch(ctx context.Context, provider ProviderConfig, comman
 		}
 		if row.Request.Config.MIME == "application/json" {
 			body["response_format"] = map[string]string{"type": "json_object"}
+		}
+		effort := strings.TrimSpace(command.ReasoningEffort)
+		if effort == "" && row.Request.Config.Thinking != nil {
+			effort = strings.ToLower(strings.TrimSpace(row.Request.Config.Thinking.Level))
+		}
+		if effort != "" {
+			body["reasoning"] = map[string]string{"effort": effort}
 		}
 		if err := encoder.Encode(map[string]any{
 			"custom_id": strconv.Itoa(line),

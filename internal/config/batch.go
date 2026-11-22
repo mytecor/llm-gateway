@@ -55,6 +55,11 @@ func (c *CompiledConfig) validateBatch() error {
 			if p.Config["base_provider"] != "openai" || !strings.Contains(bat.Native, "/") {
 				return errors.New("OpenRouter batch requires its HTTP provider and an author/model ID")
 			}
+			switch bat.ReasoningEffort {
+			case "", "none", "minimal", "low", "medium", "high", "xhigh", "max":
+			default:
+				return errors.New("OpenRouter batch reasoning_effort must be one of none, minimal, low, medium, high, xhigh, max")
+			}
 		default:
 			return errors.New("invalid batch backend")
 		}

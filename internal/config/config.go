@@ -46,10 +46,11 @@ type BatchConfig struct {
 }
 
 type BatchRoute struct {
-	Provider       string   `json:"provider"`
-	Native         string   `json:"native"`
-	Backend        string   `json:"backend"`
-	ImageProviders []string `json:"image_providers,omitempty"`
+	Provider        string   `json:"provider"`
+	Native          string   `json:"native"`
+	Backend         string   `json:"backend"`
+	ImageProviders  []string `json:"image_providers,omitempty"`
+	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
 }
 
 // ClientKey is one named client credential. ID is the non-secret identity

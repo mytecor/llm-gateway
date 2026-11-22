@@ -12,16 +12,17 @@ const (
 
 // File is a private, gateway-created spool path. It is never accepted from an HTTP client.
 type Command struct {
-	Operation      string   `json:"operation"`
-	Bucket         string   `json:"bucket"`
-	Prefix         string   `json:"prefix"`
-	Object         string   `json:"object,omitempty"`
-	File           string   `json:"file,omitempty"`
-	Name           string   `json:"name,omitempty"`
-	Job            string   `json:"job,omitempty"`
-	Input          string   `json:"input,omitempty"`
-	Model          string   `json:"model,omitempty"`
-	ImageProviders []string `json:"image_providers,omitempty"`
+	Operation       string   `json:"operation"`
+	Bucket          string   `json:"bucket"`
+	Prefix          string   `json:"prefix"`
+	Object          string   `json:"object,omitempty"`
+	File            string   `json:"file,omitempty"`
+	Name            string   `json:"name,omitempty"`
+	Job             string   `json:"job,omitempty"`
+	Input           string   `json:"input,omitempty"`
+	Model           string   `json:"model,omitempty"`
+	ImageProviders  []string `json:"image_providers,omitempty"`
+	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
 }
 
 type Result struct {

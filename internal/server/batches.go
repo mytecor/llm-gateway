@@ -46,6 +46,7 @@ type batchRecord struct {
 	Backend         string            `json:"backend"`
 	StorageProvider string            `json:"storage_provider,omitempty"`
 	ImageProviders  []string          `json:"image_providers,omitempty"`
+	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
 	Job             string            `json:"job,omitempty"`
 	Metadata        map[string]string `json:"metadata,omitempty"`
 }
@@ -97,7 +98,8 @@ func (b *batchServer) newRecord(id, logical string) (batchRecord, bool) {
 	route, ok := b.settings.Routes[logical]
 	return batchRecord{Bucket: b.settings.Bucket, Prefix: b.settings.Prefix + "/" + b.jobKey(id),
 		Model: logical, Native: route.Native, Provider: route.Provider, Backend: route.Backend,
-		StorageProvider: b.settings.StorageProvider, ImageProviders: route.ImageProviders}, ok
+		StorageProvider: b.settings.StorageProvider, ImageProviders: route.ImageProviders,
+		ReasoningEffort: route.ReasoningEffort}, ok
 }
 
 func (r batchRecord) storagePrefix() string {
@@ -393,7 +395,8 @@ func (b *batchServer) submit(w http.ResponseWriter, r *http.Request) {
 			prepare.Provider = record.StorageProvider
 		}
 		_, callErr := b.call(r.Context(), prepare, batchproto.Command{Operation: batchproto.Prepare, Input: inputFile,
-			File: prepared.Name(), Model: record.Native, ImageProviders: record.ImageProviders})
+			File: prepared.Name(), Model: record.Native, ImageProviders: record.ImageProviders,
+			ReasoningEffort: record.ReasoningEffort})
 		if callErr != nil {
 			batchCallError(w, callErr)
 			return

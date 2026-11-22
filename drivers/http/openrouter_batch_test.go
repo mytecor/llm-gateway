@@ -44,7 +44,7 @@ func TestOpenRouterBatchPreparationSignsOnlyManagedImage(t *testing.T) {
 	service, _ := json.Marshal(map[string]string{"client_email": email,
 		"private_key": string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))})
 	cmd := batch.Command{Bucket: "bucket", Prefix: "example", Input: requests, File: target, Model: "deepseek/model",
-		ImageProviders: []string{"together"}}
+		ImageProviders: []string{"together"}, ReasoningEffort: "low"}
 	if err := prepareOpenRouterBatch(t.Context(), ProviderConfig{BaseProvider: "vertex", VertexAuthCredentials: string(service)}, cmd); err != nil {
 		t.Fatalf("prepare: %+v", err)
 	}
@@ -58,7 +58,10 @@ func TestOpenRouterBatchPreparationSignsOnlyManagedImage(t *testing.T) {
 	var batch struct {
 		Requests []struct {
 			Body struct {
-				Messages []json.RawMessage `json:"messages"`
+				Messages  []json.RawMessage `json:"messages"`
+				Reasoning struct {
+					Effort string `json:"effort"`
+				} `json:"reasoning"`
 			} `json:"body"`
 		} `json:"requests"`
 	}
@@ -69,7 +72,7 @@ func TestOpenRouterBatchPreparationSignsOnlyManagedImage(t *testing.T) {
 	}
 	if json.Unmarshal(data, &batch) != nil || len(batch.Requests) != 1 ||
 		len(batch.Requests[0].Body.Messages) != 2 || json.Unmarshal(batch.Requests[0].Body.Messages[1], &user) != nil ||
-		len(user.Content) != 2 {
+		len(user.Content) != 2 || batch.Requests[0].Body.Reasoning.Effort != "low" {
 		t.Fatal("unexpected OpenRouter request")
 	}
 	signed, err := url.Parse(user.Content[1].Image.URL)
