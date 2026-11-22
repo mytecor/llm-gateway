@@ -215,7 +215,7 @@ func prepareOpenRouterBatch(ctx context.Context, provider ProviderConfig, comman
 	return nil
 }
 
-var routerBatchID = regexp.MustCompile(`^batch_[a-zA-Z0-9_-]+$`)
+var routerBatchID = regexp.MustCompile(`^batch[-_][a-zA-Z0-9_-]+$`)
 
 func runOpenRouterBatch(ctx context.Context, provider ProviderConfig, command batch.Command) (batch.Result, *CallError) {
 	if provider.APIKey == "" {

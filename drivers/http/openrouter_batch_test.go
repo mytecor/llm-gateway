@@ -103,3 +103,11 @@ func TestOpenRouterBatchResponseStream(t *testing.T) {
 		t.Fatalf("result %+v, rows %d, error %v", batch, rows, err)
 	}
 }
+
+func TestOpenRouterBatchHyphenIDAndNullResults(t *testing.T) {
+	input := `{"id":"batch-1795378140-Uibpm0S6dx6pLtOajyhP","status":"in_progress","request_counts":{"total":1860,"completed":0,"failed":0},"results":null}`
+	batch, rows, err := readOpenRouterBatch(strings.NewReader(input), nil)
+	if err != nil || !routerBatchID.MatchString(batch.Job) || batch.State != "JOB_STATE_RUNNING" || rows != 0 {
+		t.Fatalf("result %+v, rows %d, error %v", batch, rows, err)
+	}
+}
