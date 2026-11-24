@@ -136,11 +136,7 @@ func prepareOpenRouterBatch(ctx context.Context, provider ProviderConfig, comman
 		Provider map[string]any `json:"provider,omitempty"`
 	}{Endpoint: "/v1/chat/completions", Model: command.Model}
 	if len(command.ImageProviders) != 0 {
-		header.Provider = map[string]any{
-			"only":            command.ImageProviders,
-			"order":           command.ImageProviders,
-			"allow_fallbacks": true,
-		}
+		header.Provider = map[string]any{"only": command.ImageProviders, "allow_fallbacks": true}
 	}
 	rawHeader, _ := json.Marshal(header)
 	if _, err := writer.Write(append(rawHeader[:len(rawHeader)-1], []byte(`,"requests":[`)...)); err != nil {

@@ -57,8 +57,7 @@ func TestOpenRouterBatchPreparationSignsOnlyManagedImage(t *testing.T) {
 	}
 	var batch struct {
 		Provider struct {
-			Only  []string `json:"only"`
-			Order []string `json:"order"`
+			Only []string `json:"only"`
 		} `json:"provider"`
 		Requests []struct {
 			Body struct {
@@ -76,7 +75,6 @@ func TestOpenRouterBatchPreparationSignsOnlyManagedImage(t *testing.T) {
 	}
 	if json.Unmarshal(data, &batch) != nil || len(batch.Requests) != 1 ||
 		len(batch.Provider.Only) != 1 || batch.Provider.Only[0] != "together" ||
-		len(batch.Provider.Order) != 1 || batch.Provider.Order[0] != "together" ||
 		len(batch.Requests[0].Body.Messages) != 2 || json.Unmarshal(batch.Requests[0].Body.Messages[1], &user) != nil ||
 		len(user.Content) != 2 || batch.Requests[0].Body.Reasoning.Effort != "low" {
 		t.Fatal("unexpected OpenRouter request")
