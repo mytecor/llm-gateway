@@ -56,6 +56,10 @@ func TestOpenRouterBatchPreparationSignsOnlyManagedImage(t *testing.T) {
 		t.Fatal("OpenRouter routing fields must precede requests")
 	}
 	var batch struct {
+		Provider struct {
+			Only  []string `json:"only"`
+			Order []string `json:"order"`
+		} `json:"provider"`
 		Requests []struct {
 			Body struct {
 				Messages  []json.RawMessage `json:"messages"`
@@ -71,6 +75,8 @@ func TestOpenRouterBatchPreparationSignsOnlyManagedImage(t *testing.T) {
 		} `json:"content"`
 	}
 	if json.Unmarshal(data, &batch) != nil || len(batch.Requests) != 1 ||
+		len(batch.Provider.Only) != 1 || batch.Provider.Only[0] != "together" ||
+		len(batch.Provider.Order) != 1 || batch.Provider.Order[0] != "together" ||
 		len(batch.Requests[0].Body.Messages) != 2 || json.Unmarshal(batch.Requests[0].Body.Messages[1], &user) != nil ||
 		len(user.Content) != 2 || batch.Requests[0].Body.Reasoning.Effort != "low" {
 		t.Fatal("unexpected OpenRouter request")
@@ -111,6 +117,15 @@ func TestOpenRouterBatchHyphenIDAndNullResults(t *testing.T) {
 	input := `{"id":"batch-1795378140-Uibpm0S6dx6pLtOajyhP","status":"in_progress","request_counts":{"total":1860,"completed":0,"failed":0},"results":null}`
 	batch, rows, err := readOpenRouterBatch(strings.NewReader(input), nil)
 	if err != nil || !routerBatchID.MatchString(batch.Job) || batch.State != "JOB_STATE_RUNNING" || rows != 0 {
+		t.Fatalf("result %+v, rows %d, error %v", batch, rows, err)
+	}
+}
+
+func TestOpenRouterBatchFailedErrorAndProvider(t *testing.T) {
+	input := `{"id":"batch-1795528648-eMtp1COqS9YcYSvZ1EcR","status":"failed","provider":"Together","request_counts":{"total":79,"completed":0,"failed":0},"results":null,"error":{"message":"Failed to submit batch to provider."}}`
+	batch, rows, err := readOpenRouterBatch(strings.NewReader(input), nil)
+	if err != nil || batch.State != "JOB_STATE_FAILED" || batch.Provider != "Together" ||
+		batch.Error != "Failed to submit batch to provider." || rows != 0 {
 		t.Fatalf("result %+v, rows %d, error %v", batch, rows, err)
 	}
 }

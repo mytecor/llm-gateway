@@ -454,9 +454,16 @@ func (b *batchServer) writeBatchStatus(w http.ResponseWriter, status int, id str
 	if state == "" {
 		state = "SUBMITTING"
 	}
-	writeJSON(w, status, map[string]string{
+	reply := map[string]string{
 		"id": id, "model": record.Model, "status": state, "successful": result.Successful, "failed": result.Failed,
-	})
+	}
+	if result.Provider != "" {
+		reply["provider"] = result.Provider
+	}
+	if result.Error != "" {
+		reply["error"] = result.Error
+	}
+	writeJSON(w, status, reply)
 }
 
 func (b *batchServer) status(w http.ResponseWriter, r *http.Request) {

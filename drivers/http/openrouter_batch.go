@@ -136,7 +136,11 @@ func prepareOpenRouterBatch(ctx context.Context, provider ProviderConfig, comman
 		Provider map[string]any `json:"provider,omitempty"`
 	}{Endpoint: "/v1/chat/completions", Model: command.Model}
 	if len(command.ImageProviders) != 0 {
-		header.Provider = map[string]any{"only": command.ImageProviders, "allow_fallbacks": true}
+		header.Provider = map[string]any{
+			"only":            command.ImageProviders,
+			"order":           command.ImageProviders,
+			"allow_fallbacks": true,
+		}
 	}
 	rawHeader, _ := json.Marshal(header)
 	if _, err := writer.Write(append(rawHeader[:len(rawHeader)-1], []byte(`,"requests":[`)...)); err != nil {
@@ -328,6 +332,18 @@ func readOpenRouterBatch(in io.Reader, dst io.Writer) (out batch.Result, rows in
 			var state string
 			err = d.Decode(&state)
 			out.State = openRouterJobState(state)
+		case "provider":
+			var provider *string
+			err = d.Decode(&provider)
+			if err == nil && provider != nil {
+				out.Provider = strings.TrimSpace(*provider)
+			}
+		case "error":
+			var raw json.RawMessage
+			err = d.Decode(&raw)
+			if err == nil {
+				out.Error = extractOpenRouterBatchError(raw)
+			}
 		case "request_counts":
 			var counts struct{ Completed, Failed int }
 			err = d.Decode(&counts)
@@ -370,4 +386,26 @@ func readOpenRouterBatch(in io.Reader, dst io.Writer) (out batch.Result, rows in
 		return out, rows, fmt.Errorf("OpenRouter batch response lacks job state")
 	}
 	return out, rows, nil
+}
+
+func extractOpenRouterBatchError(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return ""
+	}
+	var msg string
+	if json.Unmarshal(trimmed, &msg) == nil {
+		return strings.TrimSpace(msg)
+	}
+	var obj struct {
+		Message string `json:"message"`
+		Code    any    `json:"code"`
+	}
+	if json.Unmarshal(trimmed, &obj) == nil && strings.TrimSpace(obj.Message) != "" {
+		return strings.TrimSpace(obj.Message)
+	}
+	if len(trimmed) > 256 {
+		return string(trimmed[:256])
+	}
+	return string(trimmed)
 }

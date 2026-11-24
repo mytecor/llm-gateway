@@ -30,4 +30,6 @@ type Result struct {
 	State      string `json:"state,omitempty"`
 	Successful string `json:"successful,omitempty"`
 	Failed     string `json:"failed,omitempty"`
+	Provider   string `json:"provider,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
