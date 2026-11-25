@@ -80,7 +80,7 @@ remote URLs, async batch jobs and upload APIs are outside this contract.
 Supported dimensions are 768 (default), 512, 256, 128. Truncated vectors are
 L2-normalized. Context is 8192 model tokens per input, including instruction and
 media tokens; overflow is rejected without silently truncating text or audio.
-HTTP JSON is limited to 32 MiB and batches to 32 inputs. Embedding NDJSON commands
+HTTP JSON is limited to 32 MiB and batches to 64 inputs. Embedding NDJSON commands
 allow 40 MiB including the envelope, while Chat/Responses framing stays at 16 MiB.
 
 Inline media supports JPEG/PNG/WebP, WAV/MP3/FLAC/OGG, MP4/WebM. Each part contains

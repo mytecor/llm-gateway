@@ -27,6 +27,19 @@ func TestInputShapesAndValidation(t *testing.T) {
 			t.Fatalf("accepted %s", extra)
 		}
 	}
+	makeBatch := func(n int) []byte {
+		items := make([]string, n)
+		for i := range items {
+			items[i] = `"x"`
+		}
+		return []byte(`{"model":"embedding","input":[` + strings.Join(items, ",") + `]}`)
+	}
+	if r, _, err := ParseOpenAI(makeBatch(MaxItems)); err != nil || len(r.Items) != MaxItems {
+		t.Fatalf("rejected max batch %d: %v", MaxItems, err)
+	}
+	if _, _, err := ParseOpenAI(makeBatch(MaxItems + 1)); err == nil {
+		t.Fatalf("accepted batch exceeding %d", MaxItems)
+	}
 }
 
 func TestGoogleAndOpenAIHaveIdenticalCanonicalInputs(t *testing.T) {

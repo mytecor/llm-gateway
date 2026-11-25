@@ -15,8 +15,8 @@ import (
 const (
 	MaxHTTPBytes     = 32 << 20
 	MaxCommandBytes  = 40 << 20
-	MaxResponseBytes = 2 << 20
-	MaxItems         = 32
+	MaxResponseBytes = 4 << 20
+	MaxItems         = 64
 	MaxTokens        = 8192
 )
 
@@ -125,7 +125,7 @@ func ValidDimension(n int) bool { return n == 768 || n == 512 || n == 256 || n =
 func (r *Request) Validate() (Features, error) {
 	var f Features
 	if strings.TrimSpace(r.Model) == "" || len(r.Items) == 0 || len(r.Items) > MaxItems {
-		return f, errors.New("model and 1..32 inputs are required")
+		return f, errors.New("model and 1..64 inputs are required")
 	}
 	for idx := range r.Items {
 		i := &r.Items[idx]
