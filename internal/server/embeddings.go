@@ -103,7 +103,7 @@ func (s *Server) embeddingRequest(w http.ResponseWriter, r *http.Request, google
 	if google {
 		req, err = embeddings.ParseGoogle(body, logical, batch)
 	} else {
-		req, encoding, err = embeddings.ParseOpenAI(body)
+		req, encoding, err = embeddings.ParseOpenAIWithDefaultModel(body, s.config.Raw.DefaultEmbeddingModel)
 		logical = req.Model
 	}
 	if err != nil {

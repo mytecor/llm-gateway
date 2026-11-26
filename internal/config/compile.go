@@ -82,6 +82,9 @@ func CompileConfig(prepared PreparedConfig) (*CompiledConfig, error) {
 	compiled.Routes = result.Routes
 	compiled.Models = result.Models
 	compiled.LogicalIDs = result.LogicalIDs
+	if model := cfg.DefaultEmbeddingModel; model != "" && result.Models[model] == nil {
+		return nil, fmt.Errorf("default_embedding_model %q is not a configured logical model", model)
+	}
 	if err := compiled.validateBatch(); err != nil {
 		return nil, err
 	}

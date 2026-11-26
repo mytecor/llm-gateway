@@ -69,6 +69,7 @@ func normalizeSettings(cfg Config) (Config, error) {
 		return Config{}, errors.New("session_checkpoint_limit must not be negative")
 	}
 	cfg.SessionFile = strings.TrimSpace(cfg.SessionFile)
+	cfg.DefaultEmbeddingModel = strings.TrimSpace(cfg.DefaultEmbeddingModel)
 	if cfg.SessionFile != "" {
 		path, err := filepath.Abs(cfg.SessionFile)
 		if err != nil {

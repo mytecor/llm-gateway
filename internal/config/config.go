@@ -29,6 +29,7 @@ type Config struct {
 	SessionCheckpointRetention Duration                    `json:"session_checkpoint_retention,omitempty"`
 	SessionCheckpointLimit     int                         `json:"session_checkpoint_limit,omitempty"`
 	Providers                  []provider.Provider         `json:"providers"`
+	DefaultEmbeddingModel      string                      `json:"default_embedding_model,omitempty"`
 	Models                     map[string]policy.ModelSpec `json:"models,omitempty"`
 	Rules                      policy.Rules                `json:"rules,omitempty"`
 	Batch                      *BatchConfig                `json:"batch,omitempty"`

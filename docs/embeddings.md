@@ -19,6 +19,9 @@ of Content objects. One Content produces one vector, preserving part order;
 an array produces separate vectors in input order. Do not mix strings, token
 arrays and Content objects in the same batch.
 
+When `default_embedding_model` is configured, OpenAI requests can omit
+`model`. When the client supplies a model, the gateway uses that logical model.
+
 ```json
 {
   "model": "embedding",
@@ -49,7 +52,7 @@ are accepted and normalized; conflicting aliases and unknown fields are rejected
 This includes the nested Content serialization used by Google GenAI SDKs.
 Media bytes accept standard and URL-safe base64, with or without padding, as
 specified by [ProtoJSON](https://protobuf.dev/programming-guides/json/). They
-normalize to padded standard base64 before crossing the driver/runtime boundary.
+normalize to padded standard base64 before the provider request is formed.
 
 The body accepts `content.parts`, optional `model: models/{logical_model}`,
 `taskType`, `title`, and `outputDimensionality`. Batch bodies use `requests`, an
@@ -79,12 +82,12 @@ remote URLs, async batch jobs and upload APIs are outside this contract.
 
 Supported dimensions are 768 (default), 512, 256, 128. Truncated vectors are
 L2-normalized. Context is 8192 model tokens per input, including instruction and
-media tokens; overflow is rejected without silently truncating text or audio.
+media tokens; overflow is rejected without silently truncating text.
 HTTP JSON is limited to 32 MiB and batches to 64 inputs. Embedding NDJSON commands
 allow 40 MiB including the envelope, while Chat/Responses framing stays at 16 MiB.
 
-Inline media supports JPEG/PNG/WebP, WAV/MP3/FLAC/OGG, MP4/WebM. Each part contains
-exactly `text` or `inlineData`. Images are limited to 16 megapixels; audio/video
+The gateway accepts inline JPEG/PNG/WebP, WAV/MP3/FLAC/OGG and MP4/WebM. Actual
+decoding and preprocessing depend on the provider. Each part contains exactly `text` or `inlineData`. Images are limited to 16 megapixels; audio/video
 clips to 330 seconds independently of context/byte limits. Audio becomes mono
 16 kHz. Video uses 1 fps, at most 32 uniformly sampled frames, and no implicit
 audio track. PDF, file paths and URI references are rejected. Literal media
@@ -111,7 +114,7 @@ Install `embeddings-driver` alongside the core. See the
   "id": "local-embedding",
   "driver": "embeddings",
   "request_timeout": "5m",
-  "config": {"inference_url": "http://127.0.0.1:9225"}
+  "config": {"inference_url": "http://127.0.0.1:9226"}
 }
 ```
 

@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mytecor/llm-gateway/driverproto/embeddings"
 	"github.com/mytecor/llm-gateway/internal/config"
 	"github.com/mytecor/llm-gateway/internal/executor"
 	"github.com/mytecor/llm-gateway/internal/policy"
@@ -23,28 +22,45 @@ import (
 func TestEmbeddingsThroughInstalledDriverAndBothDialects(t *testing.T) {
 	var calls atomic.Int32
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/models" {
-			_, _ = w.Write([]byte(`{"data":[{"id":"native","input_modalities":["text","image","audio","video"],"embedding_dimensions":[128,256,512,768]}]}`))
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"native"}]}`))
+			return
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/embeddings":
+			calls.Add(1)
+		default:
+			t.Errorf("unexpected upstream request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
 			return
 		}
-		calls.Add(1)
-		var req embeddings.Request
+		var req struct {
+			Model string            `json:"model"`
+			Input []json.RawMessage `json:"input"`
+		}
 		if json.NewDecoder(r.Body).Decode(&req) != nil || req.Model != "native" {
 			t.Error("driver did not map native model")
 			w.WriteHeader(400)
 			return
 		}
-		response := embeddings.Response{}
-		for _, i := range req.Items {
-			v := make([]float32, i.Dimensions)
-			v[0] = 1
-			response.Embeddings = append(response.Embeddings, embeddings.Vector{Values: v, Tokens: 4})
+		type row struct {
+			Index     int       `json:"index"`
+			Embedding []float32 `json:"embedding"`
 		}
-		_ = json.NewEncoder(w).Encode(response)
+		vector := make([]float32, 768)
+		vector[0] = 1
+		data := make([]row, len(req.Input))
+		for i := range data {
+			data[i] = row{Index: i, Embedding: vector}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data":  data,
+			"usage": map[string]int{"prompt_tokens": 4 * len(data)},
+		})
 	}))
 	defer backend.Close()
 	zero := 0
 	cfg := config.Config{LogLevel: "silent", Providers: []provider.Provider{{ID: "local", Driver: "embeddings", Config: map[string]any{"inference_url": backend.URL}}}, Models: map[string]policy.ModelSpec{"embedding": {Timeout: config.Duration{Duration: 5 * time.Second}, Budget: &policy.BudgetSpec{MaxCalls: 1, MaxInFlight: 1, MaxCallsPerProvider: 1, MaxHedges: &zero}, Tiers: []policy.TierSpec{{Targets: []policy.TargetSpec{{Provider: "local", Native: "native"}}}}}}}
+	cfg.DefaultEmbeddingModel = "embedding"
 	compiled, err := config.PrepareAndCompile(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -65,6 +81,9 @@ func TestEmbeddingsThroughInstalledDriverAndBothDialects(t *testing.T) {
 		if status != 200 || !bytes.Contains(b, []byte(`"model":"embedding"`)) || bytes.Contains(b, []byte("native")) {
 			t.Fatalf("%d %s", status, b)
 		}
+	}
+	if status, b, _ := nativePost(t, api.URL, "/v1/embeddings", `{"input":"one","dimensions":128}`, nil); status != 200 || !bytes.Contains(b, []byte(`"model":"embedding"`)) {
+		t.Fatalf("default model: %d %s", status, b)
 	}
 	for _, test := range []struct{ path, body string }{
 		{"/v1beta/models/embedding:embedContent", `{"content":{"parts":[{"text":"one"}]},"outputDimensionality":128}`},

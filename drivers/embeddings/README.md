@@ -1,25 +1,20 @@
 # Embeddings driver
 
-Standalone standard-library Go adapter between gateway NDJSON and a local
-embedding runtime. Build using `make build-embeddings`; test in this directory
-with `go test -race ./...`. No Bifrost conversion or implicit HTTP retries occur.
+Standalone Go adapter between gateway NDJSON and OpenAI-compatible
+embeddings providers. Build using `make build-embeddings` and test with
+`go test -race ./...` in this directory.
 
-Configuration contains only `inference_url`, an HTTP(S) base URL. Redirects and
-environment HTTP proxies are disabled. The runtime exposes:
+Configuration uses `inference_url`, an HTTP(S) base URL without a version
+suffix. The driver calls `GET /v1/models` and `POST /v1/embeddings`.
+CPU-Max and llama-server accept the same typed inline content for images,
+audio and video. Task prefixes on native token IDs use `POST /tokenize`.
+Redirects, HTTP proxies and implicit HTTP retries are disabled.
 
-* `GET /models`: `{ "data": [{ "id": "native-model", "input_modalities": ["text"], "embedding_dimensions": [768] }] }`.
-* `POST /embed`: the shared [embeddings contract](./../../driverproto/embeddings/contract.go).
+The gateway validates requests against the [internal embeddings contract](./../../driverproto/embeddings/contract.go).
+The driver adds task prompts for text and token inputs, restores input order
+from response indices, truncates vectors to the requested dimensions and
+L2-normalizes them.
 
-An input contains `model` and `items`. Each item contains ordered `parts` or
-`token_ids`, `dimensions`, optional `task_type` and `title`. The response is
-`embeddings`, an ordered array of `{ "values": [float32...], "tokens": integer }`.
-The gateway and driver validate count, dimensions, finite values, normalization
-and usage. Backend errors use `{ "error": { "code": "queue_full" } }` with an
-appropriate HTTP status and optional `Retry-After`.
-
-`describe` is local and does not contact or warm the runtime. `models` reads the
-lightweight catalog. The stateless `start` worker multiplexes `request`/`cancel`
-commands; cancellation aborts its HTTP request, allowing the runtime to terminate
-active inference. Only `kind: embeddings`, without streaming, is accepted.
-
-Public API and model behavior are documented in [embeddings](./../../docs/embeddings.md).
+The stateless `start` worker multiplexes request and cancel commands.
+Cancellation aborts the upstream HTTP request. Public client APIs are
+documented in [embeddings](./../../docs/embeddings.md).

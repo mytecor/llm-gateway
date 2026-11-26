@@ -194,6 +194,11 @@ func (r *Request) Validate() (Features, error) {
 }
 
 func ParseOpenAI(data []byte) (Request, string, error) {
+	return ParseOpenAIWithDefaultModel(data, "")
+}
+
+// ParseOpenAIWithDefaultModel supplies the logical model when the client omits it.
+func ParseOpenAIWithDefaultModel(data []byte, defaultModel string) (Request, string, error) {
 	var wire struct {
 		Model      string          `json:"model"`
 		Input      json.RawMessage `json:"input"`
@@ -214,6 +219,9 @@ func ParseOpenAI(data []byte) (Request, string, error) {
 		return r, "", errors.New("encoding_format must be float or base64")
 	}
 	r.Model = wire.Model
+	if r.Model == "" {
+		r.Model = defaultModel
+	}
 	makeItem := func(raw json.RawMessage) (Item, error) {
 		i := Item{Dimensions: wire.Dimensions, TaskType: wire.Task, Title: wire.Title}
 		s := bytes.TrimSpace(raw)

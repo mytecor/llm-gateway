@@ -10,6 +10,20 @@ import (
 	"testing"
 )
 
+func TestParseOpenAIWithDefaultModel(t *testing.T) {
+	req, _, err := ParseOpenAIWithDefaultModel([]byte(`{"input":"one"}`), "embedding")
+	if err != nil || req.Model != "embedding" {
+		t.Fatalf("omitted model: %+v, %v", req, err)
+	}
+	req, _, err = ParseOpenAIWithDefaultModel([]byte(`{"model":"explicit","input":"one"}`), "embedding")
+	if err != nil || req.Model != "explicit" {
+		t.Fatalf("explicit model: %+v, %v", req, err)
+	}
+	if _, _, err := ParseOpenAI([]byte(`{"input":"one"}`)); err == nil {
+		t.Fatal("accepted omitted model without a configured default")
+	}
+}
+
 func TestInputShapesAndValidation(t *testing.T) {
 	for _, input := range []string{`"hello"`, `["one","two"]`, `[2,3,1]`, `[[2,3],[2,4]]`, `{"parts":[{"text":"one"}]}`, `[{"parts":[{"text":"one"}]},{"parts":[{"text":"two"}]}]`} {
 		r, encoding, err := ParseOpenAI([]byte(`{"model":"embedding","input":` + input + `}`))

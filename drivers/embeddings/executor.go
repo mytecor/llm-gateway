@@ -40,8 +40,13 @@ func newExecutor(raw json.RawMessage) (*executor, error) {
 func (e *executor) capabilities() driverproto.Capabilities {
 	return driverproto.Capabilities{Embeddings: true, EmbeddingImages: true, EmbeddingAudio: true, EmbeddingVideo: true, SafeReplay: true, SingleAttempt: true}
 }
+
+func (e *executor) modelsURL() string {
+	return e.config.InferenceURL + "/v1/models"
+}
+
 func (e *executor) models(ctx context.Context, override string) ([]driverproto.ModelInfo, error) {
-	endpoint := e.config.InferenceURL + "/models"
+	endpoint := e.modelsURL()
 	if override != "" && override != endpoint {
 		return nil, errors.New("embeddings models_url must use the configured runtime")
 	}
@@ -60,6 +65,10 @@ func (e *executor) models(ctx context.Context, override string) ([]driverproto.M
 	b, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
 	if err != nil || len(b) > 1<<20 || json.Unmarshal(b, &catalog) != nil || len(catalog.Data) == 0 {
 		return nil, errors.New("invalid embedding catalog")
+	}
+	for i := range catalog.Data {
+		catalog.Data[i].InputModalities = []string{"text", "image", "audio", "video"}
+		catalog.Data[i].EmbeddingDimensions = []int{128, 256, 512, 768}
 	}
 	return catalog.Data, nil
 }
@@ -90,8 +99,15 @@ func (e *executor) do(ctx context.Context, msg command) (json.RawMessage, *drive
 		return nil, fail(400, "invalid_embedding_request")
 	}
 	contract.Model = msg.Model
-	body, _ := json.Marshal(contract)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, e.config.InferenceURL+"/embed", bytes.NewReader(body))
+	return e.openAIEmbeddings(ctx, contract)
+}
+
+func (e *executor) post(ctx context.Context, endpoint string, payload any) (json.RawMessage, *driverproto.CallError) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fail(400, "invalid_embedding_request")
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, e.config.InferenceURL+endpoint, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := e.client.Do(req)
 	if err != nil {
@@ -113,22 +129,34 @@ func (e *executor) do(ctx context.Context, msg command) (json.RawMessage, *drive
 		result := fail(status, "embedding_runtime_error")
 		var detail struct {
 			Error struct {
-				Code string `json:"code"`
+				Code    json.RawMessage `json:"code"`
+				Type    string          `json:"type"`
+				Message string          `json:"message"`
 			} `json:"error"`
 		}
 		if json.Unmarshal(b, &detail) == nil {
-			switch detail.Error.Code {
+			var code string
+			_ = json.Unmarshal(detail.Error.Code, &code)
+			// Non-causal embeddings must fit one physical batch. llama.cpp
+			// 0.8 reports its size limit as a server error.
+			physicalBatchLimit := detail.Error.Type == "server_error" &&
+				strings.HasPrefix(detail.Error.Message, "input (") &&
+				strings.Contains(detail.Error.Message, " tokens) is too large to process. increase the physical batch size ")
+			if detail.Error.Type == "exceed_context_size_error" || physicalBatchLimit {
+				return nil, fail(400, "context_length_exceeded")
+			}
+			if detail.Error.Message == "unsupported_media" {
+				code = "unsupported_media"
+			}
+			switch code {
 			case "queue_full", "context_length_exceeded", "unsupported_media", "invalid_embedding_request", "worker_failed", "deadline_exceeded", "model_not_found":
-				result.Code = detail.Error.Code
+				result.Code = code
 			}
 		}
 		if seconds, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && seconds > 0 {
 			result.RetryAfterMs = int64(min(seconds, 300)) * 1000
 		}
 		return nil, result
-	}
-	if _, err := contract.ValidateResponse(b); err != nil {
-		return nil, fail(502, "invalid_embedding_response")
 	}
 	return b, nil
 }
