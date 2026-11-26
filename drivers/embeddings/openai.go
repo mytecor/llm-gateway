@@ -117,7 +117,15 @@ func (e *executor) openAIInput(ctx context.Context, model string, item embedding
 		blob := part.InlineData
 		switch {
 		case strings.HasPrefix(blob.MIMEType, "image/"):
-			parts = append(parts, openAIContent{Type: "image_url", Image: map[string]string{"url": "data:" + blob.MIMEType + ";base64," + blob.Data}})
+			mimeType, data := blob.MIMEType, blob.Data
+			if e.config.ImageAlign == imageAlignEmbeddingGemma2 {
+				aligned, err := alignEmbeddingGemma2Image(blob.Data, blob.MIMEType)
+				if err != nil {
+					return nil, fail(400, "unsupported_media")
+				}
+				mimeType, data = "image/png", aligned
+			}
+			parts = append(parts, openAIContent{Type: "image_url", Image: map[string]string{"url": "data:" + mimeType + ";base64," + data}})
 		case strings.HasPrefix(blob.MIMEType, "audio/"):
 			parts = append(parts, openAIContent{Type: "input_audio", Audio: map[string]string{"data": blob.Data}})
 		case strings.HasPrefix(blob.MIMEType, "video/"):

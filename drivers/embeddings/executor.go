@@ -17,6 +17,7 @@ import (
 
 type config struct {
 	InferenceURL string `json:"inference_url"`
+	ImageAlign   string `json:"image_align,omitempty"`
 }
 type executor struct {
 	config config
@@ -32,6 +33,9 @@ func newExecutor(raw json.RawMessage) (*executor, error) {
 	u, err := url.Parse(cfg.InferenceURL)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, errors.New("inference_url must be an HTTP base URL without credentials, query or fragment")
+	}
+	if cfg.ImageAlign != "" && cfg.ImageAlign != imageAlignEmbeddingGemma2 {
+		return nil, errors.New("image_align must be empty or \"embeddinggemma2\"")
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil

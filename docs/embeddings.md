@@ -114,9 +114,17 @@ Install `embeddings-driver` alongside the core. See the
   "id": "local-embedding",
   "driver": "embeddings",
   "request_timeout": "5m",
-  "config": {"inference_url": "http://127.0.0.1:9226"}
+  "config": {
+    "inference_url": "http://127.0.0.1:9226",
+    "image_align": "embeddinggemma2"
+  }
 }
 ```
+
+Set `"image_align": "embeddinggemma2"` for providers that do not apply EXIF
+orientation or EmbeddingGemma 2's 280-soft-token 48 px image grid (such as raw
+`llama-server`). Omit `image_align` when the backend already runs that
+preprocessing (such as CPU-Max).
 
 Use one local target with `budget.max_calls: 1`, `max_calls_per_provider: 1`,
 `max_in_flight: 1`, `max_hedges: 0`, and a five-minute route timeout. Do not add

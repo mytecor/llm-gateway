@@ -109,6 +109,9 @@ func serve(ctx context.Context, input io.Reader, output io.Writer) error {
 				return emit(driverproto.Event{Type: "models", Models: models})
 			}
 			cfg := map[string]any{"inference_url": exec.config.InferenceURL}
+			if exec.config.ImageAlign != "" {
+				cfg["image_align"] = exec.config.ImageAlign
+			}
 			if err := emit(driverproto.Event{Type: "ready", Capabilities: ptr(exec.capabilities()), Config: cfg, Catalog: &driverproto.CatalogSource{URL: exec.modelsURL(), Explicit: msg.ModelsURL != ""}}); err != nil {
 				return err
 			}
