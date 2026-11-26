@@ -131,7 +131,7 @@ func (ac *AdmissionController) Admit(ctx context.Context, route string, policy p
 			Code:       "route_queue_wait_timeout",
 			Class:      model.ErrorRateLimit,
 			Status:     http.StatusTooManyRequests,
-			RetryAfter: time.Second,
+			RetryAfter: 3 * time.Second,
 			Cause:      fmt.Errorf("route %q queue wait timeout (%s) exceeded", route, waitTimeout),
 		}
 	}

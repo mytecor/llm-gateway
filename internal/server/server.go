@@ -266,6 +266,7 @@ func (s *Server) inference(writer http.ResponseWriter, request *http.Request, ki
 		return
 	}
 	result, callErr := s.runner.RunWithResult(request.Context(), metadata.Model, executeRequest)
+	s.setRouteLimitHeader(writer, metadata.Model)
 	if callErr != nil {
 		telemetry.LogEvent(request.Context(), s.logger, slog.LevelWarn, "request_failed",
 			"kind", kind,
@@ -336,6 +337,15 @@ func (s *Server) refresh(writer http.ResponseWriter, request *http.Request) {
 		status = http.StatusBadGateway
 	}
 	writeJSON(writer, status, map[string]any{"refreshed": len(failed) == 0, "failed_count": len(failed)})
+}
+
+func (s *Server) setRouteLimitHeader(writer http.ResponseWriter, logical string) {
+	if s.runner == nil || logical == "" {
+		return
+	}
+	if limit := s.runner.RouteCapacity(logical); limit > 0 {
+		writer.Header().Set("X-LLM-Route-Limit", strconv.Itoa(limit))
+	}
 }
 
 func writeCallError(writer http.ResponseWriter, callErr *model.CallError) {

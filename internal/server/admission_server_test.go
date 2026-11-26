@@ -311,6 +311,9 @@ func TestServerReturns429WithRetryAfterForQueueRejectionAnd504ForRouteTimeout(t 
 	if recWait.Header().Get("Retry-After") == "" {
 		t.Fatal("expected Retry-After header on 429 queue wait timeout")
 	}
+	if recWait.Header().Get("X-LLM-Route-Limit") != "1" {
+		t.Fatalf("expected X-LLM-Route-Limit=1 on 429 queue wait timeout, got %q", recWait.Header().Get("X-LLM-Route-Limit"))
+	}
 	if !strings.Contains(recWait.Body.String(), "route_queue_wait_timeout") {
 		t.Fatalf("expected route_queue_wait_timeout code, got %s", recWait.Body.String())
 	}

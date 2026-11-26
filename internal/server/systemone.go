@@ -86,6 +86,7 @@ func (s *Server) systemOne(w http.ResponseWriter, r *http.Request) {
 	}
 	telemetry.LogEvent(r.Context(), s.logger, slog.LevelInfo, "request_received", "kind", model.RequestSystemOne, "logical_model", logical)
 	result, callErr = s.runner.RunWithResult(r.Context(), logical, model.ExecuteRequest{Kind: model.RequestSystemOne, Body: body, Headers: headers, SystemOneFeatures: features, Call: model.Call{ID: fmtRequestID(requestID), Principal: telemetry.ClientKeyFrom(r.Context()), LogicalModel: logical}})
+	s.setRouteLimitHeader(w, logical)
 	if callErr != nil {
 		status = model.CallErrorStatus(callErr)
 		writeCallError(w, callErr)

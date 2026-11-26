@@ -121,6 +121,7 @@ func (s *Server) embeddingRequest(w http.ResponseWriter, r *http.Request, google
 		return
 	}
 	result, callErr := s.runner.RunWithResult(r.Context(), logical, model.ExecuteRequest{Kind: model.RequestEmbeddings, Body: canonical, EmbeddingFeatures: features, Call: model.Call{ID: id, Principal: telemetry.ClientKeyFrom(r.Context()), LogicalModel: logical}})
+	s.setRouteLimitHeader(w, logical)
 	if callErr != nil {
 		status = model.CallErrorStatus(callErr)
 		if callErr.RetryAfter > 0 {

@@ -211,3 +211,37 @@ func TestCompileModelsHedgeDelayAndValidation(t *testing.T) {
 		t.Fatal("expected error when hedge_delay is set on stateful model")
 	}
 }
+
+func TestModelSpecAdmissionDefaultsAndOverrides(t *testing.T) {
+	providers := map[string]provider.Provider{
+		"gonka-a": {ID: "gonka-a", Labels: map[string]string{"pool": "gonka"}},
+		"gonka-b": {ID: "gonka-b", Labels: map[string]string{"pool": "gonka"}},
+	}
+	dynFalse := false
+	pending := 10
+	compiled, err := CompileWithModels(nil, map[string]ModelSpec{
+		"standard": {
+			Timeout: Duration{Duration: 3 * time.Minute},
+			Tiers:   []TierSpec{{Targets: []TargetSpec{{Select: map[string]string{"pool": "gonka"}, Native: "ds-v4"}}}},
+		},
+		"custom": {
+			Timeout: Duration{Duration: 3 * time.Minute},
+			Admission: &AdmissionSpec{
+				Dynamic:     &dynFalse,
+				MaxInFlight: 6,
+				MaxPending:  &pending,
+				WaitTimeout: Duration{Duration: 60 * time.Second},
+			},
+			Tiers: []TierSpec{{Targets: []TargetSpec{{Select: map[string]string{"pool": "gonka"}, Native: "ds-v4"}}}},
+		},
+	}, providers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adm := compiled.Models["standard"].Admission; !adm.Dynamic || adm.WaitTimeout != 45*time.Second || adm.MaxPending != 32 {
+		t.Fatalf("unexpected default admission: %+v", adm)
+	}
+	if adm := compiled.Models["custom"].Admission; adm.Dynamic || adm.MaxInFlight != 6 || adm.MaxPending != 10 || adm.WaitTimeout != 60*time.Second {
+		t.Fatalf("unexpected custom admission: %+v", adm)
+	}
+}

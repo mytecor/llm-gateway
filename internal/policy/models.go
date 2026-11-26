@@ -28,6 +28,7 @@ type ModelSpec struct {
 	SafeContinue      *bool            `json:"safe_continue,omitempty"`
 	Continue          *ContinueSpec    `json:"continue,omitempty"`
 	Budget            *BudgetSpec      `json:"budget,omitempty"`
+	Admission         *AdmissionSpec   `json:"admission,omitempty"`
 	LoopGuard         *RepetitionSpec  `json:"loop_guard,omitempty"`
 	Affinity          *AffinitySpec    `json:"affinity,omitempty"`
 	Transforms        []transform.Kind `json:"transforms,omitempty"`
@@ -63,6 +64,13 @@ type BudgetSpec struct {
 	MaxInFlight         int  `json:"max_in_flight,omitempty"`
 	MaxHedges           *int `json:"max_hedges,omitempty"`
 	MaxCallsPerProvider int  `json:"max_calls_per_provider,omitempty"`
+}
+
+type AdmissionSpec struct {
+	MaxInFlight int      `json:"max_in_flight,omitempty"`
+	MaxPending  *int     `json:"max_pending,omitempty"`
+	WaitTimeout Duration `json:"wait_timeout,omitempty"`
+	Dynamic     *bool    `json:"dynamic,omitempty"`
 }
 
 type ContinueSpec struct {
@@ -213,6 +221,10 @@ func compileSingleModelSpec(logicalID string, spec ModelSpec, providers map[stri
 	if err != nil {
 		return err
 	}
+	admissionCfg, err := compileModelAdmission(logicalID, spec.Admission, routeTimeout)
+	if err != nil {
+		return err
+	}
 	if spec.HedgeDelay.Duration > 0 && semCfg.MaxHedges == 0 {
 		return fmt.Errorf("model %q: hedge_delay requires budget.max_hedges > 0", logicalID)
 	}
@@ -261,11 +273,7 @@ func compileSingleModelSpec(logicalID string, spec ModelSpec, providers map[stri
 			rt.Semaphore = semCfg
 			rt.RouteTimeout = routeTimeout
 			rt.StreamIdleTimeout = spec.StreamIdleTimeout.Duration
-			rt.Admission = AdmissionConfig{
-				Dynamic:     true,
-				MaxPending:  32,
-				WaitTimeout: 15 * time.Second,
-			}
+			rt.Admission = admissionCfg
 			rt.Continue = continueCfg
 			rt.Repetition = repCfg
 			rt.Transforms = transforms
@@ -411,6 +419,37 @@ func compileModelBudget(logicalID string, spec *BudgetSpec, prof profileDefaults
 		MaxCallsPerProvider: maxPerProvider,
 		MaxHedges:           maxHedges,
 	}, nil
+}
+
+func compileModelAdmission(logicalID string, spec *AdmissionSpec, routeTimeout time.Duration) (AdmissionConfig, error) {
+	waitTimeout := 45 * time.Second
+	if routeTimeout > 0 && routeTimeout/2 < waitTimeout {
+		waitTimeout = max(15*time.Second, routeTimeout/2)
+	}
+	cfg := AdmissionConfig{
+		Dynamic:     true,
+		MaxPending:  32,
+		WaitTimeout: waitTimeout,
+	}
+	if spec == nil {
+		return cfg, nil
+	}
+	if spec.MaxInFlight < 0 || (spec.MaxPending != nil && *spec.MaxPending < 0) || spec.WaitTimeout.Duration < 0 {
+		return AdmissionConfig{}, fmt.Errorf("model %q: admission limits must not be negative", logicalID)
+	}
+	if spec.Dynamic != nil {
+		cfg.Dynamic = *spec.Dynamic
+	}
+	if spec.MaxInFlight > 0 {
+		cfg.MaxInFlight = spec.MaxInFlight
+	}
+	if spec.MaxPending != nil {
+		cfg.MaxPending = *spec.MaxPending
+	}
+	if spec.WaitTimeout.Duration > 0 {
+		cfg.WaitTimeout = spec.WaitTimeout.Duration
+	}
+	return cfg, nil
 }
 
 func compileModelContinue(logicalID string, spec ModelSpec) (ContinueConfig, error) {

@@ -336,6 +336,27 @@ func (r *Runner) dynamicRouteCapacity(entry *policy.CompiledRoute) int {
 	return 1
 }
 
+// RouteCapacity returns the current effective concurrency limit for a logical
+// model route, or 0 when admission is unbounded or the route is unknown.
+func (r *Runner) RouteCapacity(logical string) int {
+	if r.plan.Models == nil {
+		return 0
+	}
+	entry, ok := r.plan.Models[logical]
+	if !ok {
+		return 0
+	}
+	adm := entry.Admission
+	if adm.Dynamic {
+		cap := r.dynamicRouteCapacity(entry)
+		if adm.MaxInFlight > 0 && adm.MaxInFlight < cap {
+			cap = adm.MaxInFlight
+		}
+		return cap
+	}
+	return adm.MaxInFlight
+}
+
 // Run executes the bounded non-streaming route graph and returns the winner
 // body.
 func (r *Runner) Run(ctx context.Context, logical string, request model.ExecuteRequest) ([]byte, *model.CallError) {
