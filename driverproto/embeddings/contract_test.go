@@ -149,3 +149,26 @@ func TestResponseContractAndBase64(t *testing.T) {
 		}
 	}
 }
+
+func TestTruncateOnlyAcceptsText(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		valid bool
+	}{
+		{`["one","two"]`, true}, {`{"parts":[{"text":"a"},{"text":"b"}]}`, true},
+		{`[1,2]`, false}, {`{"parts":[{"inlineData":{"data":"YQ==","mimeType":"image/gif"}}]}`, false},
+	} {
+		r, _, err := ParseOpenAI([]byte(`{"model":"m","truncate":true,"input":` + tc.input + "}"))
+		if (err == nil) != tc.valid || (tc.valid && !r.Items[0].Truncate) {
+			t.Fatalf("input %s: %v", tc.input, err)
+		}
+	}
+	r, _, err := ParseOpenAI([]byte(`{"model":"m","input":{"parts":[{"inlineData":{"data":"YQ==","mimeType":"image/gif"}}]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := r.Validate()
+	if err != nil || !f.Images {
+		t.Fatal("GIF must require image capability")
+	}
+}

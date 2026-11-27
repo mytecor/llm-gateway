@@ -107,6 +107,19 @@ func (e *executor) do(ctx context.Context, msg command) (json.RawMessage, *drive
 }
 
 func (e *executor) post(ctx context.Context, endpoint string, payload any) (json.RawMessage, *driverproto.CallError) {
+	response, failure := e.postStream(ctx, endpoint, payload)
+	if failure != nil {
+		return nil, failure
+	}
+	defer response.Close()
+	b, err := io.ReadAll(io.LimitReader(response, embeddings.MaxResponseBytes+1))
+	if err != nil || len(b) > embeddings.MaxResponseBytes {
+		return nil, fail(502, "invalid_embedding_response")
+	}
+	return b, nil
+}
+
+func (e *executor) postStream(ctx context.Context, endpoint string, payload any) (io.ReadCloser, *driverproto.CallError) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fail(400, "invalid_embedding_request")
@@ -120,47 +133,47 @@ func (e *executor) post(ctx context.Context, endpoint string, payload any) (json
 		}
 		return nil, fail(503, "embedding_runtime_unavailable")
 	}
+	if resp.StatusCode == 200 {
+		return resp.Body, nil
+	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, embeddings.MaxResponseBytes+1))
 	if err != nil || len(b) > embeddings.MaxResponseBytes {
 		return nil, fail(502, "invalid_embedding_response")
 	}
-	if resp.StatusCode != 200 {
-		status := resp.StatusCode
-		if status != 400 && status != 413 && status != 415 && status != 429 && status != 503 && status != 504 {
-			status = 502
-		}
-		result := fail(status, "embedding_runtime_error")
-		var detail struct {
-			Error struct {
-				Code    json.RawMessage `json:"code"`
-				Type    string          `json:"type"`
-				Message string          `json:"message"`
-			} `json:"error"`
-		}
-		if json.Unmarshal(b, &detail) == nil {
-			var code string
-			_ = json.Unmarshal(detail.Error.Code, &code)
-			// Non-causal embeddings must fit one physical batch. llama.cpp
-			// 0.8 reports its size limit as a server error.
-			physicalBatchLimit := detail.Error.Type == "server_error" &&
-				strings.HasPrefix(detail.Error.Message, "input (") &&
-				strings.Contains(detail.Error.Message, " tokens) is too large to process. increase the physical batch size ")
-			if detail.Error.Type == "exceed_context_size_error" || physicalBatchLimit {
-				return nil, fail(400, "context_length_exceeded")
-			}
-			if detail.Error.Message == "unsupported_media" {
-				code = "unsupported_media"
-			}
-			switch code {
-			case "queue_full", "context_length_exceeded", "unsupported_media", "invalid_embedding_request", "worker_failed", "deadline_exceeded", "model_not_found":
-				result.Code = code
-			}
-		}
-		if seconds, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && seconds > 0 {
-			result.RetryAfterMs = int64(min(seconds, 300)) * 1000
-		}
-		return nil, result
+	status := resp.StatusCode
+	if status != 400 && status != 413 && status != 415 && status != 429 && status != 503 && status != 504 {
+		status = 502
 	}
-	return b, nil
+	result := fail(status, "embedding_runtime_error")
+	var detail struct {
+		Error struct {
+			Code    json.RawMessage `json:"code"`
+			Type    string          `json:"type"`
+			Message string          `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(b, &detail) == nil {
+		var code string
+		_ = json.Unmarshal(detail.Error.Code, &code)
+		// Non-causal embeddings must fit one physical batch. llama.cpp
+		// 0.8 reports its size limit as a server error.
+		physicalBatchLimit := detail.Error.Type == "server_error" &&
+			strings.HasPrefix(detail.Error.Message, "input (") &&
+			strings.Contains(detail.Error.Message, " tokens) is too large to process. increase the physical batch size ")
+		if detail.Error.Type == "exceed_context_size_error" || physicalBatchLimit {
+			return nil, fail(400, "context_length_exceeded")
+		}
+		if detail.Error.Message == "unsupported_media" {
+			code = "unsupported_media"
+		}
+		switch code {
+		case "queue_full", "context_length_exceeded", "unsupported_media", "invalid_embedding_request", "worker_failed", "deadline_exceeded", "model_not_found":
+			result.Code = code
+		}
+	}
+	if seconds, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && seconds > 0 {
+		result.RetryAfterMs = int64(min(seconds, 300)) * 1000
+	}
+	return nil, result
 }

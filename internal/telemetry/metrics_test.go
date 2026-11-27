@@ -264,16 +264,16 @@ func TestRepetitionMetric(t *testing.T) {
 
 func TestAdmissionAndCapacityMetrics(t *testing.T) {
 	m := NewMetrics()
-	m.ObserveRoutePending("standard", 3)
+	m.ObserveRoutePending("standard", "normal", 3)
 	m.ObserveRouteInFlight("standard", 2)
-	m.ObserveRouteQueueWait("standard", 150*time.Millisecond)
+	m.ObserveRouteQueueWait("standard", "normal", 150*time.Millisecond)
 	m.ObserveRouteQueueRejection("standard", "max_pending")
 	m.ObserveProviderCapacity("fast", 8)
 	m.ObserveProviderEWMATTFT("fast", 120*time.Millisecond)
 
 	body := scrape(t, m)
 
-	if !strings.Contains(body, `llm_route_pending_requests{route="standard"} 3`) {
+	if !strings.Contains(body, `llm_route_pending_requests{route="standard",priority="normal"} 3`) {
 		t.Errorf("missing or wrong route pending requests metric:\n%s", body)
 	}
 	if !strings.Contains(body, `llm_route_in_flight_requests{route="standard"} 2`) {
@@ -288,7 +288,7 @@ func TestAdmissionAndCapacityMetrics(t *testing.T) {
 	if !strings.Contains(body, `llm_provider_ewma_ttft_seconds{provider="fast"} 0.12`) {
 		t.Errorf("missing or wrong provider EWMA TTFT metric:\n%s", body)
 	}
-	if !strings.Contains(body, `llm_route_queue_wait_duration_seconds_bucket{route="standard",le="0.5"} 1`) {
+	if !strings.Contains(body, `llm_route_queue_wait_duration_seconds_bucket{route="standard",priority="normal",le="0.5"} 1`) {
 		t.Errorf("missing or wrong route queue wait duration bucket:\n%s", body)
 	}
 }

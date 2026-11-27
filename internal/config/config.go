@@ -37,6 +37,7 @@ type Config struct {
 
 // BatchConfig grants one named client access to a specific model and storage namespace.
 type BatchConfig struct {
+	Clients         []string              `json:"clients,omitempty"`
 	Client          string                `json:"client"`
 	Model           string                `json:"model"`
 	Routes          map[string]BatchRoute `json:"routes"`
@@ -59,8 +60,14 @@ type BatchRoute struct {
 // key material itself); Key is the bearer secret, either literal or an
 // "env.VARNAME" reference resolved at load time.
 type ClientKey struct {
-	ID  string `json:"id"`
-	Key string `json:"key"`
+	DefaultPriority string `json:"default_priority,omitempty"`
+	MaxPriority     string `json:"max_priority,omitempty"`
+	ID              string `json:"id"`
+	Key             string `json:"key"`
+}
+
+type PriorityPolicy struct {
+	Default, Maximum model.Priority
 }
 
 // PreparedConfig can only be produced by PrepareConfig after normalization and
@@ -83,6 +90,7 @@ type CompiledConfig struct {
 	// ClientKeys maps a client key ID (non-secret metrics label) to its
 	// resolved bearer secret. Empty means client authentication is disabled.
 	ClientKeys map[string]string
+	Priorities map[string]PriorityPolicy
 }
 
 // RoutingPlan strips startup-only provider settings and credentials from the

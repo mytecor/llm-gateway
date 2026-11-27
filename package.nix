@@ -9,7 +9,7 @@ buildGo127Module {
   # The core package does not need independent drivers or local build caches.
   src = lib.fileset.toSource {
     root = ./.;
-    fileset = lib.fileset.unions [ ./go.mod ./go.sum ./cmd ./driverproto ./internal ];
+    fileset = lib.fileset.unions [ ./go.mod ./go.sum ./client ./cmd ./driverproto ./internal ];
   };
   vendorHash = "sha256-qVoj03LNLbdoCUAOydK7oEHsuZ1BZ6Z2jwYB3gPOfrw=";
   subPackages = [ "cmd/llm-gateway" ];
@@ -17,7 +17,7 @@ buildGo127Module {
   doCheck = true;
   checkPhase = ''
     runHook preCheck
-    go test ./driverproto/... ./internal/model ./internal/policy ./internal/session ./internal/structured ./internal/transform ./internal/telemetry
+    go test ./client ./driverproto/... ./internal/model ./internal/policy ./internal/session ./internal/structured ./internal/transform ./internal/telemetry
     runHook postCheck
   '';
 

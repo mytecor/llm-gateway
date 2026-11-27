@@ -1,13 +1,13 @@
 # Batch API
 
-An opt-in batch route uses a named client API key and a logical model alias.
+An opt-in batch route uses named client API keys and a logical model alias.
 A local batch ID identifies one upstream job. Batch submission runs outside
 the online scheduler's racing, fallback and retry policies.
 
 ```json
 {
   "batch": {
-    "client": "catalog",
+    "clients": ["apartments-worker"],
     "model": "smart",
     "routes": {
       "smart": {"provider": "vertex", "native": "gemini-3.8-flash", "backend": "vertex"},
@@ -45,7 +45,10 @@ retaining batch inputs and outputs.
    with optional system instructions. Use a string or a text part followed
    by an image part. Public HTTPS image URLs can go to OpenRouter when the
    selected provider supports them. The body accepts token limits and JSON
-   object output.
+   object output. For schema-constrained output, set `response_format.type`
+   to `json_schema` and supply `json_schema.name` and `json_schema.schema`.
+   The gateway compiles the schema before accepting the file. A completion
+   that violates its row’s schema yields `error.code=invalid_json_schema_output`.
 2. Create a batch at `POST /v1/batches` with the returned `input_file_id`,
    `endpoint=/v1/chat/completions` and `completion_window=24h`.
 3. Poll `GET /v1/batches/{id}` and download JSONL from
@@ -53,7 +56,24 @@ retaining batch inputs and outputs.
    `custom_id` values. Each entry contains a Chat Completions response or an
    item error.
 
-## Managed media extension
+## Private photos in Chat Completions batches
+
+1. Send `{"model":"smart"}` to `POST /v1/batches/prepare`. Keep the returned `id`.
+2. Upload each JPEG or PNG with `PUT /v1/batches/{id}/files/photos/{sha256}.{jpg|png}`.
+   The gateway checks the SHA-256 digest of the uploaded bytes.
+3. In a user message, follow a text part with
+   `{"type":"image_url","image_url":{"url":"batch-file://photos/{sha256}.jpg"}}`.
+   Upload the JSONL through `POST /v1/files` with multipart fields `purpose=batch`
+   and `workspace_id={id}`. Resending the identical file reuses its job identity.
+4. Submit and poll through the standard endpoints above. Read the output as a
+   JSONL stream. Each row is adapted as it is read from the provider spool. A
+   transport error after the first row indicates an incomplete download.
+
+`batch.clients` and the legacy `batch.client` grant access to the union of their
+named keys. Each key owns its own job and photo namespace across restarts. Retain
+the original key ID in the allowlist while draining its jobs.
+
+## Legacy managed media extension
 
 Generate a 32-character lowercase hexadecimal ID. Use
 `GET /v1/batches/{id}/input?model=LOGICAL_MODEL` for the storage prefix and

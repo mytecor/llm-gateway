@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"math"
 	"strings"
 
@@ -39,9 +40,29 @@ func (e *executor) openAIEmbeddings(ctx context.Context, request embeddings.Requ
 		}
 		inputs = append(inputs, input)
 	}
-	body, failure := e.post(ctx, "/v1/embeddings", map[string]any{
-		"model": request.Model, "input": inputs, "encoding_format": "float",
-	})
+	embed := func() (json.RawMessage, *driverproto.CallError) {
+		return e.post(ctx, "/v1/embeddings", map[string]any{
+			"model": request.Model, "input": inputs, "encoding_format": "float",
+		})
+	}
+	body, failure := embed()
+	if failure != nil && failure.Code == "context_length_exceeded" {
+		retry := false
+		for i, item := range request.Items {
+			if !item.Truncate {
+				continue
+			}
+			tokens, err := e.truncatedTokens(ctx, request.Model, inputs[i].(string))
+			if err != nil {
+				return nil, err
+			}
+			inputs[i] = tokens
+			retry = true
+		}
+		if retry {
+			body, failure = embed()
+		}
+	}
 	if failure != nil {
 		return nil, failure
 	}
@@ -124,6 +145,12 @@ func (e *executor) openAIInput(ctx context.Context, model string, item embedding
 					return nil, fail(400, "unsupported_media")
 				}
 				mimeType, data = "image/png", aligned
+			} else if blob.MIMEType == "image/gif" {
+				frame, err := gifFirstFrame(blob.Data)
+				if err != nil {
+					return nil, fail(400, "unsupported_media")
+				}
+				mimeType, data = "image/png", frame
 			}
 			parts = append(parts, openAIContent{Type: "image_url", Image: map[string]string{"url": "data:" + mimeType + ";base64," + data}})
 		case strings.HasPrefix(blob.MIMEType, "audio/"):
@@ -144,6 +171,19 @@ func (e *executor) openAIInput(ctx context.Context, model string, item embedding
 	return text.String(), nil
 }
 
+// The EmbeddingGemma tokenizer wraps each sequence in BOS (2) and EOS (1).
+// Tokenize the fully prefixed text without special tokens to budget both.
+func (e *executor) truncatedTokens(ctx context.Context, model, text string) ([]int, *driverproto.CallError) {
+	ids, failure := e.tokenize(ctx, model, text, true)
+	if failure != nil {
+		return nil, failure
+	}
+	tokens := make([]int, 1, min(len(ids)+2, embeddings.MaxTokens))
+	tokens[0] = 2
+	tokens = append(tokens, ids[:min(len(ids), embeddings.MaxTokens-2)]...)
+	return append(tokens, 1), nil
+}
+
 func (e *executor) openAITokens(ctx context.Context, model string, ids []int, prefix string) (any, *driverproto.CallError) {
 	// EmbeddingGemma 2 vocabulary and BOS ID, shared by its HF and GGUF exports.
 	const vocabSize, bos = 262144, 2
@@ -155,27 +195,73 @@ func (e *executor) openAITokens(ctx context.Context, model string, ids []int, pr
 	if prefix == "" {
 		return ids, nil
 	}
-	body, failure := e.post(ctx, "/tokenize", map[string]any{
-		"model": model, "content": prefix, "add_special": false, "parse_special": false,
-	})
+	prefixIDs, failure := e.tokenize(ctx, model, prefix, false)
 	if failure != nil {
 		return nil, failure
 	}
-	var tokenized struct {
-		Tokens []int `json:"tokens"`
-	}
-	if json.Unmarshal(body, &tokenized) != nil || len(tokenized.Tokens) == 0 {
-		return nil, fail(502, "invalid_embedding_response")
-	}
-	if len(ids)+len(tokenized.Tokens) > embeddings.MaxTokens {
+	if len(ids)+len(prefixIDs) > embeddings.MaxTokens {
 		return nil, fail(400, "context_length_exceeded")
 	}
 	offset := 0
 	if ids[0] == bos {
 		offset = 1
 	}
-	tokens := make([]int, 0, len(ids)+len(tokenized.Tokens))
+	tokens := make([]int, 0, len(ids)+len(prefixIDs))
 	tokens = append(tokens, ids[:offset]...)
-	tokens = append(tokens, tokenized.Tokens...)
+	tokens = append(tokens, prefixIDs...)
 	return append(tokens, ids[offset:]...), nil
+}
+
+func (e *executor) tokenize(ctx context.Context, model, text string, truncate bool) ([]int, *driverproto.CallError) {
+	payload := map[string]any{"model": model, "content": text, "add_special": false, "parse_special": false}
+	if truncate {
+		payload["truncate"] = true
+	}
+	body, failure := e.postStream(ctx, "/tokenize", payload)
+	if failure != nil {
+		return nil, failure
+	}
+	defer body.Close()
+	// CPU-Max bounds its output when truncate is set. llama.cpp can return the
+	// entire sequence. Consume only the prefix needed by the embedding request.
+	dec := json.NewDecoder(io.LimitReader(body, embeddings.MaxResponseBytes))
+	invalid := fail(502, "invalid_embedding_response")
+	if token, err := dec.Token(); err != nil || token != json.Delim('{') {
+		return nil, invalid
+	}
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return nil, invalid
+		}
+		if key != "tokens" {
+			var skip json.RawMessage
+			if dec.Decode(&skip) != nil {
+				return nil, invalid
+			}
+			continue
+		}
+		if token, err := dec.Token(); err != nil || token != json.Delim('[') {
+			return nil, invalid
+		}
+		var ids []int
+		for dec.More() {
+			var id int
+			if dec.Decode(&id) != nil || id < 0 || id >= 262144 {
+				return nil, invalid
+			}
+			ids = append(ids, id)
+			if truncate && len(ids) == embeddings.MaxTokens-2 {
+				return ids, nil
+			}
+			if len(ids) > embeddings.MaxTokens {
+				return nil, fail(400, "context_length_exceeded")
+			}
+		}
+		if token, err := dec.Token(); err != nil || token != json.Delim(']') || len(ids) == 0 {
+			return nil, invalid
+		}
+		return ids, nil
+	}
+	return nil, invalid
 }

@@ -8,7 +8,7 @@ cooldown fail-open and recovery routing. Existing drivers need no new fields.
 ## OpenAI endpoint
 
 `POST /v1/embeddings` accepts `model`, `input`, optional `dimensions`,
-`encoding_format` (`float`, default, or `base64`), `user`, `task_type`, and `title`.
+`encoding_format` (`float`, default, or `base64`), `user`, `task_type`, `title`, and `truncate`.
 The standard input forms are string, string array, native token ID array, and
 array of native token ID arrays. Token IDs are exact IDs of the served model's
 tokenizer, including any desired special tokens; they are never decoded and
@@ -82,11 +82,15 @@ remote URLs, async batch jobs and upload APIs are outside this contract.
 
 Supported dimensions are 768 (default), 512, 256, 128. Truncated vectors are
 L2-normalized. Context is 8192 model tokens per input, including instruction and
-media tokens; overflow is rejected without silently truncating text.
+media tokens. By default overflow returns HTTP 400 with `context_length_exceeded`.
+For text or text-only Content, `"truncate": true` opts into a retry on overflow.
+The driver tokenizes the full instruction, title and text at the serving runtime,
+keeps the first 8190 content tokens and wraps them in the model’s BOS and EOS.
+Token-ID and inline-media inputs reject this option.
 HTTP JSON is limited to 32 MiB and batches to 64 inputs. Embedding NDJSON commands
 allow 40 MiB including the envelope, while Chat/Responses framing stays at 16 MiB.
 
-The gateway accepts inline JPEG/PNG/WebP, WAV/MP3/FLAC/OGG and MP4/WebM. Actual
+The gateway accepts inline JPEG/PNG/WebP/GIF, WAV/MP3/FLAC/OGG and MP4/WebM. The embeddings driver decodes the first GIF frame. Other
 decoding and preprocessing depend on the provider. Each part contains exactly `text` or `inlineData`. Images are limited to 16 megapixels; audio/video
 clips to 330 seconds independently of context/byte limits. Audio becomes mono
 16 kHz. Video uses 1 fps, at most 32 uniformly sampled frames, and no implicit

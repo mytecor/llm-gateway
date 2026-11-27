@@ -152,9 +152,9 @@ func NewMetrics() *Metrics {
 		requestsInFlight:       newGaugeVec([]string{"provider"}),
 		balanceHealth:          newGaugeVec([]string{"provider"}),
 		cooldownUntil:          newGaugeVec([]string{"provider", "native_model"}),
-		routePendingRequests:   newGaugeVec([]string{"route"}),
+		routePendingRequests:   newGaugeVec([]string{"route", "priority"}),
 		routeInFlightRequests:  newGaugeVec([]string{"route"}),
-		routeQueueWaitDuration: newHistogramVec([]string{"route"}, []float64{0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30}),
+		routeQueueWaitDuration: newHistogramVec([]string{"route", "priority"}, []float64{0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30}),
 		routeQueueRejections:   newCounterVec([]string{"route", "reason"}),
 		providerCapacity:       newGaugeVec([]string{"provider"}),
 		providerEWMATTFT:       newGaugeVec([]string{"provider"}),
@@ -346,13 +346,13 @@ func (m *Metrics) ObserveCooldownUntil(provider, native string, until time.Time)
 	m.cooldownUntil.set(provider, native, float64(until.UnixNano())/1e9)
 }
 
-func (m *Metrics) ObserveRoutePending(route string, count int) {
+func (m *Metrics) ObserveRoutePending(route, priority string, count int) {
 	if m == nil {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.routePendingRequests.set(route, float64(count))
+	m.routePendingRequests.set(route, priority, float64(count))
 }
 
 func (m *Metrics) ObserveRouteInFlight(route string, count int) {
@@ -364,13 +364,13 @@ func (m *Metrics) ObserveRouteInFlight(route string, count int) {
 	m.routeInFlightRequests.set(route, float64(count))
 }
 
-func (m *Metrics) ObserveRouteQueueWait(route string, duration time.Duration) {
+func (m *Metrics) ObserveRouteQueueWait(route, priority string, duration time.Duration) {
 	if m == nil {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.routeQueueWaitDuration.observe([]string{route}, duration.Seconds())
+	m.routeQueueWaitDuration.observe([]string{route, priority}, duration.Seconds())
 }
 
 func (m *Metrics) ObserveRouteQueueRejection(route, reason string) {

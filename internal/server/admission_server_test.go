@@ -1,9 +1,6 @@
 package server
 
 import (
-	"github.com/mytecor/llm-gateway/internal/testsupport/configtest"
-	"github.com/mytecor/llm-gateway/internal/testsupport/policytest"
-
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +14,8 @@ import (
 	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/scheduler"
 	"github.com/mytecor/llm-gateway/internal/subsystem"
+	"github.com/mytecor/llm-gateway/internal/testsupport/configtest"
+	"github.com/mytecor/llm-gateway/internal/testsupport/policytest"
 )
 
 func TestAdmissionContinuationReleaseHandoverNoLeak(t *testing.T) {
@@ -392,5 +391,46 @@ func TestServerReturns429WithRetryAfterForQueueRejectionAnd504ForRouteTimeout(t 
 	}
 	if !strings.Contains(recRouteTimeout.Body.String(), "route_timeout") {
 		t.Fatalf("expected route_timeout code, got %s", recRouteTimeout.Body.String())
+	}
+}
+
+func TestClientKeyPriorityCeilingUnderContention(t *testing.T) {
+	cfg := configtest.TestConfig()
+	cfg.ClientAPIKeys = []config.ClientKey{{ID: "web", Key: "web-test", DefaultPriority: "interactive"}, {ID: "worker", Key: "worker-test", DefaultPriority: "background"}}
+	compiled, err := config.PrepareAndCompile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{config: compiled}
+	ac := subsystem.NewAdmissionController(nil, nil)
+	policy := policy.AdmissionConfig{MaxInFlight: 2, ReserveInteractive: 1}
+	hold, callErr := ac.Admit(t.Context(), "search", policy, time.Time{})
+	if callErr != nil {
+		t.Fatal(callErr)
+	}
+	defer hold()
+	handler := server.auth(func(w http.ResponseWriter, r *http.Request) {
+		release, failure := ac.Admit(r.Context(), "search", policy, time.Time{})
+		if failure != nil {
+			w.WriteHeader(failure.Status)
+			return
+		}
+		release()
+		w.WriteHeader(204)
+	})
+	for _, tc := range []struct {
+		key, priority string
+		want          int
+	}{{"worker-test", "interactive", 429}, {"web-test", "", 204}, {"web-test", "background", 429}, {"web-test", "invalid", 400}} {
+		req := httptest.NewRequest("POST", "/v1/embeddings", nil)
+		req.Header.Set("Authorization", "Bearer "+tc.key)
+		if tc.priority != "" {
+			req.Header.Set("X-LLM-Priority", tc.priority)
+		}
+		w := httptest.NewRecorder()
+		handler(w, req)
+		if w.Code != tc.want {
+			t.Fatalf("priority %q: got %d want %d", tc.priority, w.Code, tc.want)
+		}
 	}
 }

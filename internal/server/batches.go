@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -67,9 +68,10 @@ func (s *Server) EnableBatch(executor model.Executor) error {
 	if !state.IsDir() || state.Mode().Perm()&0o077 != 0 {
 		return errors.New("batch state directory must be private")
 	}
-	mount := func(pattern string, next http.HandlerFunc) {
+	mount := func(pattern string, next func(*batchServer, http.ResponseWriter, *http.Request)) {
 		s.mux.HandleFunc(pattern, s.auth(func(w http.ResponseWriter, r *http.Request) {
-			if telemetry.ClientKeyFrom(r.Context()) != b.settings.Client {
+			id := telemetry.ClientKeyFrom(r.Context())
+			if id == "" || (id != b.settings.Client && !slices.Contains(b.settings.Clients, id)) {
 				writeAPIError(w, http.StatusForbidden, "batch_client_forbidden")
 				return
 			}
@@ -77,17 +79,20 @@ func (s *Server) EnableBatch(executor model.Executor) error {
 				writeAPIError(w, http.StatusBadRequest, "invalid_batch_id")
 				return
 			}
-			next(w, r)
+			scoped := *b
+			scoped.settings.Client = id
+			next(&scoped, w, r)
 		}))
 	}
-	mount("GET /v1/batches/{id}/input", b.input)
-	mount("PUT /v1/batches/{id}/files/{file...}", b.upload)
-	mount("POST /v1/batches", b.submit)
-	mount("GET /v1/batches/{id}", b.status)
-	mount("GET /v1/batches/{id}/results", b.results)
-	mount("POST /v1/files", b.openAIUpload)
-	mount("GET /v1/files/{file_id}", b.openAIFileInfo)
-	mount("GET /v1/files/{file_id}/content", b.openAIContent)
+	mount("POST /v1/batches/prepare", (*batchServer).prepareWorkspace)
+	mount("GET /v1/batches/{id}/input", (*batchServer).input)
+	mount("PUT /v1/batches/{id}/files/{file...}", (*batchServer).upload)
+	mount("POST /v1/batches", (*batchServer).submit)
+	mount("GET /v1/batches/{id}", (*batchServer).status)
+	mount("GET /v1/batches/{id}/results", (*batchServer).results)
+	mount("POST /v1/files", (*batchServer).openAIUpload)
+	mount("GET /v1/files/{file_id}", (*batchServer).openAIFileInfo)
+	mount("GET /v1/files/{file_id}/content", (*batchServer).openAIContent)
 	return nil
 }
 
@@ -236,6 +241,17 @@ func (b *batchServer) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	record, ok := b.newRecord(id, r.URL.Query().Get("model"))
+	workspace, workspaceErr := b.workspace(id)
+	if workspaceErr == nil {
+		if name == batchInputFile || (r.URL.Query().Get("model") != "" && workspace.Model != r.URL.Query().Get("model")) {
+			writeAPIError(w, 409, "batch_workspace_mismatch")
+			return
+		}
+		record, ok = workspace, true
+	} else if !errors.Is(workspaceErr, os.ErrNotExist) {
+		batchReadError(w, workspaceErr)
+		return
+	}
 	if !ok {
 		writeAPIError(w, 400, "unknown_batch_model")
 		return
@@ -266,7 +282,12 @@ func (b *batchServer) upload(w http.ResponseWriter, r *http.Request) {
 	if name == batchInputFile {
 		limit = 1_000_000_000
 	}
-	n, copyErr := io.Copy(file, http.MaxBytesReader(w, r.Body, limit))
+	dst := io.Writer(file)
+	digest := sha256.New()
+	if workspaceErr == nil {
+		dst = io.MultiWriter(file, digest)
+	}
+	n, copyErr := io.Copy(dst, http.MaxBytesReader(w, r.Body, limit))
 	closeErr := file.Close()
 	if copyErr != nil || closeErr != nil || n == 0 {
 		var tooLarge *http.MaxBytesError
@@ -275,6 +296,10 @@ func (b *batchServer) upload(w http.ResponseWriter, r *http.Request) {
 		} else {
 			writeAPIError(w, 400, "invalid_batch_file")
 		}
+		return
+	}
+	if workspaceErr == nil && strings.TrimSuffix(filepath.Base(name), filepath.Ext(name)) != fmt.Sprintf("%x", digest.Sum(nil)) {
+		writeAPIError(w, 400, "batch_photo_hash_mismatch")
 		return
 	}
 	spool := file.Name()
@@ -350,6 +375,15 @@ func (b *batchServer) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := input.ID
+	if input.FileID == "" {
+		if _, err := b.workspace(id); err == nil {
+			writeAPIError(w, 400, "batch_input_file_required")
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			batchReadError(w, err)
+			return
+		}
+	}
 	if previous, err := b.readRecord(id); err == nil {
 		if previous.Model != input.Model || (input.Native != "" && previous.Native != input.Native) {
 			writeAPIError(w, 409, "batch_model_already_selected")
@@ -534,21 +568,35 @@ func (b *batchServer) serveResults(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 	if openAI != nil {
-		converted, err := os.CreateTemp("", "llm-batch-openai-")
-		if err != nil {
-			writeAPIError(w, 500, "batch_spool_unavailable")
-			return
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		out := &batchOutputWriter{ResponseWriter: w}
+		if err := b.adaptOpenAIResults(file, out, *openAI, record.Backend); err != nil {
+			if !out.started {
+				writeAPIError(w, 502, "invalid_batch_output")
+				return
+			}
+			// Once rows have been sent, an interrupted transport distinguishes a partial file from EOF.
+			panic(http.ErrAbortHandler)
 		}
-		defer os.Remove(converted.Name())
-		defer converted.Close()
-		if adaptOpenAIResults(file, converted, *openAI, record.Backend) != nil {
-			writeAPIError(w, 502, "invalid_batch_output")
-			return
-		}
-		file = converted
+		return
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	http.ServeContent(w, r, "predictions.jsonl", time.Time{}, file)
+}
+
+type batchOutputWriter struct {
+	http.ResponseWriter
+	started bool
+}
+
+func (w *batchOutputWriter) Write(data []byte) (int, error) {
+	w.started = true
+	return w.ResponseWriter.Write(data)
+}
+func (w *batchOutputWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 type vertexBatchPart struct {
@@ -594,9 +642,11 @@ func normalizeBatchRow(raw []byte, record batchRecord) []byte {
 			Contents []vertexBatchContent `json:"contents"`
 			System   *vertexBatchContent  `json:"systemInstruction"`
 			Config   struct {
-				MIME      string `json:"responseMimeType"`
-				MaxTokens int    `json:"maxOutputTokens"`
-				Thinking  struct {
+				Temperature *float64        `json:"temperature,omitempty"`
+				Schema      json.RawMessage `json:"responseJsonSchema,omitempty"`
+				MIME        string          `json:"responseMimeType"`
+				MaxTokens   int             `json:"maxOutputTokens"`
+				Thinking    struct {
 					Level string `json:"thinkingLevel"`
 				} `json:"thinkingConfig"`
 			} `json:"generationConfig"`
@@ -611,6 +661,9 @@ func normalizeBatchRow(raw []byte, record batchRecord) []byte {
 	if len(r.Contents) != 1 || r.Contents[0].Role != "user" || len(r.Contents[0].Parts) < 1 || len(r.Contents[0].Parts) > 2 ||
 		r.System == nil || len(r.System.Parts) != 1 || r.System.Parts[0].File != nil || r.System.Parts[0].Text == "" ||
 		(r.Config.MIME != "application/json" && r.Config.MIME != "text/plain") || r.Config.MaxTokens < 1 || r.Config.MaxTokens > 8192 {
+		return nil
+	}
+	if temp := r.Config.Temperature; temp != nil && (*temp < 0 || *temp > 2) {
 		return nil
 	}
 	if level := r.Config.Thinking.Level; level != "LOW" && level != "MEDIUM" && level != "HIGH" {

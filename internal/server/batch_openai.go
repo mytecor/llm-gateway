@@ -3,8 +3,7 @@ package server
 import (
 	"bufio"
 	"bytes"
-	"crypto/rand"
-	"encoding/hex"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,15 +16,17 @@ import (
 	"time"
 
 	batchproto "github.com/mytecor/llm-gateway/driverproto/batch"
+	"github.com/mytecor/llm-gateway/internal/structured"
 )
 
 type openAIInputFile struct {
-	Model  string   `json:"model"`
-	Native string   `json:"native_model"`
-	Name   string   `json:"name"`
-	Bytes  int64    `json:"bytes"`
-	At     int64    `json:"created_at"`
-	IDs    []string `json:"ids"`
+	Schemas map[string]string `json:"schemas,omitempty"`
+	Model   string            `json:"model"`
+	Native  string            `json:"native_model"`
+	Name    string            `json:"name"`
+	Bytes   int64             `json:"bytes"`
+	At      int64             `json:"created_at"`
+	IDs     []string          `json:"ids"`
 }
 
 func (b *batchServer) openAIFilePath(id string) string {
@@ -68,12 +69,24 @@ func (b *batchServer) openAIUpload(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, 400, "invalid_batch_file")
 		return
 	}
-	var randomness [16]byte
-	if _, err := rand.Read(randomness[:]); err != nil {
+	id, err := newBatchID()
+	if err != nil {
 		writeAPIError(w, 500, "batch_state_unavailable")
 		return
 	}
-	id := hex.EncodeToString(randomness[:])
+	var workspace batchRecord
+	if workspaceID := r.FormValue("workspace_id"); workspaceID != "" {
+		if !batchIDPattern.MatchString(workspaceID) {
+			writeAPIError(w, 400, "invalid_batch_id")
+			return
+		}
+		id = workspaceID
+		workspace, err = b.workspace(workspaceID)
+		if err != nil {
+			batchReadError(w, err)
+			return
+		}
+	}
 	file, err := os.CreateTemp(b.settings.StateDir, ".openai-input-")
 	if err != nil {
 		writeAPIError(w, 500, "batch_spool_unavailable")
@@ -81,10 +94,14 @@ func (b *batchServer) openAIUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer os.Remove(file.Name())
 	metadata := openAIInputFile{Name: filepath.Base(info.Filename), At: time.Now().Unix(), Bytes: info.Size}
-	record, err := b.convertOpenAIInput(id, input, file, &metadata)
+	digest := sha256.New()
+	record, err := b.convertOpenAIInput(id, io.TeeReader(input, digest), file, &metadata, workspace)
 	err = errors.Join(err, file.Close())
 	if err != nil {
 		writeAPIError(w, 400, "invalid_batch_requests")
+		return
+	}
+	if workspace.Model != "" && !b.claimWorkspaceInput(w, id, digest.Sum(nil)) {
 		return
 	}
 	if record.Backend == "openrouter" {
@@ -98,7 +115,7 @@ func (b *batchServer) openAIUpload(w http.ResponseWriter, r *http.Request) {
 		batchCallError(w, err)
 		return
 	}
-	if err := os.WriteFile(b.openAIFilePath(id), marshalBatch(metadata), 0o600); err != nil {
+	if err := writeImmutable(b.openAIFilePath(id), marshalBatch(metadata)); err != nil && !errors.Is(err, os.ErrExist) {
 		writeAPIError(w, 500, "batch_state_unavailable")
 		return
 	}
@@ -115,18 +132,26 @@ type openAIChatBatchRow struct {
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
-		MaxTokens     int    `json:"max_tokens"`
-		MaxCompletion int    `json:"max_completion_tokens"`
-		Reasoning     string `json:"reasoning_effort"`
+		MaxTokens     int      `json:"max_tokens"`
+		Temperature   *float64 `json:"temperature,omitempty"`
+		MaxCompletion int      `json:"max_completion_tokens"`
+		Reasoning     string   `json:"reasoning_effort"`
 		Format        *struct {
-			Type string `json:"type"`
+			Type       string `json:"type"`
+			JSONSchema *struct {
+				Name        string          `json:"name"`
+				Description string          `json:"description,omitempty"`
+				Schema      json.RawMessage `json:"schema"`
+				Strict      bool            `json:"strict,omitempty"`
+			} `json:"json_schema,omitempty"`
 		} `json:"response_format"`
 	} `json:"body"`
 }
 
-func (b *batchServer) convertOpenAIInput(id string, input io.Reader, output io.Writer, file *openAIInputFile) (batchRecord, error) {
+func (b *batchServer) convertOpenAIInput(id string, input io.Reader, output io.Writer, file *openAIInputFile, workspace batchRecord) (batchRecord, error) {
 	var record batchRecord
 	buffered := bufio.NewWriter(output)
+	lastSchema := ""
 	seen := make(map[string]bool)
 	scan := bufio.NewScanner(input)
 	scan.Buffer(make([]byte, 64<<10), maxRequestBody)
@@ -147,17 +172,47 @@ func (b *batchServer) convertOpenAIInput(id string, input io.Reader, output io.W
 				return record, errors.New("unknown batch model")
 			}
 			file.Native = record.Native
+			if workspace.Model != "" {
+				if workspace.Model != record.Model || workspace.Bucket != record.Bucket || workspace.StorageProvider != record.StorageProvider || workspace.Prefix != record.Prefix || workspace.Native != record.Native || workspace.Backend != record.Backend {
+					return record, errors.New("batch workspace model or storage changed")
+				}
+			}
 		}
 		if row.Body.Model != file.Model {
 			return record, errors.New("batch contains more than one model")
 		}
-		native, err := row.native(len(file.IDs) + 1)
+		native, err := row.native(len(file.IDs)+1, workspace)
 		if err != nil {
 			return record, err
 		}
 		normalized := normalizeBatchRow(native, record)
 		if normalized == nil {
 			return record, errors.New("unsupported chat batch row")
+		}
+		if f := row.Body.Format; f != nil && f.Type == "json_schema" {
+			raw := f.JSONSchema.Schema
+			hash := fmt.Sprintf("%x", sha256.Sum256(raw))
+			if hash != lastSchema {
+				if _, err := structured.Compile(raw); err != nil {
+					return record, errors.New("invalid batch schema")
+				}
+				if err := b.storeSchema(hash, raw); err != nil {
+					return record, err
+				}
+				lastSchema = hash
+			}
+			if file.Schemas == nil {
+				file.Schemas = make(map[string]string)
+			}
+			file.Schemas[row.ID] = hash
+			if record.Backend == "openrouter" {
+				var envelope map[string]json.RawMessage
+				if err := json.Unmarshal(normalized, &envelope); err != nil {
+					return record, err
+				}
+				envelope["response_format"] = marshalBatch(f)
+				normalized = marshalBatch(envelope)
+			}
 		}
 		if _, err := buffered.Write(append(normalized, '\n')); err != nil {
 			return record, err
@@ -173,7 +228,7 @@ func (b *batchServer) convertOpenAIInput(id string, input io.Reader, output io.W
 
 const openAIItemMarker = "[Batch item "
 
-func (r openAIChatBatchRow) native(line int) ([]byte, error) {
+func (r openAIChatBatchRow) native(line int, workspace batchRecord) ([]byte, error) {
 	system := "Answer the user's request."
 	var parts []map[string]any
 	for _, msg := range r.Body.Messages {
@@ -207,6 +262,12 @@ func (r openAIChatBatchRow) native(line int) ([]byte, error) {
 				case part.Type == "text":
 					parts = append(parts, map[string]any{"text": part.Text})
 				case part.Type == "image_url" && part.Image != nil:
+					if name, managed := strings.CutPrefix(part.Image.URL, "batch-file://"); managed {
+						if !batchPhotoPattern.MatchString(name) || workspace.Bucket == "" {
+							return nil, errors.New("invalid workspace photo")
+						}
+						part.Image.URL = workspace.storagePrefix() + "/" + name
+					}
 					mime := "image/jpeg"
 					if strings.HasSuffix(strings.SplitN(part.Image.URL, "?", 2)[0], ".png") {
 						mime = "image/png"
@@ -242,6 +303,11 @@ func (r openAIChatBatchRow) native(line int) ([]byte, error) {
 	mime := "text/plain"
 	if r.Body.Format != nil {
 		switch r.Body.Format.Type {
+		case "json_schema":
+			if r.Body.Format.JSONSchema == nil || r.Body.Format.JSONSchema.Name == "" || len(r.Body.Format.JSONSchema.Schema) == 0 {
+				return nil, errors.New("missing batch JSON schema")
+			}
+			mime = "application/json"
 		case "json_object":
 			mime = "application/json"
 		case "text":
@@ -249,11 +315,17 @@ func (r openAIChatBatchRow) native(line int) ([]byte, error) {
 			return nil, errors.New("unsupported chat batch response format")
 		}
 	}
+	generation := map[string]any{"maxOutputTokens": maxTokens, "responseMimeType": mime, "thinkingConfig": map[string]string{"thinkingLevel": level}}
+	if r.Body.Temperature != nil {
+		generation["temperature"] = *r.Body.Temperature
+	}
+	if f := r.Body.Format; f != nil && f.Type == "json_schema" {
+		generation["responseJsonSchema"] = f.JSONSchema.Schema
+	}
 	return marshalBatch(map[string]any{"request": map[string]any{
 		"contents":          []any{map[string]any{"role": "user", "parts": parts}},
 		"systemInstruction": map[string]any{"parts": []any{map[string]string{"text": system}}},
-		"generationConfig": map[string]any{"maxOutputTokens": maxTokens, "responseMimeType": mime,
-			"thinkingConfig": map[string]string{"thinkingLevel": level}},
+		"generationConfig":  generation,
 	}}), nil
 }
 
@@ -315,13 +387,46 @@ func openAIBatchStatus(id string, file openAIInputFile, result batchproto.Result
 	}
 }
 
-func adaptOpenAIResults(input, output *os.File, file openAIInputFile, backend string) error {
-	if _, err := input.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-	reader := json.NewDecoder(input)
+func (b *batchServer) adaptOpenAIResults(input io.Reader, output io.Writer, file openAIInputFile, backend string) error {
+	scan := bufio.NewScanner(input)
+	scan.Buffer(make([]byte, 64<<10), 32<<20)
 	writer := json.NewEncoder(output)
-	for {
+	var lastHash string
+	var contract *structured.Contract
+	emit := func(id string, status int, requestID string, body map[string]any, failed bool) error {
+		result := openAIResult(id, status, requestID, body, failed)
+		if hash := file.Schemas[id]; hash != "" && result["error"] == nil {
+			if hash != lastHash {
+				raw, err := os.ReadFile(b.schemaPath(hash))
+				if err != nil {
+					return err
+				}
+				compiled, failure := structured.Compile(raw)
+				if failure != nil {
+					return errors.New("invalid stored schema")
+				}
+				contract, lastHash = compiled, hash
+			}
+			var completion struct {
+				Choices []struct{ Message struct{ Content string } }
+			}
+			if json.Unmarshal(marshalBatch(body), &completion) != nil || len(completion.Choices) != 1 || contract.Validate(completion.Choices[0].Message.Content) != nil {
+				result["response"] = nil
+				result["error"] = map[string]string{"code": "invalid_json_schema_output", "message": "Completion does not satisfy the requested JSON schema."}
+			}
+		}
+		if err := writer.Encode(result); err != nil {
+			return err
+		}
+		if f, ok := output.(http.Flusher); ok {
+			f.Flush()
+		}
+		return nil
+	}
+	for scan.Scan() {
+		if len(bytes.TrimSpace(scan.Bytes())) == 0 {
+			continue
+		}
 		if backend == "openrouter" {
 			var item struct {
 				ID       string          `json:"custom_id"`
@@ -332,19 +437,19 @@ func adaptOpenAIResults(input, output *os.File, file openAIInputFile, backend st
 					Body   map[string]any `json:"body"`
 				} `json:"response"`
 			}
-			err := reader.Decode(&item)
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
+			reader := json.NewDecoder(bytes.NewReader(scan.Bytes()))
+			reader.UseNumber()
+			if err := reader.Decode(&item); err != nil {
 				return err
+			}
+			if reader.Decode(new(any)) != io.EOF {
+				return errors.New("invalid batch result row")
 			}
 			id, err := batchCustomID(file, item.ID)
 			if err != nil {
 				return err
 			}
-			result := openAIResult(id, item.Response.Status, item.Response.ID, item.Response.Body, len(item.Error) > 0 && string(item.Error) != "null")
-			if err := writer.Encode(result); err != nil {
+			if err := emit(id, item.Response.Status, item.Response.ID, item.Response.Body, len(item.Error) > 0 && string(item.Error) != "null"); err != nil {
 				return err
 			}
 			continue
@@ -367,11 +472,7 @@ func adaptOpenAIResults(input, output *os.File, file openAIInputFile, backend st
 				} `json:"candidates"`
 			} `json:"response"`
 		}
-		err := reader.Decode(&item)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
+		if err := json.Unmarshal(scan.Bytes(), &item); err != nil {
 			return err
 		}
 		if len(item.Request.Contents) != 1 || len(item.Request.Contents[0].Parts) == 0 {
@@ -407,12 +508,11 @@ func adaptOpenAIResults(input, output *os.File, file openAIInputFile, backend st
 					"message": map[string]string{"role": "assistant", "content": text.String()}}},
 			}
 		}
-		if err := writer.Encode(openAIResult(id, 200, item.Response.ID, data, data == nil)); err != nil {
+		if err := emit(id, 200, item.Response.ID, data, data == nil); err != nil {
 			return err
 		}
 	}
-	_, err := output.Seek(0, io.SeekStart)
-	return err
+	return scan.Err()
 }
 
 func batchCustomID(file openAIInputFile, raw string) (string, error) {

@@ -34,6 +34,9 @@ func (s *Server) googleEmbeddingAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeEmbeddingError(w, true, 401, "invalid_api_key")
 			return
 		}
+		if policy, ok := s.config.Priorities[telemetry.ClientKeyFrom(authenticated.Context())]; ok {
+			authenticated = authenticated.WithContext(model.WithPriority(authenticated.Context(), policy.Default))
+		}
 		next(w, authenticated)
 	}
 }

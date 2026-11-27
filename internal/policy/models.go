@@ -67,10 +67,11 @@ type BudgetSpec struct {
 }
 
 type AdmissionSpec struct {
-	MaxInFlight int      `json:"max_in_flight,omitempty"`
-	MaxPending  *int     `json:"max_pending,omitempty"`
-	WaitTimeout Duration `json:"wait_timeout,omitempty"`
-	Dynamic     *bool    `json:"dynamic,omitempty"`
+	ReserveInteractive int      `json:"reserve_interactive,omitempty"`
+	MaxInFlight        int      `json:"max_in_flight,omitempty"`
+	MaxPending         *int     `json:"max_pending,omitempty"`
+	WaitTimeout        Duration `json:"wait_timeout,omitempty"`
+	Dynamic            *bool    `json:"dynamic,omitempty"`
 }
 
 type ContinueSpec struct {
@@ -434,9 +435,10 @@ func compileModelAdmission(logicalID string, spec *AdmissionSpec, routeTimeout t
 	if spec == nil {
 		return cfg, nil
 	}
-	if spec.MaxInFlight < 0 || (spec.MaxPending != nil && *spec.MaxPending < 0) || spec.WaitTimeout.Duration < 0 {
+	if spec.ReserveInteractive < 0 || spec.MaxInFlight < 0 || (spec.MaxPending != nil && *spec.MaxPending < 0) || spec.WaitTimeout.Duration < 0 {
 		return AdmissionConfig{}, fmt.Errorf("model %q: admission limits must not be negative", logicalID)
 	}
+	cfg.ReserveInteractive = spec.ReserveInteractive
 	if spec.Dynamic != nil {
 		cfg.Dynamic = *spec.Dynamic
 	}

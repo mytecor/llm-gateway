@@ -21,8 +21,17 @@ func (c *CompiledConfig) validateBatch() error {
 	if b == nil {
 		return nil
 	}
-	if _, ok := c.ClientKeys[b.Client]; !ok {
-		return errors.New("batch.client must name a configured client API key")
+	clients := slices.Clone(b.Clients)
+	if b.Client != "" {
+		clients = append(clients, b.Client)
+	}
+	if len(clients) == 0 {
+		return errors.New("batch requires a configured client")
+	}
+	for _, id := range clients {
+		if _, ok := c.ClientKeys[id]; !ok {
+			return errors.New("batch.client must name a configured client API key")
+		}
 	}
 	if !batchPrefix.MatchString(b.Prefix) || len(b.Prefix) > 160 ||
 		!filepath.IsAbs(b.StateDir) || filepath.Clean(b.StateDir) == "/" {

@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/mytecor/llm-gateway/client"
 	"github.com/mytecor/llm-gateway/driverproto/batch"
 	"github.com/mytecor/llm-gateway/internal/config"
 	"github.com/mytecor/llm-gateway/internal/model"
@@ -21,6 +24,8 @@ type batchTestExecutor struct {
 	submissions int
 	uploaded    map[string]string
 	openRouter  bool
+	output      string
+	prepared    string
 }
 
 func (e *batchTestExecutor) Do(_ context.Context, _ model.Target, req model.ExecuteRequest) ([]byte, *model.CallError) {
@@ -50,13 +55,16 @@ func (e *batchTestExecutor) Do(_ context.Context, _ model.Target, req model.Exec
 		if err != nil || !strings.Contains(string(body), "Batch item 1") {
 			return nil, &model.CallError{Status: 500}
 		}
-		break
+		e.prepared = string(body)
 	case batch.Download:
 		data := "{\"status\":\"\"}\n"
 		if e.openRouter {
 			data = `{"custom_id":"2","response":{"status_code":200,"request_id":"req-2","body":{"choices":[]}},"error":null}
 {"custom_id":"1","response":null,"error":{"message":"provider rejected"}}
 `
+		}
+		if e.output != "" {
+			data = e.output
 		}
 		if err := os.WriteFile(cmd.File, []byte(data), 0o600); err != nil {
 			return nil, &model.CallError{Status: 500}
@@ -204,5 +212,83 @@ func TestBatchRoutesKeepTransfersScopedAndReconcileSubmission(t *testing.T) {
 	}
 	if out := do("GET", endpoint+"/results", "key", ""); out.Code != 200 || out.Body.String() != "{\"status\":\"\"}\n" {
 		t.Fatalf("results: %d %s", out.Code, out.Body.String())
+	}
+}
+
+func TestPreparedChatBatchMediaSchemaAndRetries(t *testing.T) {
+	for _, backend := range []string{"vertex", "openrouter"} {
+		t.Run(backend, func(t *testing.T) {
+			exec := &batchTestExecutor{openRouter: backend == "openrouter", uploaded: map[string]string{}}
+			cfg := &config.CompiledConfig{Raw: config.Config{Batch: &config.BatchConfig{
+				Clients: []string{"worker", "other"}, Model: "smart", Bucket: "bucket", Prefix: "catalog", StorageProvider: "storage", StateDir: filepath.Join(t.TempDir(), "state"),
+				Routes: map[string]config.BatchRoute{"smart": {Backend: backend, Native: "native", Provider: "upstream", ImageProviders: []string{"photos"}}},
+			}}, ClientKeys: map[string]string{"worker": "a", "other": "b"}}
+			server := &Server{config: cfg, mux: http.NewServeMux()}
+			if err := server.EnableBatch(exec); err != nil {
+				t.Fatal(err)
+			}
+			api := httptest.NewServer(server)
+			defer api.Close()
+			c, err := client.New(api.URL, "a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			workspace, err := c.PrepareBatch(t.Context(), "smart")
+			if err != nil {
+				t.Fatal(err)
+			}
+			photo, err := c.UploadBatchPhoto(t.Context(), workspace.ID, "image/jpeg", []byte("photo"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			item := client.BatchItem{CustomID: "first", Request: client.ChatRequest{Model: "smart", User: "Describe", Parts: []client.Part{{ImageURL: photo}}}, SchemaName: "caption", StrictSchema: json.RawMessage(`{"type":"integer"}`)}
+			items := []client.BatchItem{item, item}
+			items[1].CustomID = "second"
+			other, _ := client.New(api.URL, "b")
+			var httpErr *client.Error
+			if _, err := other.SubmitChatBatch(t.Context(), workspace.ID, slices.Values(items)); !errors.As(err, &httpErr) || httpErr.Status != 404 {
+				t.Fatalf("workspace accessible to another key: %v", err)
+			}
+			job, err := c.SubmitChatBatch(t.Context(), workspace.ID, slices.Values(items))
+			if backend == "vertex" {
+				if !errors.As(err, &httpErr) || httpErr.Status != 502 {
+					t.Fatalf("expected ambiguous submission: %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			job, err = c.SubmitChatBatch(t.Context(), workspace.ID, slices.Values(items))
+			if err != nil || job.Status != "completed" || exec.submissions != 1 {
+				t.Fatalf("retry: %+v, %v", job, err)
+			}
+			native := exec.uploaded[batchInputFile]
+			if exec.openRouter {
+				native = exec.prepared
+			}
+			if strings.Contains(native, "batch-file://") || !strings.Contains(native, "gs://bucket/catalog/") || !strings.Contains(native, `"responseJsonSchema":{"type":"integer"}`) {
+				t.Fatalf("bad provider input %s", native)
+			}
+			items[1].CustomID = "changed"
+			if _, err := c.SubmitChatBatch(t.Context(), workspace.ID, slices.Values(items)); !errors.As(err, &httpErr) || httpErr.Status != 409 {
+				t.Fatalf("conflicting metadata accepted: %v", err)
+			}
+			for _, row := range []struct{ line, content string }{{"2", "false"}, {"1", "123"}} {
+				if exec.openRouter {
+					exec.output += `{"custom_id":"` + row.line + `","response":{"status_code":200,"body":{"choices":[{"finish_reason":"stop","message":{"content":"` + row.content + `"}}]}}}` + "\n"
+				} else {
+					exec.output += `{"request":{"contents":[{"parts":[{"text":"[Batch item ` + row.line + `]"}]}]},"response":{"candidates":[{"finishReason":"STOP","content":{"parts":[{"thought":true,"text":"omit"},{"text":"` + row.content + `"}]}}]}}` + "\n"
+				}
+			}
+			var results []client.BatchResult
+			for result, err := range c.StreamBatchResults(t.Context(), job.OutputFileID) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				results = append(results, result)
+			}
+			if len(results) != 2 || results[0].CustomID != "second" || results[0].Error == nil || results[0].Error.Code != "invalid_json_schema_output" || results[1].Content != "123" || results[1].FinishReason != "stop" || results[1].CustomID != "first" {
+				t.Fatalf("invalid results: %+v", results)
+			}
+		})
 	}
 }

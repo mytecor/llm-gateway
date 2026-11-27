@@ -7,6 +7,7 @@ import (
 	"errors"
 	"image"
 	"image/color"
+	"image/gif"
 	"image/jpeg"
 	"image/png"
 	"math"
@@ -20,6 +21,27 @@ const (
 	gemma2ImageTokenBudget    = 280
 	maxAlignedImagePixels     = 16_777_216
 )
+
+// gifFirstFrame converts animated and still GIFs for runtimes accepting PNG.
+func gifFirstFrame(data string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		return "", err
+	}
+	cfg, err := gif.DecodeConfig(bytes.NewReader(raw))
+	if err != nil || int64(cfg.Width)*int64(cfg.Height) > maxAlignedImagePixels {
+		return "", errors.New("invalid GIF dimensions")
+	}
+	frame, err := gif.Decode(bytes.NewReader(raw))
+	if err != nil {
+		return "", err
+	}
+	var out bytes.Buffer
+	if err := png.Encode(&out, frame); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(out.Bytes()), nil
+}
 
 // alignEmbeddingGemma2Image decodes an inline JPEG/PNG/WebP image, applies EXIF
 // orientation, scales it with Pillow-compatible bicubic resampling onto
@@ -62,6 +84,8 @@ func decodeImageConfig(raw []byte, mimeType string) (image.Config, error) {
 	switch mimeType {
 	case "image/jpeg":
 		return jpeg.DecodeConfig(r)
+	case "image/gif":
+		return gif.DecodeConfig(r)
 	case "image/png":
 		return png.DecodeConfig(r)
 	case "image/webp":
@@ -76,6 +100,8 @@ func decodeImage(raw []byte, mimeType string) (image.Image, error) {
 	switch mimeType {
 	case "image/jpeg":
 		return jpeg.Decode(r)
+	case "image/gif":
+		return gif.Decode(r)
 	case "image/png":
 		return png.Decode(r)
 	case "image/webp":

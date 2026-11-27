@@ -105,7 +105,20 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 			writeAPIError(w, http.StatusUnauthorized, "invalid_api_key")
 			return
 		}
-		next(w, authenticated)
+		priority := config.PriorityPolicy{Default: model.PriorityNormal, Maximum: model.PriorityInteractive}
+		if key, ok := s.config.Priorities[telemetry.ClientKeyFrom(authenticated.Context())]; ok {
+			priority = key
+		}
+		effective := priority.Default
+		if values := r.Header.Values("X-LLM-Priority"); len(values) > 0 {
+			requested, ok := model.ParsePriority(values[0])
+			if !ok || len(values) != 1 {
+				writeAPIError(w, 400, "invalid_priority")
+				return
+			}
+			effective = min(requested, priority.Maximum)
+		}
+		next(w, authenticated.WithContext(model.WithPriority(authenticated.Context(), effective)))
 	}
 }
 

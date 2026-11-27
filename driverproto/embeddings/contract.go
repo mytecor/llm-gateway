@@ -89,6 +89,7 @@ func (b *Blob) UnmarshalJSON(data []byte) error {
 }
 
 type Item struct {
+	Truncate   bool   `json:"truncate,omitempty"`
 	Parts      []Part `json:"parts,omitempty"`
 	TokenIDs   []int  `json:"token_ids,omitempty"`
 	TaskType   string `json:"task_type,omitempty"`
@@ -138,6 +139,9 @@ func (r *Request) Validate() (Features, error) {
 		if (len(i.Parts) == 0) == (len(i.TokenIDs) == 0) {
 			return f, errors.New("each input requires parts or token IDs, exclusively")
 		}
+		if i.Truncate && len(i.TokenIDs) > 0 {
+			return f, errors.New("truncate requires text input")
+		}
 		if len(i.Parts) > 128 || len(i.TokenIDs) > MaxTokens {
 			return f, errors.New("input exceeds the element limit")
 		}
@@ -165,7 +169,7 @@ func (r *Request) Validate() (Features, error) {
 				return f, errors.New("invalid media base64")
 			}
 			switch b.MIMEType {
-			case "image/jpeg", "image/png", "image/webp":
+			case "image/jpeg", "image/png", "image/webp", "image/gif":
 				f.Images = true
 			case "audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3", "audio/flac", "audio/ogg":
 				f.Audio = true
@@ -182,6 +186,9 @@ func (r *Request) Validate() (Features, error) {
 		case "RETRIEVAL_QUERY", "RETRIEVAL_DOCUMENT", "SEMANTIC_SIMILARITY", "CLASSIFICATION", "CLUSTERING", "QUESTION_ANSWERING", "FACT_VERIFICATION", "CODE_RETRIEVAL_QUERY":
 		default:
 			return f, errors.New("unsupported task type")
+		}
+		if media && i.Truncate {
+			return f, errors.New("truncate requires text input")
 		}
 		if media && (i.TaskType != "" || i.Title != "") {
 			return f, errors.New("task instructions and titles are supported only for text inputs")
@@ -201,6 +208,7 @@ func ParseOpenAI(data []byte) (Request, string, error) {
 func ParseOpenAIWithDefaultModel(data []byte, defaultModel string) (Request, string, error) {
 	var wire struct {
 		Model      string          `json:"model"`
+		Truncate   bool            `json:"truncate,omitempty"`
 		Input      json.RawMessage `json:"input"`
 		Encoding   string          `json:"encoding_format"`
 		Dimensions int             `json:"dimensions"`
@@ -223,7 +231,7 @@ func ParseOpenAIWithDefaultModel(data []byte, defaultModel string) (Request, str
 		r.Model = defaultModel
 	}
 	makeItem := func(raw json.RawMessage) (Item, error) {
-		i := Item{Dimensions: wire.Dimensions, TaskType: wire.Task, Title: wire.Title}
+		i := Item{Truncate: wire.Truncate, Dimensions: wire.Dimensions, TaskType: wire.Task, Title: wire.Title}
 		s := bytes.TrimSpace(raw)
 		if len(s) == 0 {
 			return i, errors.New("input is required")

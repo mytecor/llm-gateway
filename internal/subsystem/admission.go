@@ -1,15 +1,17 @@
 package subsystem
 
 import (
-	"github.com/mytecor/llm-gateway/internal/model"
-	"github.com/mytecor/llm-gateway/internal/policy"
-	"github.com/mytecor/llm-gateway/internal/telemetry"
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
+
+	"github.com/mytecor/llm-gateway/internal/model"
+	"github.com/mytecor/llm-gateway/internal/policy"
+	"github.com/mytecor/llm-gateway/internal/telemetry"
 )
 
 type AdmissionController struct {
@@ -22,7 +24,9 @@ type AdmissionController struct {
 type admissionQueue struct {
 	inFlight int
 	limit    int
-	waiters  []chan struct{}
+	reserve  int
+	pending  int
+	waiters  [3][]chan struct{}
 }
 
 func NewAdmissionController(metrics *telemetry.Metrics, now func() time.Time) *AdmissionController {
@@ -48,8 +52,12 @@ func (ac *AdmissionController) Admit(ctx context.Context, route string, policy p
 	}
 	q.limit = policy.MaxInFlight
 
-	if q.inFlight < policy.MaxInFlight {
+	q.reserve = policy.ReserveInteractive
+	priority := model.RequestPriority(ctx)
+	ac.dispatch(q, route, priority)
+	if q.available(priority) {
 		q.inFlight++
+		ac.dispatch(q, route, model.PriorityBackground)
 		if ac.metrics != nil {
 			ac.metrics.ObserveRouteInFlight(route, q.inFlight)
 		}
@@ -58,7 +66,7 @@ func (ac *AdmissionController) Admit(ctx context.Context, route string, policy p
 	}
 
 	// Queue check
-	if policy.MaxPending <= 0 || len(q.waiters) >= policy.MaxPending {
+	if policy.MaxPending <= 0 || q.pending >= policy.MaxPending {
 		ac.mu.Unlock()
 		if ac.metrics != nil {
 			ac.metrics.ObserveRouteQueueRejection(route, "max_pending")
@@ -73,10 +81,11 @@ func (ac *AdmissionController) Admit(ctx context.Context, route string, policy p
 	}
 
 	ch := make(chan struct{}, 1)
-	q.waiters = append(q.waiters, ch)
+	q.waiters[priority] = append(q.waiters[priority], ch)
+	q.pending++
 	waitStart := ac.now()
 	if ac.metrics != nil {
-		ac.metrics.ObserveRoutePending(route, len(q.waiters))
+		ac.metrics.ObserveRoutePending(route, priority.String(), len(q.waiters[priority]))
 	}
 	ac.mu.Unlock()
 
@@ -89,7 +98,7 @@ func (ac *AdmissionController) Admit(ctx context.Context, route string, policy p
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			ac.mu.Lock()
-			ac.removeWaiter(q, route, ch)
+			ac.removeWaiter(q, route, priority, ch)
 			ac.mu.Unlock()
 			return nil, model.RouteTimeoutError()
 		}
@@ -104,13 +113,13 @@ func (ac *AdmissionController) Admit(ctx context.Context, route string, policy p
 	select {
 	case <-ch:
 		if ac.metrics != nil {
-			ac.metrics.ObserveRouteQueueWait(route, ac.now().Sub(waitStart))
+			ac.metrics.ObserveRouteQueueWait(route, priority.String(), ac.now().Sub(waitStart))
 		}
 		return ac.makeReleaser(route), nil
 
 	case <-ctx.Done():
 		ac.mu.Lock()
-		ac.removeWaiter(q, route, ch)
+		ac.removeWaiter(q, route, priority, ch)
 		ac.mu.Unlock()
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, model.RouteTimeoutError()
@@ -119,7 +128,7 @@ func (ac *AdmissionController) Admit(ctx context.Context, route string, policy p
 
 	case <-timer.C:
 		ac.mu.Lock()
-		ac.removeWaiter(q, route, ch)
+		ac.removeWaiter(q, route, priority, ch)
 		ac.mu.Unlock()
 		if deadlineLimited {
 			return nil, model.RouteTimeoutError()
@@ -137,15 +146,16 @@ func (ac *AdmissionController) Admit(ctx context.Context, route string, policy p
 	}
 }
 
-func (ac *AdmissionController) removeWaiter(q *admissionQueue, route string, target chan struct{}) {
-	for i, w := range q.waiters {
+func (ac *AdmissionController) removeWaiter(q *admissionQueue, route string, priority model.Priority, target chan struct{}) {
+	for i, w := range q.waiters[priority] {
 		if w == target {
-			q.waiters = append(q.waiters[:i], q.waiters[i+1:]...)
+			q.waiters[priority] = slices.Delete(q.waiters[priority], i, i+1)
+			q.pending--
 			break
 		}
 	}
 	if ac.metrics != nil {
-		ac.metrics.ObserveRoutePending(route, len(q.waiters))
+		ac.metrics.ObserveRoutePending(route, priority.String(), len(q.waiters[priority]))
 	}
 	// If a slot was sent to target right before cancel/timeout, pass it along
 	select {
@@ -156,17 +166,30 @@ func (ac *AdmissionController) removeWaiter(q *admissionQueue, route string, tar
 }
 
 func (ac *AdmissionController) releaseSlotLocked(q *admissionQueue, route string) {
-	if len(q.waiters) > 0 && (q.limit <= 0 || q.inFlight <= q.limit) {
-		next := q.waiters[0]
-		q.waiters = q.waiters[1:]
-		if ac.metrics != nil {
-			ac.metrics.ObserveRoutePending(route, len(q.waiters))
-		}
-		next <- struct{}{}
-	} else {
-		q.inFlight--
-		if ac.metrics != nil {
+	q.inFlight--
+	ac.dispatch(q, route, model.PriorityBackground)
+	ac.metrics.ObserveRouteInFlight(route, q.inFlight)
+}
+
+func (q *admissionQueue) available(p model.Priority) bool {
+	limit := q.limit
+	if p == model.PriorityBackground && limit > q.reserve {
+		limit -= q.reserve
+	}
+	return q.inFlight < limit
+}
+
+func (ac *AdmissionController) dispatch(q *admissionQueue, route string, minimum model.Priority) {
+	for p := model.PriorityInteractive; p >= minimum; p-- {
+		for len(q.waiters[p]) > 0 && q.available(p) {
+			next := q.waiters[p][0]
+			q.waiters[p][0] = nil
+			q.waiters[p] = q.waiters[p][1:]
+			q.pending--
+			q.inFlight++
+			ac.metrics.ObserveRoutePending(route, p.String(), len(q.waiters[p]))
 			ac.metrics.ObserveRouteInFlight(route, q.inFlight)
+			next <- struct{}{}
 		}
 	}
 }

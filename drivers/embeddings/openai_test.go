@@ -1,11 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/gif"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/mytecor/llm-gateway/driverproto/embeddings"
@@ -112,4 +119,84 @@ func openAITestExecutor(t *testing.T, url string) *executor {
 		t.Fatal(err)
 	}
 	return exec
+}
+
+func TestTruncateRetriesWithPrefixAndEOS(t *testing.T) {
+	embeds, tokenizations := 0, 0
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tokenize":
+			var body struct{ Content string }
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Content != "title: T | text: long" {
+				t.Error("tokenizer lost title or text", err)
+			}
+			tokenizations++
+			ids := make([]int, embeddings.MaxTokens+10)
+			for i := range ids {
+				ids[i] = i + 10
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"tokens": ids})
+		case "/v1/embeddings":
+			embeds++
+			if embeds == 1 {
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte(`{"error":{"code":"context_length_exceeded"}}`))
+				return
+			}
+			var body struct{ Input [][]int }
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Input) != 1 {
+				t.Error("invalid token request", err)
+				return
+			}
+			ids := body.Input[0]
+			if len(ids) != embeddings.MaxTokens || ids[0] != 2 || ids[1] != 10 || ids[len(ids)-2] != embeddings.MaxTokens+7 || ids[len(ids)-1] != 1 {
+				t.Error("incorrect truncated sequence")
+			}
+			v := make([]float32, 768)
+			v[0] = 1
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"index": 0, "embedding": v}}, "usage": map[string]int{"prompt_tokens": len(ids)}})
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+		}
+	}))
+	defer api.Close()
+	executor := openAITestExecutor(t, api.URL)
+	_, failure := executor.do(t.Context(), command{Kind: "embeddings", Model: "m", Body: json.RawMessage(`{"model":"m","items":[{"parts":[{"text":"long"}],"task_type":"RETRIEVAL_DOCUMENT","title":"T","truncate":true}]}`)})
+	if failure != nil || embeds != 2 || tokenizations != 1 {
+		t.Fatalf("retry failed: %+v calls %d/%d", failure, embeds, tokenizations)
+	}
+}
+
+func TestGIFFirstFrameSentAsPNG(t *testing.T) {
+	palette := color.Palette{color.RGBA{255, 0, 0, 255}, color.RGBA{0, 0, 255, 255}}
+	first := image.NewPaletted(image.Rect(0, 0, 4, 4), palette)
+	second := image.NewPaletted(first.Rect, palette)
+	for i := range second.Pix {
+		second.Pix[i] = 1
+	}
+	var raw bytes.Buffer
+	if err := gif.EncodeAll(&raw, &gif.GIF{Image: []*image.Paletted{first, second}, Delay: []int{0, 0}}); err != nil {
+		t.Fatal(err)
+	}
+	item := embeddings.Item{Parts: []embeddings.Part{{InlineData: &embeddings.Blob{MIMEType: "image/gif", Data: base64.StdEncoding.EncodeToString(raw.Bytes())}}}}
+	for _, align := range []string{"", imageAlignEmbeddingGemma2} {
+		e := executor{config: config{ImageAlign: align}}
+		input, err := e.openAIInput(t.Context(), "native", item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parts := input.(map[string]any)["content"].([]openAIContent)
+		data, ok := strings.CutPrefix(parts[0].Image["url"], "data:image/png;base64,")
+		if !ok {
+			t.Fatal("expected PNG")
+		}
+		decoded, err2 := png.Decode(base64.NewDecoder(base64.StdEncoding, strings.NewReader(data)))
+		if err2 != nil {
+			t.Fatal(err2)
+		}
+		r, _, b, _ := decoded.At(0, 0).RGBA()
+		if r != 65535 || b != 0 {
+			t.Fatal("expected red first frame")
+		}
+	}
 }

@@ -24,7 +24,7 @@ func TestOpenRouterBatchPreparationSignsOnlyManagedImage(t *testing.T) {
 	dir := t.TempDir()
 	const image = "gs://bucket/example/photos/file.jpg"
 	requests := filepath.Join(dir, "requests.jsonl")
-	payload := `{"request":{"contents":[{"parts":[{"text":"describe"},{"fileData":{"fileUri":"` + image + `"}}]}],"systemInstruction":{"parts":[{"text":"instruction"}]},"generationConfig":{"maxOutputTokens":900,"responseMimeType":"application/json"}}}` + "\n"
+	payload := `{"response_format":{"type":"json_schema","json_schema":{"name":"caption","strict":true,"schema":{"type":"string"}}},"request":{"contents":[{"parts":[{"text":"describe"},{"fileData":{"fileUri":"` + image + `"}}]}],"systemInstruction":{"parts":[{"text":"instruction"}]},"generationConfig":{"maxOutputTokens":900,"responseMimeType":"application/json"}}}` + "\n"
 	if err := os.WriteFile(requests, []byte(payload), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -78,6 +78,9 @@ func TestOpenRouterBatchPreparationSignsOnlyManagedImage(t *testing.T) {
 		len(batch.Requests[0].Body.Messages) != 2 || json.Unmarshal(batch.Requests[0].Body.Messages[1], &user) != nil ||
 		len(user.Content) != 2 || batch.Requests[0].Body.Reasoning.Effort != "low" {
 		t.Fatal("unexpected OpenRouter request")
+	}
+	if !strings.Contains(string(data), `"json_schema":{"name":"caption","strict":true,"schema":{"type":"string"}}`) {
+		t.Fatalf("response format lost: %s", data)
 	}
 	signed, err := url.Parse(user.Content[1].Image.URL)
 	if err != nil || signed.Host != "storage.googleapis.com" || signed.Path != "/bucket/example/photos/file.jpg" {

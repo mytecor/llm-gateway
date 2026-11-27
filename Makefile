@@ -50,7 +50,7 @@ check-config: build
 
 # These unit packages never discover or start a bundled driver.
 test-unit:
-	go test ./driverproto/... ./internal/model ./internal/policy ./internal/session ./internal/structured ./internal/transform ./internal/telemetry
+	go test ./client ./driverproto/... ./internal/model ./internal/policy ./internal/session ./internal/structured ./internal/transform ./internal/telemetry
 
 # The core integration suite validates all bundled driver contracts.
 test-core: build-drivers

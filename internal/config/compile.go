@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mytecor/llm-gateway/internal/model"
 	"github.com/mytecor/llm-gateway/internal/policy"
 	"github.com/mytecor/llm-gateway/internal/provider"
 	"github.com/mytecor/llm-gateway/internal/telemetry"
@@ -22,6 +23,7 @@ func CompileConfig(prepared PreparedConfig) (*CompiledConfig, error) {
 		Raw:        cfg,
 		Logger:     telemetry.NewGatewayLogger(cfg.LogLevel),
 		Providers:  make(map[string]provider.Provider, len(cfg.Providers)),
+		Priorities: make(map[string]PriorityPolicy),
 		ClientKeys: make(map[string]string, len(cfg.ClientAPIKeys)),
 	}
 	for _, clientKey := range cfg.ClientAPIKeys {
@@ -35,6 +37,26 @@ func CompileConfig(prepared PreparedConfig) (*CompiledConfig, error) {
 		if clientKey.Key == "" {
 			return nil, fmt.Errorf("client key %q must not be empty", id)
 		}
+		for _, existing := range compiled.ClientKeys {
+			if existing == clientKey.Key {
+				return nil, fmt.Errorf("duplicate credential for key %q", id)
+			}
+		}
+		def, ok := model.ParsePriority(clientKey.DefaultPriority)
+		if !ok && clientKey.DefaultPriority != "" {
+			return nil, fmt.Errorf("invalid default priority for key %q", id)
+		}
+		maximum := def
+		if clientKey.MaxPriority != "" {
+			maximum, ok = model.ParsePriority(clientKey.MaxPriority)
+			if clientKey.DefaultPriority == "" {
+				def = min(def, maximum)
+			}
+			if !ok || maximum < def {
+				return nil, fmt.Errorf("invalid maximum priority for key %q", id)
+			}
+		}
+		compiled.Priorities[id] = PriorityPolicy{Default: def, Maximum: maximum}
 		compiled.ClientKeys[id] = clientKey.Key
 	}
 	for _, rawProvider := range cfg.Providers {

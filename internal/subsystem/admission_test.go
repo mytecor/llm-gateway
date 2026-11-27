@@ -153,3 +153,75 @@ func TestAdmissionWaitConsumesLogicalDeadline(t *testing.T) {
 		t.Fatalf("admission ignored logical deadline and waited %s", elapsed)
 	}
 }
+
+func TestPriorityHandoffAndReserve(t *testing.T) {
+	for _, limit := range []int{1, 2} {
+		ac := NewAdmissionController(nil, nil)
+		p := policy.AdmissionConfig{MaxInFlight: limit, ReserveInteractive: 1, MaxPending: 4, WaitTimeout: 2 * time.Second}
+		admit := func(priority model.Priority) (func(), *model.CallError) {
+			return ac.Admit(model.WithPriority(t.Context(), priority), "test", p, time.Time{})
+		}
+		held, err := admit(model.PriorityBackground)
+		if err != nil {
+			t.Fatal(err)
+		}
+		type granted struct {
+			p       model.Priority
+			release func()
+		}
+		grants := make(chan granted, 3)
+		queue := func(priority model.Priority, count int) {
+			go func() {
+				rel, err := admit(priority)
+				if err != nil {
+					return
+				}
+				grants <- granted{priority, rel}
+			}()
+			deadline := time.Now().Add(time.Second)
+			for time.Now().Before(deadline) {
+				ac.mu.Lock()
+				n := ac.routes["test"].pending
+				ac.mu.Unlock()
+				if n == count {
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+			t.Fatal("request did not queue", priority)
+		}
+		queue(model.PriorityBackground, 1)
+		var reserved func()
+		if limit == 2 {
+			reserved, err = admit(model.PriorityInteractive)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reserved()
+		}
+		queue(model.PriorityNormal, 2)
+		queue(model.PriorityInteractive, 3)
+		held()
+		for _, want := range []model.Priority{model.PriorityInteractive, model.PriorityNormal, model.PriorityBackground} {
+			// At limit two a background request needs both reserved and occupied slots free.
+			if limit == 2 && want == model.PriorityBackground {
+				ac.mu.Lock()
+				count := ac.routes["test"].inFlight
+				ac.mu.Unlock()
+				if count != 1 {
+					t.Fatalf("expected background waiter to leave the reserved slot free, in-flight=%d", count)
+				}
+				reserved()
+			}
+			select {
+			case g := <-grants:
+				if g.p != want {
+					t.Fatalf("got %v before %v", g.p, want)
+				}
+				g.release()
+			case <-time.After(time.Second):
+				t.Fatalf("no grant for %v", want)
+			}
+		}
+	}
+}

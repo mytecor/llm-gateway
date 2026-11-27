@@ -76,7 +76,12 @@ func Parse(body []byte) (*Contract, *model.CallError) {
 	if json.Unmarshal(envelope.ResponseFormat, &format) != nil || len(format.JSONSchema.Schema) == 0 {
 		return nil, Error(400, "invalid_json_schema")
 	}
-	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(format.JSONSchema.Schema))
+	return Compile(format.JSONSchema.Schema)
+}
+
+// Compile prepares a schema using only resources embedded in the request.
+func Compile(raw json.RawMessage) (*Contract, *model.CallError) {
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
 	if err != nil {
 		return nil, Error(400, "invalid_json_schema")
 	}
@@ -92,7 +97,7 @@ func Parse(body []byte) (*Contract, *model.CallError) {
 		return nil, Error(400, "invalid_json_schema")
 	}
 	return &Contract{
-		Schema:    string(format.JSONSchema.Schema),
+		Schema:    string(raw),
 		validator: schema,
 		rootProps: extractRootProps(doc),
 	}, nil

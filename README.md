@@ -60,6 +60,21 @@ Authorization: Bearer <client_api_key>
 
 ---
 
+## Client priorities and Go SDK
+
+Set `default_priority` on a client key to `interactive`, `normal` (default), or
+`background`. The optional `max_priority` defaults to the key’s default priority.
+A request can select its class with `X-LLM-Priority` up to that ceiling. Within
+each class the route admits waiting requests in FIFO order. Running work finishes
+normally. `reserve_interactive` leaves the specified number of slots available
+to higher classes when the route limit exceeds the reserve. Pending gauges and
+queue-wait histograms include the effective `priority` label.
+
+The [Go client](./client) accepts the gateway root or its `/v1` URL and exposes
+Chat, ChatJSON, Decide, Embed, EmbedBatch and the [batch workflow](./docs/batches.md).
+Use `client.WithPriority` for per-client defaults and `errors.As` with
+`*client.Error` to read the server’s retry delay and route concurrency limit.
+
 ## Quick Start
 
 ### Building

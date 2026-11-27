@@ -96,6 +96,7 @@ func (s gcsURLSigner) sign(bucket, object string, now time.Time) (string, error)
 }
 
 type openRouterInputRow struct {
+	Format  json.RawMessage `json:"response_format,omitempty"`
 	Request struct {
 		Contents []struct {
 			Parts []struct {
@@ -109,9 +110,10 @@ type openRouterInputRow struct {
 			Parts []struct{ Text string } `json:"parts"`
 		} `json:"systemInstruction"`
 		Config struct {
-			Max      int    `json:"maxOutputTokens"`
-			MIME     string `json:"responseMimeType"`
-			Thinking *struct {
+			Temperature *float64 `json:"temperature,omitempty"`
+			Max         int      `json:"maxOutputTokens"`
+			MIME        string   `json:"responseMimeType"`
+			Thinking    *struct {
 				Level string `json:"thinkingLevel"`
 			} `json:"thinkingConfig"`
 		} `json:"generationConfig"`
@@ -196,7 +198,12 @@ func prepareOpenRouterBatch(ctx context.Context, provider ProviderConfig, comman
 			},
 			"max_tokens": row.Request.Config.Max,
 		}
-		if row.Request.Config.MIME == "application/json" {
+		if row.Request.Config.Temperature != nil {
+			body["temperature"] = *row.Request.Config.Temperature
+		}
+		if len(row.Format) > 0 {
+			body["response_format"] = row.Format
+		} else if row.Request.Config.MIME == "application/json" {
 			body["response_format"] = map[string]string{"type": "json_object"}
 		}
 		effort := strings.TrimSpace(command.ReasoningEffort)
